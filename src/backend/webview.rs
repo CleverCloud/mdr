@@ -8,8 +8,12 @@ use crate::core::markdown::{parse_markdown, GITHUB_CSS};
 use crate::core::toc;
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let base_dir = file_path.parent()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .unwrap_or_default();
     let markdown_content = std::fs::read_to_string(&file_path)?;
     let html_body = parse_markdown(&markdown_content);
+    let html_body = resolve_local_images(&html_body, &base_dir);
     let toc_entries = toc::extract_toc(&markdown_content);
     let full_html = build_html(&html_body, &toc_entries);
 
@@ -33,14 +37,15 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             while watcher_rx.try_recv().is_ok() {}
             if let Ok(content) = std::fs::read_to_string(&file_path) {
                 let new_html = parse_markdown(&content);
+                let new_html = resolve_local_images(&new_html, &base_dir);
                 let new_toc = toc::extract_toc(&content);
                 let toc_html = build_toc_html(&new_toc);
 
-                let escaped_body = new_html.replace('\\', "\\\\").replace('`', "\\`");
-                let escaped_toc = toc_html.replace('\\', "\\\\").replace('`', "\\`");
+                let body_json = serde_json::to_string(&new_html).unwrap_or_default();
+                let toc_json = serde_json::to_string(&toc_html).unwrap_or_default();
                 let js = format!(
-                    "document.querySelector('.content').innerHTML = `{}`; document.querySelector('.sidebar ul').innerHTML = `{}`;",
-                    escaped_body, escaped_toc
+                    "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {};",
+                    body_json, toc_json
                 );
                 let _ = webview.evaluate_script(&js);
             }
@@ -54,6 +59,29 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     });
+}
+
+/// Resolve relative image paths to absolute file:// URLs for local file display.
+fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
+    use regex::Regex;
+    let re = Regex::new(r#"<img\s+src="([^"]+)""#).unwrap();
+    re.replace_all(html, |caps: &regex::Captures| {
+        let src = &caps[1];
+        // Skip URLs (http://, https://, data:, file://)
+        if src.starts_with("http://") || src.starts_with("https://")
+            || src.starts_with("data:") || src.starts_with("file://")
+        {
+            return caps[0].to_string();
+        }
+        // Resolve relative path to absolute file:// URL
+        let abs_path = base_dir.join(src);
+        if abs_path.exists() {
+            format!("<img src=\"file://{}\"", abs_path.display())
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .to_string()
 }
 
 fn build_toc_html(entries: &[toc::TocEntry]) -> String {

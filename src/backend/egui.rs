@@ -7,11 +7,15 @@ use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let base_dir = file_path.parent()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .unwrap_or_default();
     let raw_markdown = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| format!("# Error\nCould not read `{}`: {}", file_path.display(), e));
 
     let toc_entries = toc::extract_toc(&raw_markdown);
     let markdown = preprocess_mermaid_for_egui(&raw_markdown);
+    let markdown = resolve_local_image_paths(&markdown, &base_dir);
     let (has_preamble, sections) = split_by_headings(&markdown);
 
     let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
@@ -34,6 +38,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 has_preamble,
                 caches: Vec::new(),
                 file_path: file_path_clone,
+                base_dir,
                 watcher_rx,
                 toc_entries,
                 scroll_to_section: None,
@@ -83,6 +88,7 @@ struct MdrApp {
     has_preamble: bool,
     caches: Vec<CommonMarkCache>,
     file_path: PathBuf,
+    base_dir: PathBuf,
     watcher_rx: Receiver<()>,
     toc_entries: Vec<TocEntry>,
     scroll_to_section: Option<usize>,
@@ -96,6 +102,7 @@ impl eframe::App for MdrApp {
             if let Ok(content) = std::fs::read_to_string(&self.file_path) {
                 self.toc_entries = toc::extract_toc(&content);
                 self.markdown = preprocess_mermaid_for_egui(&content);
+                self.markdown = resolve_local_image_paths(&self.markdown, &self.base_dir);
                 let (has_preamble, sections) = split_by_headings(&self.markdown);
                 self.has_preamble = has_preamble;
                 self.sections = sections;
@@ -167,4 +174,28 @@ impl eframe::App for MdrApp {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
+}
+
+/// Resolve relative image paths in markdown to absolute file:// URLs.
+/// Handles ![alt](relative/path.png) syntax.
+fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {
+    use regex::Regex;
+    let re = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    re.replace_all(markdown, |caps: &regex::Captures| {
+        let alt = &caps[1];
+        let src = &caps[2];
+        // Skip URLs and data URIs
+        if src.starts_with("http://") || src.starts_with("https://")
+            || src.starts_with("data:") || src.starts_with("file://")
+        {
+            return caps[0].to_string();
+        }
+        let abs_path = base_dir.join(src);
+        if abs_path.exists() {
+            format!("![{}](file://{})", alt, abs_path.display())
+        } else {
+            caps[0].to_string()
+        }
+    })
+    .to_string()
 }

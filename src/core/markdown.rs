@@ -11,7 +11,7 @@ pub fn parse_markdown(content: &str) -> String {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
-    options.render.unsafe_ = true;
+    options.render.unsafe_ = false;
 
     let html = markdown_to_html(content, &options);
     let html = add_heading_ids(&html);

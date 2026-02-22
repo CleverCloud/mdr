@@ -401,11 +401,32 @@ fn markdown_to_lines(content: &str) -> Vec<Line<'static>> {
             continue;
         }
 
+        // Image: ![alt](url)
+        if line.trim_start().starts_with("![") {
+            if let Some(alt) = extract_image_alt(line) {
+                let label = if alt.is_empty() { "image".to_string() } else { alt };
+                lines.push(Line::from(Span::styled(
+                    format!("[Image: {}]", label),
+                    Style::default().fg(Color::Magenta).italic(),
+                )));
+                continue;
+            }
+        }
+
         // Regular text with inline formatting
         lines.push(parse_inline_formatting(line));
     }
 
     lines
+}
+
+/// Extract alt text from a markdown image line: ![alt](url)
+fn extract_image_alt(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let start = trimmed.find("![")?;
+    let rest = &trimmed[start + 2..];
+    let end = rest.find("](")?;
+    Some(rest[..end].to_string())
 }
 
 /// Try to parse an ordered list item, returns (number prefix, text)
@@ -487,6 +508,38 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                     strike,
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
                 ));
+            }
+            '!' if chars.peek() == Some(&'[') => {
+                // Image: ![alt](url)
+                chars.next(); // consume '['
+                let mut alt = String::new();
+                let mut found_close = false;
+                for ch in chars.by_ref() {
+                    if ch == ']' { found_close = true; break; }
+                    alt.push(ch);
+                }
+                if found_close && chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut _url = String::new();
+                    for ch in chars.by_ref() {
+                        if ch == ')' { break; }
+                        _url.push(ch);
+                    }
+                    if !current.is_empty() {
+                        spans.push(Span::raw(current.clone()));
+                        current.clear();
+                    }
+                    let label = if alt.is_empty() { "image".to_string() } else { alt };
+                    spans.push(Span::styled(
+                        format!("[Image: {}]", label),
+                        Style::default().fg(Color::Magenta).italic(),
+                    ));
+                } else {
+                    current.push('!');
+                    current.push('[');
+                    current.push_str(&alt);
+                    if found_close { current.push(']'); }
+                }
             }
             '[' => {
                 // Link: [text](url)

@@ -11,15 +11,55 @@ struct Cli {
     /// Markdown file to render
     file: PathBuf,
 
-    /// Rendering backend to use
-    #[arg(short, long, default_value = "egui", value_parser = parse_backend)]
+    /// Rendering backend to use [default: auto-detect]
+    #[arg(short, long, default_value = "auto", value_parser = parse_backend)]
     backend: String,
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
     match s {
-        "egui" | "webview" | "tui" => Ok(s.to_string()),
-        _ => Err(format!("unknown backend '{}', expected 'egui', 'webview', or 'tui'", s)),
+        "auto" | "egui" | "webview" | "tui" => Ok(s.to_string()),
+        _ => Err(format!("unknown backend '{}', expected 'auto', 'egui', 'webview', or 'tui'", s)),
+    }
+}
+
+/// Auto-detect the best backend for the current environment.
+fn detect_backend() -> &'static str {
+    // If no DISPLAY/WAYLAND and we have a TTY → TUI
+    // If SSH session → TUI
+    // Otherwise → egui (or first available GUI backend)
+    let is_ssh = std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok();
+    let has_display = std::env::var("DISPLAY").is_ok()
+        || std::env::var("WAYLAND_DISPLAY").is_ok()
+        || cfg!(target_os = "macos")
+        || cfg!(target_os = "windows");
+
+    if is_ssh {
+        #[cfg(feature = "tui-backend")]
+        return "tui";
+    }
+
+    if has_display {
+        #[cfg(feature = "egui-backend")]
+        return "egui";
+        #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
+        return "webview";
+    }
+
+    #[cfg(feature = "tui-backend")]
+    return "tui";
+
+    #[cfg(not(feature = "tui-backend"))]
+    {
+        #[cfg(feature = "egui-backend")]
+        return "egui";
+        #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
+        return "webview";
+        #[cfg(not(any(feature = "egui-backend", feature = "webview-backend")))]
+        {
+            eprintln!("Error: no backend compiled");
+            process::exit(1);
+        }
     }
 }
 
@@ -31,7 +71,13 @@ fn main() {
         process::exit(1);
     }
 
-    let result = match cli.backend.as_str() {
+    let backend = if cli.backend == "auto" {
+        detect_backend()
+    } else {
+        cli.backend.as_str()
+    };
+
+    let result = match backend {
         #[cfg(feature = "egui-backend")]
         "egui" => backend::egui::run(cli.file),
 
