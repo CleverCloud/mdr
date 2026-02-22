@@ -6,7 +6,7 @@ description = "A lightweight Markdown viewer with live reload and multiple rende
 
 [features]
 default = ["egui-backend", "webview-backend"]
-egui-backend = ["dep:eframe", "dep:egui_commonmark"]
+egui-backend = ["dep:eframe", "dep:egui_commonmark", "dep:resvg", "dep:usvg", "dep:tiny-skia"]
 webview-backend = ["dep:wry", "dep:tao"]
 
 [dependencies]
@@ -15,10 +15,16 @@ clap = { version = "4", features = ["derive"] }
 comrak = { version = "0.38", default-features = false, features = ["syntect"] }
 notify = "8"
 notify-debouncer-mini = "0.6"
+mermaid-rs-renderer = { version = "0.1.2", default-features = false }
+regex = "1"
+base64 = "0.22"
 
 # egui backend
 eframe = { version = "0.33", optional = true }
 egui_commonmark = { version = "0.22", features = ["better_syntax_highlighting", "load-images", "svg"], optional = true }
+resvg = { version = "0.45", optional = true }
+usvg = { version = "0.45", optional = true }
+tiny-skia = { version = "0.11", optional = true }
 
 # webview backend
 wry = { version = "0.50", optional = true }
