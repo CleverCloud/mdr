@@ -375,8 +375,9 @@ mod tests {
 /// - Data URIs are self-contained and always work
 /// SVG files are rasterized to PNG first to avoid egui_commonmark parsing issues.
 fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {
-    use regex::Regex;
-    let re = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
     re.replace_all(markdown, |caps: &regex::Captures| {
         let alt = &caps[1];
         let src = &caps[2];
@@ -387,6 +388,12 @@ fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> Stri
             return caps[0].to_string();
         }
         let abs_path = base_dir.join(src);
+        // Path traversal protection: ensure resolved path is within base_dir
+        if let (Ok(canonical), Ok(canonical_base)) = (abs_path.canonicalize(), base_dir.canonicalize()) {
+            if !canonical.starts_with(&canonical_base) {
+                return caps[0].to_string();
+            }
+        }
         if abs_path.exists() {
             // SVG files: rasterize to PNG data URI to avoid parsing failures
             let is_svg = abs_path.extension()

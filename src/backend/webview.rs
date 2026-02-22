@@ -30,7 +30,10 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     vlog!("webview: html_body length={} bytes", html_body.len());
     // In verbose mode, dump all <img> tags found in the HTML
     if crate::core::verbose() {
-        for cap in regex::Regex::new(r#"<img\s[^>]*?>"#).unwrap().find_iter(&html_body) {
+        use std::sync::OnceLock;
+        static RE_VERBOSE: OnceLock<regex::Regex> = OnceLock::new();
+        let re_verbose = RE_VERBOSE.get_or_init(|| regex::Regex::new(r#"<img\s[^>]*?>"#).unwrap());
+        for cap in re_verbose.find_iter(&html_body) {
             let tag = cap.as_str();
             if tag.len() > 200 {
                 vlog!("webview: found <img> tag: {}...", &tag[..200]);
@@ -92,10 +95,13 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 /// SVG files are rasterized to PNG first (to avoid executing embedded scripts/links).
 /// Handles both `<img src="...">` and `<img alt="..." src="...">` attribute orders.
 fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
-    use regex::Regex;
+    use std::sync::OnceLock;
     vlog!("resolve_local_images: base_dir={}", base_dir.display());
     // Match the entire <img ...> tag with src="..." anywhere inside
-    let re = Regex::new(r#"<img\s[^>]*?src="([^"]+)"[^>]*?>"#).unwrap();
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r#"<img\s[^>]*?src="([^"]+)"[^>]*?>"#).unwrap());
+    static RE_SRC: OnceLock<regex::Regex> = OnceLock::new();
+    let re_src = RE_SRC.get_or_init(|| regex::Regex::new(r#"src="[^"]+""#).unwrap());
     re.replace_all(html, |caps: &regex::Captures| {
         let full_tag = &caps[0];
         let src = &caps[1];
@@ -113,6 +119,13 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         let abs_path = base_dir.join(&decoded_src);
         vlog!("    abs_path={}", abs_path.display());
         vlog!("    exists={}", abs_path.exists());
+        // Path traversal protection: ensure resolved path is within base_dir
+        if let (Ok(canonical), Ok(canonical_base)) = (abs_path.canonicalize(), base_dir.canonicalize()) {
+            if !canonical.starts_with(&canonical_base) {
+                vlog!("    → BLOCKED (path traversal: {} escapes {})", canonical.display(), canonical_base.display());
+                return full_tag.to_string();
+            }
+        }
         if abs_path.exists() {
             let is_svg = abs_path.extension()
                 .and_then(|e| e.to_str())
@@ -123,8 +136,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 match rasterize_svg_to_png_data_uri(&abs_path) {
                     Ok(png_data_uri) => {
                         vlog!("    → SVG rasterized to PNG ({} bytes)", png_data_uri.len());
-                        let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
-                        return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
+                                return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
                     }
                     Err(e) => {
                         vlog!("    → SVG rasterization FAILED: {}", e);
@@ -134,8 +146,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 match file_to_data_uri(&abs_path) {
                     Ok(data_uri) => {
                         vlog!("    → SVG embedded as data URI ({} bytes)", data_uri.len());
-                        let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
-                        return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                                return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
                     }
                     Err(e) => {
                         vlog!("    → SVG file_to_data_uri FAILED: {}", e);
@@ -148,8 +159,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
             match file_to_data_uri(&abs_path) {
                 Ok(data_uri) => {
                     vlog!("    → embedded as data URI ({} bytes)", data_uri.len());
-                    let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
-                    return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                        return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
                 }
                 Err(e) => {
                     vlog!("    → file_to_data_uri FAILED: {}", e);
@@ -299,6 +309,7 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
 <html>
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
 <style>{css}</style>
 </head>
 <body>
@@ -624,6 +635,30 @@ mod tests {
 
         let result = rasterize_svg_to_png_data_uri(&path).unwrap();
         assert!(result.starts_with("data:image/png;base64,"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_blocks_path_traversal() {
+        let dir = std::env::temp_dir().join("mdr_test_webview_traversal");
+        let subdir = dir.join("docs");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        // Create a file OUTSIDE the subdir (in parent)
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(dir.join("secret.png")).unwrap();
+
+        // Try to access it via path traversal from subdir
+        let html = r#"<img src="../secret.png" alt="secret">"#;
+        let result = resolve_local_images(html, &subdir);
+
+        // Should NOT resolve to data URI — the path escapes subdir
+        assert!(!result.contains("data:image/png;base64,"),
+            "Path traversal should be blocked, got: {}", &result[..result.len().min(200)]);
+        assert!(result.contains("src=\"../secret.png\""),
+            "Original src should be preserved when blocked");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

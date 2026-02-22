@@ -88,7 +88,9 @@ fn suppress_stderr() -> StderrGuard {
 /// Process HTML from comrak: find mermaid code blocks and replace with rendered SVG.
 /// Mermaid blocks appear as: <pre><code class="language-mermaid">...</code></pre>
 pub fn process_mermaid_blocks(html: &str) -> String {
-    let re = Regex::new(r#"<pre><code class="language-mermaid">([\s\S]*?)</code></pre>"#).unwrap();
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r#"<pre><code class="language-mermaid">([\s\S]*?)</code></pre>"#).unwrap());
 
     re.replace_all(html, |caps: &regex::Captures| {
         let source = html_decode(&caps[1]);
@@ -107,7 +109,9 @@ pub fn process_mermaid_blocks(html: &str) -> String {
 /// convert to base64 PNG data URI, replace block with image reference.
 #[cfg(feature = "egui-backend")]
 pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
-    let re = Regex::new(r"```mermaid\n([\s\S]*?)```").unwrap();
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"```mermaid\n([\s\S]*?)```").unwrap());
 
     re.replace_all(markdown, |caps: &regex::Captures| {
         let source = &caps[1];
@@ -186,6 +190,8 @@ fn html_encode(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

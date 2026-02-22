@@ -20,9 +20,9 @@ pub fn parse_markdown(content: &str) -> String {
 
 /// Add id attributes to heading tags for anchor navigation.
 fn add_heading_ids(html: &str) -> String {
-    use regex::Regex;
-
-    let re = Regex::new(r"<(h[1-6])>(.*?)</h[1-6]>").unwrap();
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"<(h[1-6])>(.*?)</h[1-6]>").unwrap());
     re.replace_all(html, |caps: &regex::Captures| {
         let tag = &caps[1];
         let content = &caps[2];
@@ -34,7 +34,9 @@ fn add_heading_ids(html: &str) -> String {
 }
 
 fn strip_html_tags(html: &str) -> String {
-    let re = regex::Regex::new(r"<[^>]+>").unwrap();
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"<[^>]+>").unwrap());
     re.replace_all(html, "").to_string()
 }
 

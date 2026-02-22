@@ -672,6 +672,12 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
         } else {
             base_dir.join(url)
         };
+        // Path traversal protection: ensure resolved path is within base_dir
+        if let (Ok(canonical), Ok(canonical_base)) = (path.canonicalize(), base_dir.canonicalize()) {
+            if !canonical.starts_with(&canonical_base) {
+                return Err("path traversal blocked: image path escapes base directory".into());
+            }
+        }
         // SVG files need rasterization
         if path.extension().and_then(|e| e.to_str()) == Some("svg") {
             let svg_data = std::fs::read_to_string(&path)?;
@@ -683,7 +689,12 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
 }
 
 /// Load an image from a data: URI by decoding the base64 payload.
+/// Rejects data URIs larger than 50MB (base64-encoded) to prevent memory exhaustion.
 fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    const MAX_DATA_URI_LEN: usize = 50 * 1024 * 1024; // 50 MB
+    if uri.len() > MAX_DATA_URI_LEN {
+        return Err(format!("data URI too large ({} bytes, max {})", uri.len(), MAX_DATA_URI_LEN).into());
+    }
     // Format: data:[<mediatype>][;base64],<data>
     let comma_pos = uri.find(',').ok_or("Invalid data URI: no comma found")?;
     let header = &uri[..comma_pos];
