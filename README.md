@@ -1,6 +1,12 @@
-# mdr — Markdown Reader
+<p align="center">
+  <img src="assets/logo.svg" alt="mdr logo" width="180"/>
+</p>
 
-A lightweight, fast Markdown viewer with Mermaid diagram support and live reload. Built in Rust.
+<h1 align="center">mdr — Markdown Reader</h1>
+
+<p align="center">
+  A lightweight, fast Markdown viewer with Mermaid diagram support and live reload. Built in Rust.
+</p>
 
 ## Why mdr?
 
