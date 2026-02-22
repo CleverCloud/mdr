@@ -9,15 +9,30 @@ use std::process;
 #[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload")]
 struct Cli {
     /// Markdown file to render
-    file: PathBuf,
+    file: Option<PathBuf>,
 
-    /// Rendering backend to use [default: auto-detect]
+    /// Rendering backend to use: egui (native GUI), webview (HTML), tui (terminal)
     #[arg(short, long, default_value = "auto", value_parser = parse_backend)]
     backend: String,
 
     /// Enable verbose logging (image resolution, mermaid rendering, etc.)
     #[arg(short, long)]
     verbose: bool,
+
+    /// List available backends and exit
+    #[arg(long)]
+    list_backends: bool,
+}
+
+fn print_backends() {
+    fn status(compiled: bool) -> &'static str {
+        if compiled { "✓ compiled" } else { "✗ not compiled" }
+    }
+    eprintln!("Available backends:");
+    eprintln!("  egui      Native GUI window (OpenGL)            [{}]", status(cfg!(feature = "egui-backend")));
+    eprintln!("  webview   System webview (WebKit/WebView2)      [{}]", status(cfg!(feature = "webview-backend")));
+    eprintln!("  tui       Terminal UI with image support         [{}]", status(cfg!(feature = "tui-backend")));
+    eprintln!("  auto      Auto-detect best available (default)");
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
@@ -71,8 +86,23 @@ fn main() {
     let cli = Cli::parse();
     core::set_verbose(cli.verbose);
 
-    if !cli.file.exists() {
-        eprintln!("Error: file '{}' not found", cli.file.display());
+    if cli.list_backends {
+        print_backends();
+        process::exit(0);
+    }
+
+    let file = match cli.file {
+        Some(f) => f,
+        None => {
+            eprintln!("Error: missing required argument <FILE>");
+            eprintln!("Usage: mdr <FILE> [OPTIONS]");
+            eprintln!("Try 'mdr --help' for more information.");
+            process::exit(1);
+        }
+    };
+
+    if !file.exists() {
+        eprintln!("Error: file '{}' not found", file.display());
         process::exit(1);
     }
 
@@ -84,7 +114,7 @@ fn main() {
 
     let result = match backend {
         #[cfg(feature = "egui-backend")]
-        "egui" => backend::egui::run(cli.file),
+        "egui" => backend::egui::run(file),
 
         #[cfg(not(feature = "egui-backend"))]
         "egui" => {
@@ -93,7 +123,7 @@ fn main() {
         }
 
         #[cfg(feature = "webview-backend")]
-        "webview" => backend::webview::run(cli.file),
+        "webview" => backend::webview::run(file),
 
         #[cfg(not(feature = "webview-backend"))]
         "webview" => {
@@ -102,7 +132,7 @@ fn main() {
         }
 
         #[cfg(feature = "tui-backend")]
-        "tui" => backend::tui::run(cli.file),
+        "tui" => backend::tui::run(file),
 
         #[cfg(not(feature = "tui-backend"))]
         "tui" => {
