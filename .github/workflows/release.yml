@@ -130,11 +130,11 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew tap
-    needs: build
+    needs: release
     runs-on: ubuntu-latest
     if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' }}
     steps:
-      - name: Download macOS artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -150,19 +150,6 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
-      - name: Update Homebrew formula
-        uses: dmnemec/copy_file_to_another_repo_action@main
-        env:
-          API_TOKEN_GITHUB: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        with:
-          source_file: /dev/stdin
-          destination_repo: 'CleverCloud/homebrew-misc'
-          destination_folder: 'Formula'
-          destination_branch_name: 'main'
-          user_email: 'opensource@clever-cloud.com'
-          user_name: 'Clever Cloud CI'
-          commit_message: 'Update mdr to ${{ steps.version.outputs.version }}'
-        # This step needs a formula file - we'll generate it inline
       - name: Generate and push formula
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -171,7 +158,7 @@ jobs:
           SHA_X86_64: ${{ steps.sha.outputs.sha_x86_64 }}
           SHA_LINUX: ${{ steps.sha.outputs.sha_linux }}
         run: |
-          cat > mdr.rb << FORMULA
+          cat > mdr.rb <<EOF
           class Mdr < Formula
             desc "A lightweight Markdown viewer with Mermaid diagram support"
             homepage "https://github.com/CleverCloud/mdr"
@@ -198,12 +185,11 @@ jobs:
             end
 
             test do
-              system "#{bin}/mdr", "--help"
+              system "#{bin}/mdr", "--version"
             end
           end
-          FORMULA
+          EOF
 
-          # Push to tap repo
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/CleverCloud/homebrew-misc.git" tap
           mkdir -p tap/Formula
           cp mdr.rb tap/Formula/mdr.rb
@@ -211,8 +197,8 @@ jobs:
           git config user.email "opensource@clever-cloud.com"
           git config user.name "Clever Cloud CI"
           git add Formula/mdr.rb
-          git commit -m "Update mdr to ${VERSION}" || true
-          git push || true
+          git diff --cached --quiet || git commit -m "Update mdr to ${VERSION}"
+          git push
 
   publish-crate:
     name: Publish to crates.io
