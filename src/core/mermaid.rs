@@ -23,7 +23,12 @@ fn preprocess_mermaid_source(source: &str) -> String {
 /// Render a single mermaid diagram source to SVG.
 /// First preprocesses the source to fix common incompatibilities,
 /// then catches panics from mermaid-rs-renderer (which can panic on some inputs).
+/// Suppresses stderr to prevent panic backtraces from corrupting TUI terminal output.
 pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
+    // Suppress stderr during rendering — the mermaid renderer can print panic
+    // backtraces/errors to stderr which corrupts the terminal in TUI mode.
+    let _stderr_guard = suppress_stderr();
+
     // Try with preprocessed source first (fixes common syntax issues)
     let preprocessed = preprocess_mermaid_source(source);
     let preprocessed_clone = preprocessed.clone();
@@ -38,6 +43,46 @@ pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
         Ok(Err(e)) => Err(format!("{}", e)),
         Err(_) => Err("mermaid renderer panicked (unsupported diagram syntax)".to_string()),
     }
+}
+
+/// Temporarily redirect stderr to /dev/null. Restores on drop.
+/// This prevents mermaid-rs-renderer panic output from corrupting TUI display.
+struct StderrGuard {
+    #[cfg(unix)]
+    saved_fd: Option<std::os::unix::io::RawFd>,
+}
+
+impl Drop for StderrGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(saved) = self.saved_fd {
+            unsafe {
+                libc::dup2(saved, 2);
+                libc::close(saved);
+            }
+        }
+    }
+}
+
+fn suppress_stderr() -> StderrGuard {
+    #[cfg(unix)]
+    {
+        unsafe {
+            let saved = libc::dup(2);
+            if saved >= 0 {
+                let devnull = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_WRONLY);
+                if devnull >= 0 {
+                    libc::dup2(devnull, 2);
+                    libc::close(devnull);
+                    return StderrGuard { saved_fd: Some(saved) };
+                }
+                libc::close(saved);
+            }
+        }
+        StderrGuard { saved_fd: None }
+    }
+    #[cfg(not(unix))]
+    StderrGuard {}
 }
 
 /// Process HTML from comrak: find mermaid code blocks and replace with rendered SVG.

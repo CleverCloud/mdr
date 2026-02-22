@@ -457,13 +457,14 @@ fn render_content_elements(
                 // If skip_within > 0 for a 1-row element, it's fully scrolled past
             }
             ContentElement::Image { protocol, height, .. } => {
-                // For simplicity, if an image is partially scrolled, skip it entirely
-                // (rendering a partial image is complex and not well supported)
-                if skip_within > 0 {
+                // Show the visible portion of the image.
+                // When partially scrolled, show only the remaining rows.
+                let visible_height = (*height as usize).saturating_sub(skip_within) as u16;
+                if visible_height == 0 {
                     continue;
                 }
                 let remaining = available_height - y_offset;
-                let render_height = (*height).min(remaining);
+                let render_height = visible_height.min(remaining);
                 if render_height == 0 {
                     continue;
                 }
@@ -545,7 +546,14 @@ fn find_heading_row(elements: &[ContentElement], toc_entries: &[TocEntry], toc_i
 /// Build content elements from markdown, loading images where possible.
 fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Picker>) -> Vec<ContentElement> {
     let text_lines = markdown_to_lines_with_images(content);
-    let base_dir = file_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let canonical_file = std::fs::canonicalize(file_path)
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(file_path))
+                .unwrap_or_else(|_| file_path.clone())
+        });
+    let base_dir = canonical_file.parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
     let mut elements = Vec::new();
     for item in text_lines {
@@ -562,9 +570,9 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                                 if let Some(ref picker) = picker {
                                     let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
                                     let aspect = img_h as f64 / img_w as f64;
-                                    let target_cols = 60u16;
+                                    let target_cols = 100u16;
                                     let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
-                                    let height = target_rows.clamp(2, 20);
+                                    let height = target_rows.clamp(4, 40);
 
                                     let protocol = picker.new_resize_protocol(dyn_img);
                                     elements.push(ContentElement::Image {
@@ -592,13 +600,12 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                     match load_image(&url, base_dir) {
                         Ok(dyn_img) => {
                             // Calculate image height in rows. Use a reasonable default:
-                            // aim for ~15 rows max, preserving aspect ratio relative to width.
+                            // Fill terminal width for readable images.
                             let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
                             let aspect = img_h as f64 / img_w as f64;
-                            // Assume roughly 80 columns available, and font aspect ~2:1
-                            let target_cols = 60u16;
+                            let target_cols = 100u16;
                             let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
-                            let height = target_rows.clamp(2, 20);
+                            let height = target_rows.clamp(4, 40);
 
                             let protocol = picker.new_resize_protocol(dyn_img);
                             elements.push(ContentElement::Image {

@@ -7,9 +7,15 @@ use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let base_dir = file_path.parent()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        .unwrap_or_default();
+    let canonical_file = std::fs::canonicalize(&file_path)
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&file_path))
+                .unwrap_or_else(|_| file_path.clone())
+        });
+    let base_dir = canonical_file.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let raw_markdown = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| format!("# Error\nCould not read `{}`: {}", file_path.display(), e));
 
@@ -363,9 +369,11 @@ mod tests {
     }
 }
 
-/// Resolve relative image paths in markdown.
-/// SVG files are rasterized to PNG data URIs (egui_commonmark fails on complex SVGs with <a> tags).
-/// Other images are resolved to absolute file:// URLs.
+/// Resolve relative image paths in markdown to inline data URIs.
+/// We use data URIs for ALL images (not file:// URLs) because:
+/// - file:// URLs break when paths contain spaces
+/// - Data URIs are self-contained and always work
+/// SVG files are rasterized to PNG first to avoid egui_commonmark parsing issues.
 fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {
     use regex::Regex;
     let re = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
@@ -386,16 +394,46 @@ fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> Stri
                 .map(|e| e.eq_ignore_ascii_case("svg"))
                 .unwrap_or(false);
             if is_svg {
+                // Try rasterizing SVG to PNG (handles complex SVGs better)
                 if let Ok(data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
                     return format!("![{}]({})", alt, data_uri);
                 }
+                // Fallback: embed SVG directly as data URI for egui_commonmark's SVG feature
+                if let Ok(data_uri) = file_to_data_uri(&abs_path) {
+                    return format!("![{}]({})", alt, data_uri);
+                }
+                // SVG completely failed — skip it
+                return caps[0].to_string();
             }
-            format!("![{}](file://{})", alt, abs_path.display())
+            // All non-SVG images: embed as base64 data URI
+            if let Ok(data_uri) = file_to_data_uri(&abs_path) {
+                return format!("![{}]({})", alt, data_uri);
+            }
+            caps[0].to_string()
         } else {
             caps[0].to_string()
         }
     })
     .to_string()
+}
+
+/// Convert a local file to a base64 data URI string.
+fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    use base64::Engine;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime = match ext.to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+    let data = std::fs::read(path)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{};base64,{}", mime, b64))
 }
 
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
@@ -407,6 +445,14 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
     const MAX_DIM: f32 = 8192.0;
 
     let svg_data = std::fs::read_to_string(path)?;
+
+    // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
+    let trimmed = svg_data.trim_start();
+    if !trimmed.starts_with('<') || trimmed.starts_with("<!DOCTYPE html") || trimmed.starts_with("<html") {
+        if !trimmed.contains("<svg") {
+            return Err("File is not a valid SVG (possibly an HTML page)".into());
+        }
+    }
 
     static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     let fontdb = FONTDB.get_or_init(|| {

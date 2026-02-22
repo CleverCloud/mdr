@@ -14,6 +14,10 @@ struct Cli {
     /// Rendering backend to use [default: auto-detect]
     #[arg(short, long, default_value = "auto", value_parser = parse_backend)]
     backend: String,
+
+    /// Enable verbose logging (image resolution, mermaid rendering, etc.)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
@@ -65,6 +69,7 @@ fn detect_backend() -> &'static str {
 
 fn main() {
     let cli = Cli::parse();
+    core::set_verbose(cli.verbose);
 
     if !cli.file.exists() {
         eprintln!("Error: file '{}' not found", cli.file.display());

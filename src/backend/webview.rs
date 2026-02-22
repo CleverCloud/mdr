@@ -6,13 +6,39 @@ use wry::WebViewBuilder;
 
 use crate::core::markdown::{parse_markdown, GITHUB_CSS};
 use crate::core::toc;
+use crate::vlog;
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let base_dir = file_path.parent()
-        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        .unwrap_or_default();
+    // Canonicalize the file path first so parent() always gives an absolute directory.
+    // Without this, a bare filename like "README.md" gives parent() = "" (empty),
+    // which breaks relative image resolution when CWD differs from expected.
+    let canonical_file = std::fs::canonicalize(&file_path)
+        .unwrap_or_else(|_| {
+            // If canonicalize fails, try current_dir + file_path
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&file_path))
+                .unwrap_or_else(|_| file_path.clone())
+        });
+    let base_dir = canonical_file.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let markdown_content = std::fs::read_to_string(&file_path)?;
+    vlog!("webview: file_path={}", file_path.display());
+    vlog!("webview: base_dir={}", base_dir.display());
+    vlog!("webview: markdown_content length={} bytes", markdown_content.len());
     let html_body = parse_markdown(&markdown_content);
+    vlog!("webview: html_body length={} bytes", html_body.len());
+    // In verbose mode, dump all <img> tags found in the HTML
+    if crate::core::verbose() {
+        for cap in regex::Regex::new(r#"<img\s[^>]*?>"#).unwrap().find_iter(&html_body) {
+            let tag = cap.as_str();
+            if tag.len() > 200 {
+                vlog!("webview: found <img> tag: {}...", &tag[..200]);
+            } else {
+                vlog!("webview: found <img> tag: {}", tag);
+            }
+        }
+    }
     let html_body = resolve_local_images(&html_body, &base_dir);
     let toc_entries = toc::extract_toc(&markdown_content);
     let full_html = build_html(&html_body, &toc_entries);
@@ -67,40 +93,70 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 /// Handles both `<img src="...">` and `<img alt="..." src="...">` attribute orders.
 fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
     use regex::Regex;
+    vlog!("resolve_local_images: base_dir={}", base_dir.display());
     // Match the entire <img ...> tag with src="..." anywhere inside
     let re = Regex::new(r#"<img\s[^>]*?src="([^"]+)"[^>]*?>"#).unwrap();
     re.replace_all(html, |caps: &regex::Captures| {
         let full_tag = &caps[0];
         let src = &caps[1];
+        vlog!("  IMG src={:?}", src);
         // Skip URLs and existing data URIs
         if src.starts_with("http://") || src.starts_with("https://")
             || src.starts_with("data:") || src.starts_with("file://")
         {
+            vlog!("    → skipped (remote/data URL)");
             return full_tag.to_string();
         }
         // URL-decode the src path (comrak may percent-encode spaces etc.)
         let decoded_src = percent_decode(src);
         // Resolve relative path
         let abs_path = base_dir.join(&decoded_src);
+        vlog!("    abs_path={}", abs_path.display());
+        vlog!("    exists={}", abs_path.exists());
         if abs_path.exists() {
-            // For SVG files, rasterize to PNG then embed as data URI.
-            // We do NOT inline SVG directly because SVG can contain <a>, <script>,
-            // <style>, <foreignObject> that execute in the page context.
             let is_svg = abs_path.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("svg"))
                 .unwrap_or(false);
+            vlog!("    is_svg={}", is_svg);
             if is_svg {
-                if let Ok(png_data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
-                    let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
-                    return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
+                match rasterize_svg_to_png_data_uri(&abs_path) {
+                    Ok(png_data_uri) => {
+                        vlog!("    → SVG rasterized to PNG ({} bytes)", png_data_uri.len());
+                        let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
+                        return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
+                    }
+                    Err(e) => {
+                        vlog!("    → SVG rasterization FAILED: {}", e);
+                    }
                 }
+                // Fallback: embed SVG as data URI (scripts won't execute in <img> context)
+                match file_to_data_uri(&abs_path) {
+                    Ok(data_uri) => {
+                        vlog!("    → SVG embedded as data URI ({} bytes)", data_uri.len());
+                        let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
+                        return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                    }
+                    Err(e) => {
+                        vlog!("    → SVG file_to_data_uri FAILED: {}", e);
+                    }
+                }
+                vlog!("    → SVG: all attempts failed, keeping original tag");
+                return full_tag.to_string();
             }
             // For non-SVG images, use base64 data URI
-            if let Ok(data_uri) = file_to_data_uri(&abs_path) {
-                let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
-                return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+            match file_to_data_uri(&abs_path) {
+                Ok(data_uri) => {
+                    vlog!("    → embedded as data URI ({} bytes)", data_uri.len());
+                    let re_src = Regex::new(r#"src="[^"]+""#).unwrap();
+                    return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                }
+                Err(e) => {
+                    vlog!("    → file_to_data_uri FAILED: {}", e);
+                }
             }
+        } else {
+            vlog!("    → file NOT FOUND");
         }
         full_tag.to_string()
     })
@@ -165,11 +221,20 @@ const MERMAID_JS: &str = include_str!("../../assets/mermaid.min.js");
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
 /// This is safer than inlining SVG because SVG can contain scripts, links, and styles
 /// that would execute in the page context and cause unwanted navigation/requests.
+/// Returns Err if the file is not a valid SVG (e.g., an HTML page saved with .svg extension).
 fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
     use std::sync::{Arc, OnceLock};
 
     let svg_data = std::fs::read_to_string(path)?;
+
+    // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
+    let trimmed = svg_data.trim_start();
+    if !trimmed.starts_with('<') || trimmed.starts_with("<!DOCTYPE html") || trimmed.starts_with("<html") {
+        if !trimmed.contains("<svg") {
+            return Err("File is not a valid SVG (possibly an HTML page)".into());
+        }
+    }
 
     // Max pixel dimension to avoid memory issues
     const MAX_DIM: f32 = 8192.0;
@@ -443,6 +508,109 @@ mod tests {
         let html = r#"<img src="https://example.com/image.svg" alt="remote">"#;
         let result = resolve_local_images(html, &dir);
         assert_eq!(result, html, "Remote URLs should be preserved unchanged");
+    }
+
+    #[test]
+    fn resolve_local_images_subdirectory_paths() {
+        // Simulate the real-world scenario: images in subdirectories
+        let dir = std::env::temp_dir().join("mdr_test_webview_subdir");
+        let img_dir = dir.join("assets").join("screenshots");
+        std::fs::create_dir_all(&img_dir).unwrap();
+
+        // Create a real PNG file in subdirectory
+        let png_path = img_dir.join("chart.png");
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(&png_path).unwrap();
+
+        // This is what comrak generates from ![alt](assets/screenshots/chart.png)
+        let html = r#"<img src="assets/screenshots/chart.png" alt="Revenue chart" />"#;
+        let result = resolve_local_images(html, &dir);
+
+        assert!(result.contains("data:image/png;base64,"),
+            "PNG in subdirectory should be resolved to data URI, got: {}",
+            &result[..result.len().min(200)]);
+        assert!(result.contains("<img"), "Should still be an img tag");
+        assert!(result.contains("alt=\"Revenue chart\""), "Alt text should be preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_empty_base_dir() {
+        // When file_path.parent() is empty (bare filename), base_dir is ""
+        // This should still work for files that exist relative to CWD
+        let dir = std::env::temp_dir().join("mdr_test_webview_empty_base");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let png_path = dir.join("test.png");
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgba([0, 255, 0, 255]));
+        img.save(&png_path).unwrap();
+
+        // With proper base_dir, it should work
+        let html = r#"<img src="test.png" alt="test" />"#;
+        let result = resolve_local_images(html, &dir);
+        assert!(result.contains("data:image/png;base64,"),
+            "Should resolve with proper base_dir, got: {}", &result[..result.len().min(200)]);
+
+        // With empty base_dir, the file won't be found (unless CWD happens to match)
+        let empty = std::path::PathBuf::from("");
+        let result2 = resolve_local_images(html, &empty);
+        // This will likely NOT find the file since CWD != dir
+        // The tag should be returned unchanged
+        assert!(result2.contains("src=\"test.png\"") || result2.contains("data:image/png;base64,"),
+            "With empty base_dir, should either find file or return original, got: {}",
+            &result2[..result2.len().min(200)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_comrak_output_format() {
+        // Test with the exact HTML format comrak produces from markdown images
+        let dir = std::env::temp_dir().join("mdr_test_webview_comrak_format");
+        let screenshots_dir = dir.join("assets").join("screenshots");
+        std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+        let png_path = screenshots_dir.join("revenue.png");
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgba([0, 0, 255, 255]));
+        img.save(&png_path).unwrap();
+
+        // Comrak generates self-closing tags with alt attribute
+        let html = r#"<p><img src="assets/screenshots/revenue.png" alt="Monthly Revenue Growth — Jan 2023 to Feb 2026" /></p>"#;
+        let result = resolve_local_images(html, &dir);
+
+        assert!(result.contains("data:image/png;base64,"),
+            "Comrak-style img tag should be resolved, got: {}", &result[..result.len().min(300)]);
+        assert!(result.contains("alt=\"Monthly Revenue Growth"), "Alt text with special chars should be preserved");
+        assert!(result.contains("<p>") && result.contains("</p>"), "Surrounding <p> tags should be preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_multiple_images_in_html() {
+        // Test multiple images in a single HTML string
+        let dir = std::env::temp_dir().join("mdr_test_webview_multi_img");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for name in &["a.png", "b.png"] {
+            let path = dir.join(name);
+            let mut img = image::RgbaImage::new(1, 1);
+            img.put_pixel(0, 0, image::Rgba([128, 128, 128, 255]));
+            img.save(&path).unwrap();
+        }
+
+        let html = r#"<p><img src="a.png" alt="A" /></p><p><img src="b.png" alt="B" /></p>"#;
+        let result = resolve_local_images(html, &dir);
+
+        // Both images should be resolved
+        let count = result.matches("data:image/png;base64,").count();
+        assert_eq!(count, 2, "Both images should be resolved to data URIs, got {} matches in: {}", count, &result[..result.len().min(300)]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
