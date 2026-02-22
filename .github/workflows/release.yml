@@ -234,6 +234,71 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  update-winget:
+    name: Update WinGet
+    needs: release
+    runs-on: windows-latest
+    if: ${{ vars.WINGET_ENABLED == 'true' }}
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: CleverCloud.mdr
+          installers-regex: 'windows'
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  update-aur:
+    name: Update AUR
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ vars.AUR_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mdr-x86_64-unknown-linux-gnu.tar.gz
+          path: artifacts
+
+      - name: Compute SHA256
+        id: sha
+        run: echo "sha256=$(sha256sum artifacts/mdr-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Generate PKGBUILD
+        run: |
+          cat > PKGBUILD << 'PKGEOF'
+          # Maintainer: Clever Cloud <opensource@clever-cloud.com>
+          pkgname=mdr-bin
+          pkgver=${{ steps.version.outputs.version }}
+          pkgrel=1
+          pkgdesc="A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple backends"
+          arch=('x86_64')
+          url="https://github.com/CleverCloud/mdr"
+          license=('MIT')
+          provides=('mdr')
+          conflicts=('mdr')
+          source=("https://github.com/CleverCloud/mdr/releases/download/v${pkgver}/mdr-x86_64-unknown-linux-gnu.tar.gz")
+          sha256sums=('${{ steps.sha.outputs.sha256 }}')
+
+          package() {
+            install -Dm755 "${srcdir}/mdr" "${pkgdir}/usr/bin/mdr"
+          }
+          PKGEOF
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3
+        with:
+          pkgname: mdr-bin
+          pkgbuild: ./PKGBUILD
+          commit_username: "Clever Cloud CI"
+          commit_email: "opensource@clever-cloud.com"
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.version.outputs.version }}"
+
   release:
     name: Create Release
     needs: [build, build-deb, build-rpm]

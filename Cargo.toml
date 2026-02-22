@@ -1,6 +1,6 @@
 [package]
 name = "mdr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 license = "MIT"
