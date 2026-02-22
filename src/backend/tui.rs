@@ -2,7 +2,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
 use ratatui::prelude::*;
@@ -47,7 +47,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -91,7 +91,20 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
         // Poll events with 100ms timeout for file watching
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            // Handle mouse scroll
+            if let Event::Mouse(mouse) = &ev {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        app.scroll_offset = app.scroll_offset.saturating_add(3);
+                    }
+                    MouseEventKind::ScrollUp => {
+                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                    }
+                    _ => {}
+                }
+            }
+            if let Event::Key(key) = ev {
                 if app.search_mode {
                     match key.code {
                         KeyCode::Esc => {
@@ -197,7 +210,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     Ok(())
