@@ -95,7 +95,7 @@ fn read_stdin_to_tmpfile() -> PathBuf {
         eprintln!("Error: failed to create temp directory: {}", e);
         process::exit(1);
     });
-    let tmp_file = tmp_dir.join("stdin.md");
+    let tmp_file = tmp_dir.join(format!("stdin-{}.md", process::id()));
     std::fs::write(&tmp_file, &content).unwrap_or_else(|e| {
         eprintln!("Error: failed to write temp file: {}", e);
         process::exit(1);
