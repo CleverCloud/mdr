@@ -78,9 +78,8 @@ fn stdin_pipe_creates_temp_file() {
         stdin.write_all(b"# Temp file test\n").unwrap();
     }
 
-    // Give the process time to write the temp file, then kill it
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = child.kill();
+    // Wait for the process to finish (the TUI backend will fail without a real
+    // terminal, but the temp file is written before the backend starts).
     let _ = child.wait_with_output();
 
     // Verify the temp file was created with PID-scoped name
