@@ -2,13 +2,14 @@ mod backend;
 mod core;
 
 use clap::Parser;
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process;
 
 #[derive(Parser)]
-#[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload")]
+#[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload\n\nReads from a file or from stdin when piped:\n  mdr file.md\n  cat file.md | mdr")]
 struct Cli {
-    /// Markdown file to render
+    /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
 
     /// Rendering backend to use: egui (native GUI), webview (HTML), tui (terminal)
@@ -82,6 +83,26 @@ fn detect_backend() -> &'static str {
     }
 }
 
+/// Read stdin and write to a temp file, returning its path.
+fn read_stdin_to_tmpfile() -> PathBuf {
+    let mut content = String::new();
+    io::stdin().lock().read_to_string(&mut content).unwrap_or_else(|e| {
+        eprintln!("Error: failed to read from stdin: {}", e);
+        process::exit(1);
+    });
+    let tmp_dir = std::env::temp_dir().join("mdr");
+    std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|e| {
+        eprintln!("Error: failed to create temp directory: {}", e);
+        process::exit(1);
+    });
+    let tmp_file = tmp_dir.join("stdin.md");
+    std::fs::write(&tmp_file, &content).unwrap_or_else(|e| {
+        eprintln!("Error: failed to write temp file: {}", e);
+        process::exit(1);
+    });
+    tmp_file
+}
+
 fn main() {
     let cli = Cli::parse();
     core::set_verbose(cli.verbose);
@@ -92,19 +113,25 @@ fn main() {
     }
 
     let file = match cli.file {
-        Some(f) => f,
+        Some(f) if f.as_os_str() == "-" => read_stdin_to_tmpfile(),
+        Some(f) => {
+            if !f.exists() {
+                eprintln!("Error: file '{}' not found", f.display());
+                process::exit(1);
+            }
+            f
+        }
         None => {
-            eprintln!("Error: missing required argument <FILE>");
-            eprintln!("Usage: mdr <FILE> [OPTIONS]");
-            eprintln!("Try 'mdr --help' for more information.");
-            process::exit(1);
+            if io::stdin().is_terminal() {
+                eprintln!("Error: missing required argument <FILE>");
+                eprintln!("Usage: mdr <FILE> [OPTIONS]");
+                eprintln!("       cat file.md | mdr");
+                eprintln!("Try 'mdr --help' for more information.");
+                process::exit(1);
+            }
+            read_stdin_to_tmpfile()
         }
     };
-
-    if !file.exists() {
-        eprintln!("Error: file '{}' not found", file.display());
-        process::exit(1);
-    }
 
     let backend = if cli.backend == "auto" {
         detect_backend()
