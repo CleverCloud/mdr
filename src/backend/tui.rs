@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -748,7 +748,7 @@ fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::err
 fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     let response = ureq::get(url).call()?;
     let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes)?;
+    response.into_body().into_reader().read_to_end(&mut bytes)?;
     let img = image::load_from_memory(&bytes)?;
     Ok(img)
 }
