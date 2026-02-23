@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process;
 
 #[derive(Parser)]
-#[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload\n\nReads from a file or from stdin when piped:\n  mdr file.md\n  cat file.md | mdr")]
+#[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload")]
 struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
@@ -125,7 +125,7 @@ fn main() {
             if io::stdin().is_terminal() {
                 eprintln!("Error: missing required argument <FILE>");
                 eprintln!("Usage: mdr <FILE> [OPTIONS]");
-                eprintln!("       cat file.md | mdr");
+                eprintln!("       cat file.md | mdr [OPTIONS]");
                 eprintln!("Try 'mdr --help' for more information.");
                 process::exit(1);
             }
