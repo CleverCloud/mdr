@@ -38,4 +38,4 @@ parts:
       - libgl1
     override-pull: |
       craftctl default
-      craftctl set version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+      craftctl set version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"

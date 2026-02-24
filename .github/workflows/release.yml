@@ -316,8 +316,7 @@ jobs:
           SHA256: ${{ steps.sha.outputs.sha256 }}
         run: |
           mkdir choco-pkg/tools
-
-          @"
+          $nuspec = @"
           <?xml version="1.0" encoding="utf-8"?>
           <package xmlns="http://schemas.chocolatey.org/2015/06/nuspec">
             <metadata>
@@ -334,14 +333,15 @@ jobs:
               <requireLicenseAcceptance>false</requireLicenseAcceptance>
             </metadata>
           </package>
-          "@ | Out-File -Encoding utf8 choco-pkg/mdr.nuspec
-
-          @"
+          "@
+          [System.IO.File]::WriteAllText("choco-pkg/mdr.nuspec", $nuspec)
+          $install = @"
           `$ErrorActionPreference = 'Stop'
           `$url = "https://github.com/CleverCloud/mdr/releases/download/v$env:VERSION/mdr-x86_64-pc-windows-msvc.zip"
           `$checksum = "$env:SHA256"
           Install-ChocolateyZipPackage -PackageName 'mdr' -Url64bit `$url -Checksum64 `$checksum -ChecksumType64 'sha256' -UnzipLocation "`$(Split-Path -Parent `$MyInvocation.MyCommand.Definition)"
-          "@ | Out-File -Encoding utf8 choco-pkg/tools/chocolateyInstall.ps1
+          "@
+          [System.IO.File]::WriteAllText("choco-pkg/tools/chocolateyInstall.ps1", $install)
 
       - name: Pack and push
         shell: pwsh
