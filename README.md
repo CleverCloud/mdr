@@ -54,8 +54,7 @@ cargo install --path . --no-default-features --features webview-backend
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap CleverCloud/misc
-brew install mdr
+brew install CleverCloud/misc/mdr
 ```
 
 ### Snap (Linux)
