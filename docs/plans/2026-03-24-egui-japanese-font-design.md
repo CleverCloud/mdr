@@ -28,11 +28,10 @@ egui版のMarkdownビューアーで日本語テキストが豆腐（□）に�
 - webview/tuiバックエンドへの変更
 - upstream PR対応
 - フォントが利用できない場合のエラーハンドリング
-- SVG/Mermaid描画のフォント対応（usvg::fontdbは既にsystem fontsをロード済み）
 
 ## Chosen Approach
 
-Noto Sans JP Regular の `.ttf` ファイルをリポジトリに配置し、`include_bytes!` でコンパイル時にバイナリへ埋め込む。`eframe::App::setup()` 内で `egui::FontDefinitions` にフォントを追加し、`Proportional` と `Monospace` のフォールバックとして登録。
+Noto Sans JP Regular の `.ttf` ファイルをリポジトリに配置し、`include_bytes!` でコンパイル時にバイナリへ埋め込む。`eframe::run_native` の `CreationContext` クロージャ内で `egui::FontDefinitions` にフォントを追加し、`Proportional` と `Monospace` のフォールバックとして登録。Mermaid/SVG描画用に `usvg::fontdb` にもバンドルフォントを登録する。
 
 ## Alternatives Considered
 
@@ -56,18 +55,26 @@ assets/fonts/
 └── OFL.txt
 ```
 
-### コード変更: `src/backend/egui.rs` のみ
+### コード変更
 
+**`src/backend/egui.rs`:**
 1. `include_bytes!` でフォントデータを定数として埋め込み
-2. `MarkdownApp::setup()` 内で `egui::FontDefinitions` を構成
+2. `run_native` の `CreationContext` クロージャ内で `egui::FontDefinitions` を構成
 3. `Proportional` / `Monospace` ファミリーのフォールバック末尾に追加
-4. `ctx.set_fonts()` で適用
+4. `cc.egui_ctx.set_fonts()` で適用
+
+**`src/backend/egui.rs` (SVGラスタライズ):**
+5. `rasterize_svg_to_png_data_uri` 内の `usvg::fontdb` にバンドルフォントを追加
+
+**`src/core/mermaid.rs` (Mermaidレンダリング):**
+6. `svg_to_png_base64` 内の `usvg::fontdb` にバンドルフォントを追加
 
 ## Data / State Flow
 
 1. コンパイル時: `NotoSansJP-Regular.ttf` → `include_bytes!` → バイナリに埋め込み
-2. 起動時: `setup()` → `FontDefinitions` 構成 → `ctx.set_fonts()` → eguiフォントシステムに登録
+2. 起動時: `CreationContext` クロージャ → `FontDefinitions` 構成 → `cc.egui_ctx.set_fonts()` → eguiフォントシステムに登録
 3. 描画時: ラテン文字 → デフォルトフォント、日本語 → Noto Sans JP にフォールバック
+4. Mermaid/SVG描画時: `usvg::fontdb` にバンドルフォントが登録済み → 日本語テキストを正しくラスタライズ
 
 ## Error Handling
 
@@ -97,7 +104,7 @@ fork固有。フォントファイル更新時はttfを差し替えるだけ。
 全egui UIテキストで日本語が表示可能に。追加設定不要。
 
 ### Architecture / Integration
-egui.rsのみの変更。他バックエンドに影響なし。egui_commonmarkはeguiのフォントシステムを使うため追加設定不要。
+egui.rsとmermaid.rsの変更。他バックエンドに影響なし。egui_commonmarkはeguiのフォントシステムを使うため追加設定不要。Mermaid/SVG描画はusvg::fontdbにバンドルフォントを登録することで対応。
 
 ## Open Questions / Explicit Tradeoffs
 

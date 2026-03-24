@@ -90,9 +90,25 @@
 
 ---
 
+### Round 3 (Review Feedback)
+
+**Perspectives used:** product
+
+**Generated Questions**
+1. [Product] Mermaid/SVG内の日本語テキストもサポート対象にするか？
+
+**User Answers (Verbatim)**
+1. こちらもサポート対象にしてください
+
+**Derived Durable Notes**
+- Mermaid/SVG内の日本語テキストもサポート対象
+- usvg::fontdbにもバンドルフォントを登録する必要がある
+
+---
+
 ## Open Questions
 
-_(なし — デザインに進める状態)_
+_(なし)_
 
 ---
 
