@@ -87,7 +87,8 @@ assets/fonts/
   - 見出し（TOCに反映されるか）
   - コードブロック内の日本語コメント
   - 検索バーへの日本語入力
-- ビルド確認: `cargo build --features egui-backend` が成功すること
+  - Mermaid図内の日本語ラベル
+- ビルド確認: `cargo build --no-default-features --features egui-backend` が成功すること
 
 ## Perspective-Specific Notes
 
