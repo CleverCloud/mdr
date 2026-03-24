@@ -6,6 +6,8 @@ use std::sync::mpsc::Receiver;
 use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
 
+const NOTO_SANS_JP: &[u8] = include_bytes!("../../assets/fonts/NotoSansJP-Regular.ttf");
+
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_file = std::fs::canonicalize(&file_path)
         .unwrap_or_else(|_| {
@@ -44,7 +46,25 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "mdr",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Register Noto Sans JP as a fallback font for Japanese text
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "NotoSansJP".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_static(NOTO_SANS_JP)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("NotoSansJP".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("NotoSansJP".to_owned());
+            cc.egui_ctx.set_fonts(fonts);
+
             Ok(Box::new(MdrApp {
                 markdown,
                 sections,
