@@ -141,6 +141,7 @@ fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
     let fontdb = FONTDB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
+        db.load_font_data(include_bytes!("../../assets/fonts/NotoSansJP-Regular.ttf").to_vec());
         Arc::new(db)
     });
 

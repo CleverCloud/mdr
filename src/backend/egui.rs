@@ -495,6 +495,7 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
     let fontdb = FONTDB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
+        db.load_font_data(NOTO_SANS_JP.to_vec());
         Arc::new(db)
     });
 
