@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -43,6 +43,13 @@ impl ContentElement {
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&file_path)?;
     let toc_entries = toc::extract_toc(&content);
+
+    // Bail out if stdout is not a TTY. On Unix, enable_raw_mode() errors on a
+    // pipe so the loop never starts; on Windows it succeeds and the event poll
+    // would spin forever (which previously hung CI for 6h).
+    if !io::stdout().is_terminal() {
+        return Err("tui backend requires a terminal (stdout is not a TTY)".into());
+    }
 
     // Setup terminal
     enable_raw_mode()?;
