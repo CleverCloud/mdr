@@ -261,7 +261,7 @@ body {
 .content {
     margin-left: 250px;
     max-width: 900px;
-    padding: 32px 24px;
+    padding: 32px 24px 3rem;
     flex: 1;
 }
 h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; font-weight: 600; line-height: 1.25; }
@@ -275,6 +275,7 @@ code {
     border-radius: 6px;
 }
 pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     background: var(--code-bg);
     padding: 16px;
     border-radius: 6px;

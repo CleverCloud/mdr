@@ -82,12 +82,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         WebViewBuilder::new()
             .with_html(&full_html)
             .with_clipboard(true)
+            .with_devtools(true)
             .build_gtk(vbox)?
     };
     #[cfg(not(target_os = "linux"))]
     let webview = WebViewBuilder::new()
         .with_html(&full_html)
         .with_clipboard(true)
+        .with_devtools(true)
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
@@ -105,7 +107,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 let body_json = serde_json::to_string(&new_html).unwrap_or_default();
                 let toc_json = serde_json::to_string(&toc_html).unwrap_or_default();
                 let js = format!(
-                    "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {};",
+                    "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {}; if (window.hljs) hljs.highlightAll();",
                     body_json, toc_json
                 );
                 let _ = webview.evaluate_script(&js);
@@ -260,6 +262,63 @@ fn build_toc_html(entries: &[toc::TocEntry]) -> String {
 /// Mermaid.js embedded at compile time — only injected when the Rust renderer fails.
 const MERMAID_JS: &str = include_str!("../../assets/mermaid.min.js");
 
+/// Highlight.js embedded at compile time — only injected when code blocks are present.
+const HIGHLIGHT_JS: &str = include_str!("../../assets/highlight.min.js");
+
+/// KDL language definition for highlight.js — registered as 'kdl'.
+const HIGHLIGHT_KDL: &str = include_str!("../../assets/kdl.highlight.js");
+
+/// GitHub light/dark syntax highlight themes combined with prefers-color-scheme media queries.
+const HIGHLIGHT_CSS: &str = concat!(
+    "pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5px}",
+    "@media (prefers-color-scheme:light){",
+    ".hljs{color:#24292e;background:#fff}",
+    ".hljs-doctag,.hljs-keyword,.hljs-meta .hljs-keyword,.hljs-template-tag,.hljs-template-variable,.hljs-type,.hljs-variable.language_{color:#d73a49}",
+    ".hljs-title,.hljs-title.class_,.hljs-title.class_.inherited__,.hljs-title.function_{color:#6f42c1}",
+    ".hljs-attr,.hljs-attribute,.hljs-literal,.hljs-meta,.hljs-number,.hljs-operator,.hljs-selector-attr,.hljs-selector-class,.hljs-selector-id,.hljs-variable{color:#005cc5}",
+    ".hljs-meta .hljs-string,.hljs-regexp,.hljs-string{color:#032f62}",
+    ".hljs-built_in,.hljs-symbol{color:#e36209}",
+    ".hljs-code,.hljs-comment,.hljs-formula{color:#6a737d}",
+    ".hljs-name,.hljs-quote,.hljs-selector-pseudo,.hljs-selector-tag{color:#22863a}",
+    ".hljs-subst{color:#24292e}",
+    ".hljs-section{color:#005cc5;font-weight:700}",
+    ".hljs-bullet{color:#735c0f}",
+    ".hljs-emphasis{color:#24292e;font-style:italic}",
+    ".hljs-strong{color:#24292e;font-weight:700}",
+    ".hljs-addition{color:#22863a;background-color:#f0fff4}",
+    ".hljs-deletion{color:#b31d28;background-color:#ffeef0}",
+    "}",
+    "@media (prefers-color-scheme:dark){",
+    ".hljs{color:#c9d1d9;background:#0d1117}",
+    ".hljs-doctag,.hljs-keyword,.hljs-meta .hljs-keyword,.hljs-template-tag,.hljs-template-variable,.hljs-type,.hljs-variable.language_{color:#ff7b72}",
+    ".hljs-title,.hljs-title.class_,.hljs-title.class_.inherited__,.hljs-title.function_{color:#d2a8ff}",
+    ".hljs-attr,.hljs-attribute,.hljs-literal,.hljs-meta,.hljs-number,.hljs-operator,.hljs-selector-attr,.hljs-selector-class,.hljs-selector-id,.hljs-variable{color:#79c0ff}",
+    ".hljs-meta .hljs-string,.hljs-regexp,.hljs-string{color:#a5d6ff}",
+    ".hljs-built_in,.hljs-symbol{color:#ffa657}",
+    ".hljs-code,.hljs-comment,.hljs-formula{color:#8b949e}",
+    ".hljs-name,.hljs-quote,.hljs-selector-pseudo,.hljs-selector-tag{color:#7ee787}",
+    ".hljs-subst{color:#c9d1d9}",
+    ".hljs-section{color:#1f6feb;font-weight:700}",
+    ".hljs-bullet{color:#f2cc60}",
+    ".hljs-emphasis{color:#c9d1d9;font-style:italic}",
+    ".hljs-strong{color:#c9d1d9;font-weight:700}",
+    ".hljs-addition{color:#aff5b4;background-color:#033a16}",
+    ".hljs-deletion{color:#ffdcd7;background-color:#67060c}",
+    "}",
+    // KDL-specific overrides (higher specificity via .language-kdl, no !important needed)
+    // Node names: bold red
+    ".language-kdl .hljs-title,.language-kdl .function_{color:#cc0000;font-weight:bold}",
+    // Property keys: purple italic (distinct from values)
+    ".language-kdl .hljs-attr{color:#6f42c1;font-style:italic}",
+    // Attribute values: light blue
+    ".language-kdl .hljs-string,.language-kdl .hljs-number,.language-kdl .hljs-literal{color:#0969da}",
+    "@media (prefers-color-scheme:dark){",
+    ".language-kdl .hljs-title,.language-kdl .function_{color:#f87171}",
+    ".language-kdl .hljs-attr{color:#d2a8ff;font-style:italic}",
+    ".language-kdl .hljs-string,.language-kdl .hljs-number,.language-kdl .hljs-literal{color:#79c0ff}",
+    "}"
+);
+
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
 /// This is safer than inlining SVG because SVG can contain scripts, links, and styles
 /// that would execute in the page context and cause unwanted navigation/requests.
@@ -335,6 +394,17 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     } else {
         String::new()
     };
+    // Only include highlight.js when there are fenced code blocks to highlight
+    let highlight_script = if body.contains("<pre><code") {
+        format!(
+            r#"<style>{css}</style><script>{js}</script><script>{kdl}hljs.registerLanguage('kdl',hljsDefineKdl);hljs.highlightAll();</script>"#,
+            css = HIGHLIGHT_CSS,
+            js = HIGHLIGHT_JS,
+            kdl = HIGHLIGHT_KDL,
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -343,6 +413,30 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
 <style>{css}</style>
+<style>
+.expandable {{ position: relative; }}
+.expand-btn {{
+    position: absolute; top: 6px; right: 6px;
+    width: 28px; height: 28px;
+    background: rgba(0,0,0,0.55); border: none; border-radius: 4px;
+    cursor: pointer; opacity: 0; transition: opacity 0.15s;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0; z-index: 10;
+}}
+.expandable:hover .expand-btn {{ opacity: 1; }}
+.expand-btn:hover {{ background: rgba(0,0,0,0.80); }}
+#expand-overlay {{
+    display: none; position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.85); z-index: 2147483647;
+    align-items: center; justify-content: center; cursor: zoom-out;
+}}
+#expand-content {{ cursor: default; }}
+#expand-content img {{ width: 95vw; height: 95vh; object-fit: contain; }}
+#expand-content svg {{ width: 95vw; height: 95vh; }}
+.expandable img, .expandable svg {{ cursor: zoom-in; }}
+.content svg {{ width: 100% !important; height: auto !important; display: block; }}
+</style>
 </head>
 <body>
 <nav class="sidebar">
@@ -471,12 +565,75 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
     }});
 }})();
 </script>
+{highlight_script}
 {mermaid_script}
+<div id="expand-overlay"><div id="expand-content"></div></div>
+<script>
+(function() {{
+    var ICON = '<svg width="14" height="14" viewBox="0 0 14 14" fill="white"><path d="M0 0v4h1.5V1.5H4V0H0zm10 0v1.5h2.5V4H14V0h-4zm0 14h4v-4h-1.5v2.5H10V14zM0 10v4h4v-1.5H1.5V10H0z"/></svg>';
+    var overlay = document.getElementById('expand-overlay');
+    var content = document.getElementById('expand-content');
+
+    function open(el) {{
+        content.innerHTML = '';
+        content.appendChild(el.cloneNode(true));
+        overlay.style.display = 'flex';
+    }}
+
+    function wrap(el) {{
+        if (el.closest('.expandable') || el.closest('#expand-overlay')) return;
+        var w = document.createElement('div');
+        w.className = 'expandable';
+        el.parentNode.insertBefore(w, el);
+        w.appendChild(el);
+        var btn = document.createElement('button');
+        btn.className = 'expand-btn';
+        btn.title = 'View fullscreen';
+        btn.innerHTML = ICON;
+        w.appendChild(btn);
+    }}
+
+    // Delegated listeners — avoids per-element addEventListener issues in WebKitGTK
+    document.addEventListener('click', function(e) {{
+        var btn = e.target.closest('.expand-btn');
+        if (!btn) return;
+        e.stopPropagation(); e.preventDefault();
+        var el = btn.closest('.expandable').querySelector('img, svg');
+        if (el) open(el);
+    }});
+    document.addEventListener('dblclick', function(e) {{
+        var el = e.target.closest('.content img, .content svg');
+        if (el) {{ e.stopPropagation(); e.preventDefault(); open(el); }}
+    }});
+
+    overlay.addEventListener('click', function() {{ overlay.style.display = 'none'; }});
+    content.addEventListener('click', function(e) {{ e.stopPropagation(); }});
+    document.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape') overlay.style.display = 'none';
+    }});
+
+    new MutationObserver(function(ms) {{
+        ms.forEach(function(m) {{
+            m.addedNodes.forEach(function(n) {{
+                if (!n.tagName) return;
+                var t = n.tagName.toUpperCase();
+                if (t === 'SVG' || t === 'IMG') wrap(n);
+                else if (n.querySelectorAll) n.querySelectorAll('svg,img').forEach(wrap);
+            }});
+        }});
+    }}).observe(document.querySelector('.content'), {{ childList: true, subtree: true }});
+
+    document.readyState === 'loading'
+        ? document.addEventListener('DOMContentLoaded', function() {{ document.querySelectorAll('.content img, .content svg').forEach(wrap); }})
+        : document.querySelectorAll('.content img, .content svg').forEach(wrap);
+}})();
+</script>
 </body>
 </html>"#,
         css = GITHUB_CSS,
         toc = toc_html,
         body = body,
+        highlight_script = highlight_script,
         mermaid_script = mermaid_script
     )
 }
@@ -496,6 +653,90 @@ mod tests {
         assert!(html.contains("Content-Security-Policy"), "CSP should be present");
         // Verify CSP doesn't block scripts (needed for search, mermaid, etc.)
         assert!(html.contains("script-src 'unsafe-inline'"), "Scripts must be allowed for search to work");
+    }
+
+    // --- highlight.js / KDL highlighting tests ---
+
+    #[test]
+    fn highlight_js_injected_when_code_blocks_present() {
+        let toc = vec![];
+        let body = r#"<pre><code class="language-rust">fn main() {}</code></pre>"#;
+        let html = build_html(body, &toc);
+        assert!(html.contains("hljs.highlightAll()"), "hljs.highlightAll() must be present when code blocks exist");
+        assert!(html.contains("hljsDefineKdl"), "KDL language definition must be injected");
+        assert!(html.contains("hljs.registerLanguage('kdl'"), "KDL must be registered with highlight.js");
+    }
+
+    #[test]
+    fn highlight_js_not_injected_for_prose_only() {
+        let toc = vec![];
+        let html = build_html("<p>No code here</p>", &toc);
+        assert!(!html.contains("hljs.highlightAll()"), "hljs should not be injected for prose-only content");
+        assert!(!html.contains("hljsDefineKdl"), "KDL grammar should not be injected for prose-only content");
+    }
+
+    #[test]
+    fn kdl_grammar_registers_correct_language_name() {
+        // The grammar file must declare hljsDefineKdl and reference 'kdl' as the language name
+        assert!(HIGHLIGHT_KDL.contains("hljsDefineKdl"), "Grammar must export hljsDefineKdl function");
+        assert!(HIGHLIGHT_KDL.contains("name: 'KDL'"), "Grammar must declare name: 'KDL'");
+        assert!(HIGHLIGHT_KDL.contains("aliases: ['kdl']"), "Grammar must include 'kdl' alias");
+    }
+
+    #[test]
+    fn kdl_grammar_covers_key_token_types() {
+        // Verify the grammar handles all major KDL v2 token types
+        assert!(HIGHLIGHT_KDL.contains("title.function"), "Node names need title.function scope");
+        assert!(HIGHLIGHT_KDL.contains("'attr'"), "Property keys need attr scope");
+        assert!(HIGHLIGHT_KDL.contains("'string'"), "Strings need string scope");
+        assert!(HIGHLIGHT_KDL.contains("'number'"), "Numbers need number scope");
+        assert!(HIGHLIGHT_KDL.contains("'literal'"), "Keyword literals need literal scope");
+        assert!(HIGHLIGHT_KDL.contains("'type'"), "Type annotations need type scope");
+        assert!(HIGHLIGHT_KDL.contains("'comment'"), "Comments need comment scope");
+    }
+
+    #[test]
+    fn kdl_grammar_handles_all_literals() {
+        // #true #false #null #inf #-inf #nan must all be covered
+        assert!(HIGHLIGHT_KDL.contains("#(?:true|false|null|nan|-inf|inf)") ||
+                (HIGHLIGHT_KDL.contains("true") && HIGHLIGHT_KDL.contains("false") &&
+                 HIGHLIGHT_KDL.contains("null") && HIGHLIGHT_KDL.contains("inf")),
+            "Grammar must cover all KDL v2 keyword literals");
+    }
+
+    #[test]
+    fn kdl_grammar_handles_raw_strings() {
+        // Raw strings #"..."# syntax must be present
+        assert!(HIGHLIGHT_KDL.contains("#+\""), "Grammar must handle raw string start #\"");
+        assert!(HIGHLIGHT_KDL.contains("\"#+"), "Grammar must handle raw string end \"#");
+    }
+
+    #[test]
+    fn kdl_grammar_handles_slashdash() {
+        assert!(HIGHLIGHT_KDL.contains("/-"), "Grammar must handle slashdash comments");
+    }
+
+    #[test]
+    fn highlight_css_includes_both_themes() {
+        assert!(HIGHLIGHT_CSS.contains("prefers-color-scheme:light"), "Must include light theme");
+        assert!(HIGHLIGHT_CSS.contains("prefers-color-scheme:dark"), "Must include dark theme");
+        // Both themes must define .hljs background
+        assert!(HIGHLIGHT_CSS.contains("#fff"), "Light theme must set white background");
+        assert!(HIGHLIGHT_CSS.contains("#0d1117"), "Dark theme must set dark background");
+    }
+
+    #[test]
+    fn highlight_css_includes_kdl_overrides() {
+        // Node names: bold red
+        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-title"), "KDL node name override must be present");
+        assert!(HIGHLIGHT_CSS.contains("font-weight:bold"), "KDL node names must be bold");
+        // Property keys: italic
+        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-attr"), "KDL property key override must be present");
+        assert!(HIGHLIGHT_CSS.contains("font-style:italic"), "KDL property keys must be italic");
+        // Attribute values: light blue
+        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-string"), "KDL value override must be present");
+        // Dark mode overrides present
+        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-title,.language-kdl .function_"), "Dark mode KDL node name override must be present");
     }
 
     #[test]
