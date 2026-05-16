@@ -74,6 +74,17 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     menu.init_for_nsapp();
 
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().unwrap();
+        WebViewBuilder::new()
+            .with_html(&full_html)
+            .with_clipboard(true)
+            .build_gtk(vbox)?
+    };
+    #[cfg(not(target_os = "linux"))]
     let webview = WebViewBuilder::new()
         .with_html(&full_html)
         .with_clipboard(true)
