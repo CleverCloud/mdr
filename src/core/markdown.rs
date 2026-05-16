@@ -214,7 +214,7 @@ pub const GITHUB_CSS: &str = r#"
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; }
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
     font-size: 16px;
     line-height: 1.6;
     color: var(--fg);

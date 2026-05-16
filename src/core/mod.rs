@@ -1,3 +1,4 @@
+pub mod config;
 pub mod icon;
 pub mod markdown;
 pub mod mermaid;

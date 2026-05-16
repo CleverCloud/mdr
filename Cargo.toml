@@ -27,6 +27,7 @@ mermaid-rs-renderer = { version = "0.1.2", default-features = false }
 regex = "1"
 serde_json = "1"
 base64 = "0.22"
+kdl = "6"
 
 # egui backend
 eframe = { version = "0.33", optional = true }

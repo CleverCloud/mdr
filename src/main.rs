@@ -13,16 +13,24 @@ struct Cli {
     file: Option<PathBuf>,
 
     /// Rendering backend to use: egui (native GUI), webview (HTML), tui (terminal)
-    #[arg(short, long, default_value = "auto", value_parser = parse_backend)]
-    backend: String,
+    #[arg(short, long, value_parser = parse_backend)]
+    backend: Option<String>,
 
     /// Enable verbose logging (image resolution, mermaid rendering, etc.)
     #[arg(short, long)]
     verbose: bool,
 
+    /// Path to config file [default: ~/.config/mdr/config.kdl]
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// List available backends and exit
     #[arg(long)]
     list_backends: bool,
+
+    /// Create a default config file and exit
+    #[arg(long)]
+    init: bool,
 }
 
 fn print_backends() {
@@ -105,12 +113,39 @@ fn read_stdin_to_tmpfile() -> PathBuf {
 
 fn main() {
     let cli = Cli::parse();
-    core::set_verbose(cli.verbose);
 
     if cli.list_backends {
         print_backends();
         process::exit(0);
     }
+
+    if cli.init {
+        let path = cli.config.clone().unwrap_or_else(core::config::default_path);
+        match core::config::write_default(&path) {
+            Ok(()) => {
+                eprintln!("Created config file: {}", path.display());
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        }
+    }
+
+    // Load config (explicit path errors if missing; default path is optional)
+    let cfg_path = cli.config.clone().unwrap_or_else(core::config::default_path);
+    let cfg = if cli.config.is_some() && !cfg_path.exists() {
+        eprintln!("Error: config file '{}' not found", cfg_path.display());
+        process::exit(1);
+    } else {
+        core::config::load(&cfg_path).unwrap_or_else(|e| {
+            eprintln!("mdr: config error ({}): {}", cfg_path.display(), e);
+            core::config::Config::default()
+        })
+    };
+
+    core::set_verbose(cli.verbose || cfg.verbose.unwrap_or(false));
 
     let file = match cli.file {
         Some(f) if f.as_os_str() == "-" => read_stdin_to_tmpfile(),
@@ -133,10 +168,13 @@ fn main() {
         }
     };
 
-    let backend = if cli.backend == "auto" {
+    let backend_str = cli.backend
+        .or(cfg.backend)
+        .unwrap_or_else(|| "auto".to_string());
+    let backend = if backend_str == "auto" {
         detect_backend()
     } else {
-        cli.backend.as_str()
+        backend_str.as_str()
     };
 
     let result = match backend {
