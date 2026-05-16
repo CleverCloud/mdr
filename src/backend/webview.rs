@@ -82,12 +82,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         WebViewBuilder::new()
             .with_html(&full_html)
             .with_clipboard(true)
+            .with_devtools(true)
             .build_gtk(vbox)?
     };
     #[cfg(not(target_os = "linux"))]
     let webview = WebViewBuilder::new()
         .with_html(&full_html)
         .with_clipboard(true)
+        .with_devtools(true)
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
@@ -343,6 +345,30 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
 <style>{css}</style>
+<style>
+.expandable {{ position: relative; }}
+.expand-btn {{
+    position: absolute; top: 6px; right: 6px;
+    width: 28px; height: 28px;
+    background: rgba(0,0,0,0.55); border: none; border-radius: 4px;
+    cursor: pointer; opacity: 0; transition: opacity 0.15s;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0; z-index: 10;
+}}
+.expandable:hover .expand-btn {{ opacity: 1; }}
+.expand-btn:hover {{ background: rgba(0,0,0,0.80); }}
+#expand-overlay {{
+    display: none; position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.85); z-index: 2147483647;
+    align-items: center; justify-content: center; cursor: zoom-out;
+}}
+#expand-content {{ cursor: default; }}
+#expand-content img {{ width: 95vw; height: 95vh; object-fit: contain; }}
+#expand-content svg {{ width: 95vw; height: 95vh; }}
+.expandable img, .expandable svg {{ cursor: zoom-in; }}
+.content svg {{ width: 100% !important; height: auto !important; display: block; }}
+</style>
 </head>
 <body>
 <nav class="sidebar">
@@ -472,6 +498,67 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
 }})();
 </script>
 {mermaid_script}
+<div id="expand-overlay"><div id="expand-content"></div></div>
+<script>
+(function() {{
+    var ICON = '<svg width="14" height="14" viewBox="0 0 14 14" fill="white"><path d="M0 0v4h1.5V1.5H4V0H0zm10 0v1.5h2.5V4H14V0h-4zm0 14h4v-4h-1.5v2.5H10V14zM0 10v4h4v-1.5H1.5V10H0z"/></svg>';
+    var overlay = document.getElementById('expand-overlay');
+    var content = document.getElementById('expand-content');
+
+    function open(el) {{
+        content.innerHTML = '';
+        content.appendChild(el.cloneNode(true));
+        overlay.style.display = 'flex';
+    }}
+
+    function wrap(el) {{
+        if (el.closest('.expandable') || el.closest('#expand-overlay')) return;
+        var w = document.createElement('div');
+        w.className = 'expandable';
+        el.parentNode.insertBefore(w, el);
+        w.appendChild(el);
+        var btn = document.createElement('button');
+        btn.className = 'expand-btn';
+        btn.title = 'View fullscreen';
+        btn.innerHTML = ICON;
+        w.appendChild(btn);
+    }}
+
+    // Delegated listeners — avoids per-element addEventListener issues in WebKitGTK
+    document.addEventListener('click', function(e) {{
+        var btn = e.target.closest('.expand-btn');
+        if (!btn) return;
+        e.stopPropagation(); e.preventDefault();
+        var el = btn.closest('.expandable').querySelector('img, svg');
+        if (el) open(el);
+    }});
+    document.addEventListener('dblclick', function(e) {{
+        var el = e.target.closest('.content img, .content svg');
+        if (el) {{ e.stopPropagation(); e.preventDefault(); open(el); }}
+    }});
+
+    overlay.addEventListener('click', function() {{ overlay.style.display = 'none'; }});
+    content.addEventListener('click', function(e) {{ e.stopPropagation(); }});
+    document.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape') overlay.style.display = 'none';
+    }});
+
+    new MutationObserver(function(ms) {{
+        ms.forEach(function(m) {{
+            m.addedNodes.forEach(function(n) {{
+                if (!n.tagName) return;
+                var t = n.tagName.toUpperCase();
+                if (t === 'SVG' || t === 'IMG') wrap(n);
+                else if (n.querySelectorAll) n.querySelectorAll('svg,img').forEach(wrap);
+            }});
+        }});
+    }}).observe(document.querySelector('.content'), {{ childList: true, subtree: true }});
+
+    document.readyState === 'loading'
+        ? document.addEventListener('DOMContentLoaded', function() {{ document.querySelectorAll('.content img, .content svg').forEach(wrap); }})
+        : document.querySelectorAll('.content img, .content svg').forEach(wrap);
+}})();
+</script>
 </body>
 </html>"#,
         css = GITHUB_CSS,
