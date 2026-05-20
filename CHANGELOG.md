@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-20
+
+### Added
+- Highlight.js syntax highlighting for code blocks in the webview backend, with `prefers-color-scheme` GitHub light/dark themes embedded via `include_str!`. Injected only when fenced code blocks are present (#35) — thanks @njreid
+- Custom KDL v2 grammar definition for highlight.js (#35)
+- Fullscreen expand overlay for images and Mermaid diagrams in the webview backend, with hover button, double-click, and `Esc` to close (#34) — thanks @njreid
+- User config file at `~/.config/mdr/config.kdl` (KDL v2) with `--init` to scaffold and `--config PATH` to override (#36) — thanks @njreid
+- `system-ui` added to the default font stack for a native desktop look (#36) — thanks @njreid
+- `with_devtools(true)` on the webview to enable in-app dev tools (#34)
+
+### Fixed
+- Webview backend crash on Linux/Wayland (`the window handle kind is not supported`). Switch to wry's GTK-native API (`WebViewBuilderExtUnix::build_gtk`) on Linux so the same binary works on X11 and Wayland (#33, closes #28) — thanks @njreid
+- TUI backend now exits early when stdout is not a terminal. Without this, `enable_raw_mode()` succeeds on Windows pipes and the event loop spins forever — this was the cause of every `main` CI run being cancelled at the 6h timeout since February (#39)
+
+### Changed
+- Cargo dependencies bumped — major versions where drop-in (#40):
+  - `comrak` 0.50 → 0.52
+  - `mermaid-rs-renderer` 0.1 → 0.2
+  - `resvg`, `usvg` 0.45 → 0.47
+  - `tiny-skia` 0.11 → 0.12
+  - `wry` 0.54 → 0.55
+  - `tao` 0.34 → 0.35
+  - `muda` 0.15 → 0.19
+  - `ratatui-image` 4.1 → 4.2
+
+### Internal
+- `timeout-minutes: 90` added on the CI check job so a future regression of the kind that caused the 6-month outage fails fast
+
 ## [0.2.6] - 2026-02-23
 
 ### Added
@@ -87,6 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TOC scroll navigation in egui backend
 - Mermaid rendering robustness in egui backend
 
+[0.3.0]: https://github.com/CleverCloud/mdr/compare/v0.2.8...v0.3.0
 [0.2.6]: https://github.com/CleverCloud/mdr/compare/v0.2.5...v0.2.6
 [0.2.4]: https://github.com/CleverCloud/mdr/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/CleverCloud/mdr/compare/v0.2.2...v0.2.3
