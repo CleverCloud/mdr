@@ -17,7 +17,14 @@ use crate::core::toc::{self, TocEntry};
 /// Represents a single line element in the rendered content.
 /// Lines can be either text (rendered as ratatui Lines) or images (rendered as StatefulImage).
 enum ContentElement {
-    TextLine(Line<'static>),
+    /// A text line. When `wrap` is true, the line is word-wrapped to the available
+    /// content width at render time (paragraphs, list items, blockquotes, headings).
+    /// When false, the line is rendered as-is and truncated if it exceeds the width
+    /// (code block lines, table rows, horizontal rules, heading underlines, placeholders).
+    TextLine {
+        line: Line<'static>,
+        wrap: bool,
+    },
     /// An image element that spans a number of rows in the terminal.
     /// Stores the stateful protocol, alt text (for fallback), and the desired height in rows.
     Image {
@@ -25,19 +32,180 @@ enum ContentElement {
         _alt: String,
         height: u16,
     },
-    /// Fallback placeholder when image loading fails.
-    ImagePlaceholder(Line<'static>),
 }
 
 impl ContentElement {
-    /// Returns the number of terminal rows this element occupies.
-    fn row_height(&self) -> u16 {
+    /// Returns the number of terminal rows this element occupies at the given content width.
+    /// For non-wrapping text and images, this is independent of width.
+    /// For wrapping text, this counts the wrapped sub-lines.
+    fn row_height(&self, width: u16) -> u16 {
         match self {
-            ContentElement::TextLine(_) => 1,
+            ContentElement::TextLine { wrap: false, .. } => 1,
+            ContentElement::TextLine { line, wrap: true } => wrapped_line_count(line, width),
             ContentElement::Image { height, .. } => *height,
-            ContentElement::ImagePlaceholder(_) => 1,
         }
     }
+
+    /// Returns the concatenated text of a text element, or an empty string for images.
+    /// Used for search matching and TOC heading lookup.
+    fn text(&self) -> String {
+        match self {
+            ContentElement::TextLine { line, .. } => {
+                line.spans.iter().map(|s| s.content.as_ref()).collect()
+            }
+            ContentElement::Image { .. } => String::new(),
+        }
+    }
+}
+
+/// Convenience constructor for non-wrapping text lines (code, borders, tables, HRs).
+fn text_line_no_wrap(line: Line<'static>) -> ContentElement {
+    ContentElement::TextLine { line, wrap: false }
+}
+
+/// Characters prepended to wrap-continuation sub-lines so the reader can tell
+/// a soft wrap apart from a "real" indented line.
+const WRAP_LINEBREAKCHARS: &str = "++++";
+/// Display width of `WRAP_LINEBREAKCHARS` in columns (ASCII assumption).
+const WRAP_LINEBREAKCHARS_WIDTH: u16 = 4;
+
+/// Compute the per-row widths used by the wrap algorithm. The first row uses
+/// the full available width; continuation rows reserve `WRAP_LINEBREAKCHARS_WIDTH`
+/// columns at the start for the linebreak chars. If the available width is too
+/// narrow to make the linebreak chars meaningful, both widths are equal (no
+/// chars are drawn).
+fn wrap_widths(width: u16) -> (u16, u16) {
+    if width > WRAP_LINEBREAKCHARS_WIDTH + 1 {
+        (width, width - WRAP_LINEBREAKCHARS_WIDTH)
+    } else {
+        (width, width)
+    }
+}
+
+/// Count the number of rows a Line will occupy when greedy word-wrapped to `width`
+/// columns. ASCII-width assumption: 1 char = 1 column. Mirrors the wrap algorithm in
+/// `wrap_line_into_sublines`, so render Rect height matches what is actually drawn.
+fn wrapped_line_count(line: &Line<'_>, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let (first, cont) = wrap_widths(width);
+    count_wrapped_rows(&text, first, cont)
+}
+
+/// Greedy whitespace-based wrap counter. Mirrors `split_wrap_offsets` exactly.
+fn count_wrapped_rows(text: &str, first_width: u16, cont_width: u16) -> u16 {
+    if text.is_empty() {
+        return 1;
+    }
+    split_wrap_offsets(text, first_width, cont_width).len().max(1) as u16
+}
+
+/// Split `text` into (start, end) char-index ranges that each fit within the
+/// active row width: `first_width` for the first row, `cont_width` for every
+/// subsequent (continuation) row. Greedy word wrap on whitespace, breaking
+/// over-long words at the boundary. Returns at least one range (possibly empty).
+fn split_wrap_offsets(text: &str, first_width: u16, cont_width: u16) -> Vec<(usize, usize)> {
+    let first_max = (first_width as usize).max(1);
+    let cont_max = (cont_width as usize).max(1);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut row_start: usize = 0;
+    let mut col: usize = 0;
+    let mut last_break: Option<usize> = None; // char index of last whitespace within current row
+    let mut i: usize = 0;
+    let mut max = first_max;
+    while i < chars.len() {
+        let ch = chars[i];
+        if col == max {
+            // Need to wrap before consuming this char.
+            let break_at = last_break.unwrap_or(i);
+            ranges.push((row_start, break_at));
+            // Skip a single whitespace at the break point (it was the separator).
+            let mut next = break_at;
+            if next < chars.len() && next < i && chars[next].is_whitespace() {
+                next += 1;
+            }
+            row_start = next;
+            i = next;
+            col = 0;
+            last_break = None;
+            max = cont_max;
+            continue;
+        }
+        if ch == ' ' || ch == '\t' {
+            last_break = Some(i);
+        }
+        col += 1;
+        i += 1;
+    }
+    ranges.push((row_start, chars.len()));
+    ranges
+}
+
+/// Wrap a styled `Line` into a sequence of `Line`s, each fitting within `width`
+/// columns. Span styling is preserved within sub-lines; whitespace at sub-line
+/// boundaries is consumed (as ratatui's `Wrap { trim: false }` does for hard
+/// breaks at space characters). Continuation sub-lines are prefixed with
+/// `WRAP_LINEBREAKCHARS` (dimmed) so soft wraps are visually distinct.
+fn wrap_line_into_sublines(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::from("")];
+    }
+    let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let (first_width, cont_width) = wrap_widths(width);
+    let offsets = split_wrap_offsets(&full_text, first_width, cont_width);
+    if offsets.is_empty() {
+        return vec![Line::from("")];
+    }
+    let linebreakchars_active = cont_width < first_width;
+    let linebreakchars_style = Style::default().fg(Color::DarkGray);
+
+    // Build a flat (char_index, char, style) view of the original line so we can
+    // slice it into sub-lines while preserving per-span styling.
+    let chars_all: Vec<char> = full_text.chars().collect();
+    let mut char_style: Vec<Style> = Vec::with_capacity(chars_all.len());
+    for span in &line.spans {
+        let style = span.style;
+        for _ in span.content.chars() {
+            char_style.push(style);
+        }
+    }
+    debug_assert_eq!(char_style.len(), chars_all.len());
+
+    let mut sublines: Vec<Line<'static>> = Vec::with_capacity(offsets.len());
+    for (sub_idx, (start, end)) in offsets.into_iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if sub_idx > 0 && linebreakchars_active {
+            spans.push(Span::styled(
+                WRAP_LINEBREAKCHARS.to_string(),
+                linebreakchars_style,
+            ));
+        }
+        if start >= end {
+            sublines.push(Line::from(spans));
+            continue;
+        }
+        // Group consecutive chars of the same style into spans.
+        let mut run_start = start;
+        let mut run_style = char_style[start];
+        for j in (start + 1)..end {
+            if char_style[j] != run_style {
+                let s: String = chars_all[run_start..j].iter().collect();
+                spans.push(Span::styled(s, run_style));
+                run_start = j;
+                run_style = char_style[j];
+            }
+        }
+        let s: String = chars_all[run_start..end].iter().collect();
+        spans.push(Span::styled(s, run_style));
+        sublines.push(Line::from(spans));
+    }
+    sublines
 }
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -80,6 +248,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         search_query: String::new(),
         search_matches: Vec::new(),
         current_match_idx: 0,
+        content_width: 0,
     };
 
     // Main loop
@@ -99,6 +268,9 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // Poll events with 100ms timeout for file watching
         if event::poll(std::time::Duration::from_millis(100))? {
             let ev = event::read()?;
+            // Resize events are handled implicitly: `ui()` recomputes the
+            // wrapped row total at the new width and re-clamps `scroll_offset`,
+            // so we don't need to do anything special here.
             // Handle mouse scroll
             if let Event::Mouse(mouse) = &ev {
                 match mouse.kind {
@@ -123,7 +295,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Enter => {
                             if !app.search_matches.is_empty() {
                                 app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
-                                app.scroll_offset = app.search_matches[app.current_match_idx];
+                                let m = app.search_matches[app.current_match_idx];
+                                app.scroll_offset = match_to_row(&app.rendered, &m, app.content_width.max(1));
                             }
                         }
                         KeyCode::Backspace => {
@@ -151,7 +324,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('n') => {
                             if !app.search_matches.is_empty() {
                                 app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
-                                app.scroll_offset = app.search_matches[app.current_match_idx];
+                                let m = app.search_matches[app.current_match_idx];
+                                app.scroll_offset = match_to_row(&app.rendered, &m, app.content_width.max(1));
                             }
                         }
                         KeyCode::Char('N') => {
@@ -161,7 +335,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     app.current_match_idx - 1
                                 };
-                                app.scroll_offset = app.search_matches[app.current_match_idx];
+                                let m = app.search_matches[app.current_match_idx];
+                                app.scroll_offset = match_to_row(&app.rendered, &m, app.content_width.max(1));
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -190,7 +365,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                             app.scroll_offset = 0;
                         }
                         KeyCode::End | KeyCode::Char('G') => {
-                            let total_rows = total_content_rows(&app.rendered);
+                            let width = app.content_width.max(1);
+                            let total_rows = total_content_rows(&app.rendered, width);
                             app.scroll_offset = total_rows.saturating_sub(1);
                         }
                         KeyCode::Tab => {
@@ -198,8 +374,9 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Enter => {
                             if app.focus_toc {
-                                if let Some(offset) = find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected) {
-                                    app.scroll_offset = offset;
+                                if let Some(elem_idx) = find_heading_element(&app.rendered, &app.toc_entries, app.toc_selected) {
+                                    let width = app.content_width.max(1);
+                                    app.scroll_offset = element_start_row(&app.rendered, elem_idx, width);
                                     app.focus_toc = false;
                                 }
                             }
@@ -236,8 +413,24 @@ struct TuiApp {
     should_quit: bool,
     search_mode: bool,
     search_query: String,
-    search_matches: Vec<usize>,
+    search_matches: Vec<SearchMatch>,
     current_match_idx: usize,
+    /// Width of the content area (excluding borders), updated each draw.
+    /// Cached so event handlers (G/End, search jumps, TOC navigation) can compute
+    /// width-aware row offsets without reaching into the layout.
+    content_width: u16,
+}
+
+/// Location of a search hit, anchored to the element + character offset within it
+/// rather than to an absolute row. Row offsets change with terminal width once
+/// wrapping is enabled, so we resolve to a row only at jump time using the
+/// current `content_width`.
+#[derive(Clone, Copy)]
+struct SearchMatch {
+    element_idx: usize,
+    /// Character offset of the match within the element's concatenated text.
+    /// For non-wrapping or empty elements this is 0.
+    char_offset: usize,
 }
 
 fn update_search_matches(app: &mut TuiApp) {
@@ -247,37 +440,64 @@ fn update_search_matches(app: &mut TuiApp) {
         return;
     }
     let query_lower = app.search_query.to_lowercase();
-    let mut row_offset: usize = 0;
-    for element in &app.rendered {
-        match element {
-            ContentElement::TextLine(line) => {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if text.to_lowercase().contains(&query_lower) {
-                    app.search_matches.push(row_offset);
-                }
-                row_offset += 1;
-            }
-            ContentElement::Image { height, .. } => {
-                row_offset += *height as usize;
-            }
-            ContentElement::ImagePlaceholder(line) => {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if text.to_lowercase().contains(&query_lower) {
-                    app.search_matches.push(row_offset);
-                }
-                row_offset += 1;
-            }
+    for (idx, element) in app.rendered.iter().enumerate() {
+        let text = element.text();
+        if text.is_empty() {
+            continue;
+        }
+        let text_lower = text.to_lowercase();
+        if let Some(byte_offset) = text_lower.find(&query_lower) {
+            // Convert byte offset to char offset (matches `split_wrap_offsets` units).
+            let char_offset = text_lower[..byte_offset].chars().count();
+            app.search_matches.push(SearchMatch { element_idx: idx, char_offset });
         }
     }
-    // Auto-scroll to first match
-    if !app.search_matches.is_empty() {
-        app.scroll_offset = app.search_matches[0];
+    // Auto-scroll to first match.
+    if let Some(first) = app.search_matches.first().copied() {
+        app.scroll_offset = match_to_row(&app.rendered, &first, app.content_width.max(1));
     }
 }
 
-/// Calculate the total number of terminal rows occupied by all content elements.
-fn total_content_rows(elements: &[ContentElement]) -> usize {
-    elements.iter().map(|e| e.row_height() as usize).sum()
+/// Calculate the total number of terminal rows occupied by all content elements
+/// at the given content width. For wrapping elements, accounts for the wrapped
+/// sub-line count.
+fn total_content_rows(elements: &[ContentElement], width: u16) -> usize {
+    elements.iter().map(|e| e.row_height(width) as usize).sum()
+}
+
+/// Resolve a `SearchMatch` to an absolute row offset at the given width.
+/// For wrapping elements the result points to the sub-line containing the match;
+/// for non-wrapping elements it is the element's starting row.
+fn match_to_row(elements: &[ContentElement], m: &SearchMatch, width: u16) -> usize {
+    let mut row: usize = 0;
+    for (i, e) in elements.iter().enumerate() {
+        if i == m.element_idx {
+            if let ContentElement::TextLine { wrap: true, .. } = e {
+                let text = e.text();
+                let (first, cont) = wrap_widths(width);
+                let offsets = split_wrap_offsets(&text, first, cont);
+                for (j, (start, end)) in offsets.iter().enumerate() {
+                    if m.char_offset >= *start && m.char_offset < *end {
+                        return row + j;
+                    }
+                }
+                // Match at the very end: land on the last sub-line.
+                return row + offsets.len().saturating_sub(1);
+            }
+            return row;
+        }
+        row += e.row_height(width) as usize;
+    }
+    row
+}
+
+/// Compute the absolute starting row of element `target_idx` at the given width.
+fn element_start_row(elements: &[ContentElement], target_idx: usize, width: u16) -> usize {
+    elements
+        .iter()
+        .take(target_idx)
+        .map(|e| e.row_height(width) as usize)
+        .sum()
 }
 
 fn ui(f: &mut Frame, app: &mut TuiApp) {
@@ -336,9 +556,13 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
         .inner(content_area);
 
     let content_height = inner_area.height as usize;
-    let total_rows = total_content_rows(&app.rendered);
+    let content_width = inner_area.width;
+    app.content_width = content_width;
+    let total_rows = total_content_rows(&app.rendered, content_width);
     let max_scroll = total_rows.saturating_sub(content_height);
-    let scroll = app.scroll_offset.min(max_scroll);
+    // Persist the clamp so resizing back up doesn't leave scroll past the new end.
+    app.scroll_offset = app.scroll_offset.min(max_scroll);
+    let scroll = app.scroll_offset;
 
     // Draw the border block first
     let scroll_info = format!(" {}/{} ", scroll + 1, total_rows.max(1));
@@ -390,39 +614,38 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
 }
 
 /// Render content elements into the given area, handling scroll offset.
-/// This function iterates through elements, skipping rows according to the scroll offset,
-/// and renders visible text lines and images. Search matches are highlighted.
+/// This function iterates through elements, skipping rows according to the scroll
+/// offset, and renders visible text lines, wrapped paragraphs, and images.
+/// Search matches highlight the entire matching element (all wrapped sub-lines).
 fn render_content_elements(
     f: &mut Frame,
     area: Rect,
     elements: &mut [ContentElement],
     scroll: usize,
     content_height: usize,
-    search_matches: &[usize],
+    search_matches: &[SearchMatch],
     current_match: usize,
 ) {
+    let width = area.width;
     let mut rows_skipped: usize = 0;
     let mut y_offset: u16 = 0;
     let available_height = content_height as u16;
-    // Track absolute row offset for each element (independent of scroll)
-    let mut absolute_row: usize = 0;
 
-    for element in elements.iter_mut() {
+    let current_element_idx = search_matches.get(current_match).map(|m| m.element_idx);
+
+    for (idx, element) in elements.iter_mut().enumerate() {
         if y_offset >= available_height {
             break;
         }
 
-        let elem_height = element.row_height() as usize;
-        let current_absolute_row = absolute_row;
-        absolute_row += elem_height;
+        let elem_height = element.row_height(width) as usize;
 
-        // Check if this element is before the scroll window
+        // Element fully above the scroll window
         if rows_skipped + elem_height <= scroll {
             rows_skipped += elem_height;
             continue;
         }
 
-        // This element is at least partially visible
         let skip_within = if rows_skipped < scroll {
             scroll - rows_skipped
         } else {
@@ -430,42 +653,44 @@ fn render_content_elements(
         };
         rows_skipped += elem_height;
 
+        let is_match = search_matches.iter().any(|m| m.element_idx == idx);
+        let is_current = current_element_idx == Some(idx);
+
         match element {
-            ContentElement::TextLine(line) => {
+            ContentElement::TextLine { line, wrap: false } => {
                 if skip_within == 0 {
                     let line_area = Rect {
                         x: area.x,
                         y: area.y + y_offset,
-                        width: area.width,
+                        width,
                         height: 1,
                     };
-                    // Check if this line matches search
-                    let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
-
-                    if is_current {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
-                        }).collect::<Vec<_>>());
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else if is_match {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
-                        }).collect::<Vec<_>>());
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else {
-                        let p = Paragraph::new(line.clone());
-                        f.render_widget(p, line_area);
-                    }
+                    render_styled_line(f, line_area, line, is_match, is_current);
                     y_offset += 1;
                 }
-                // If skip_within > 0 for a 1-row element, it's fully scrolled past
+                // For 1-row elements, skip_within > 0 means the element is fully past.
+            }
+            ContentElement::TextLine { line, wrap: true } => {
+                let sublines = wrap_line_into_sublines(line, width);
+                let total_subs = sublines.len();
+                if skip_within >= total_subs {
+                    continue;
+                }
+                let remaining = available_height - y_offset;
+                let render_count = ((total_subs - skip_within) as u16).min(remaining);
+                for j in 0..render_count {
+                    let sub = &sublines[skip_within + j as usize];
+                    let line_area = Rect {
+                        x: area.x,
+                        y: area.y + y_offset + j,
+                        width,
+                        height: 1,
+                    };
+                    render_styled_line(f, line_area, sub, is_match, is_current);
+                }
+                y_offset += render_count;
             }
             ContentElement::Image { protocol, height, .. } => {
-                // Show the visible portion of the image.
-                // When partially scrolled, show only the remaining rows.
                 let visible_height = (*height as usize).saturating_sub(skip_within) as u16;
                 if visible_height == 0 {
                     continue;
@@ -478,75 +703,78 @@ fn render_content_elements(
                 let img_area = Rect {
                     x: area.x,
                     y: area.y + y_offset,
-                    width: area.width,
+                    width,
                     height: render_height,
                 };
                 let image_widget = StatefulImage::default().resize(Resize::Fit(None));
                 f.render_stateful_widget(image_widget, img_area, protocol);
                 y_offset += render_height;
             }
-            ContentElement::ImagePlaceholder(line) => {
-                if skip_within == 0 {
-                    let line_area = Rect {
-                        x: area.x,
-                        y: area.y + y_offset,
-                        width: area.width,
-                        height: 1,
-                    };
-                    let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
-
-                    if is_current {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
-                        }).collect::<Vec<_>>());
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else if is_match {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
-                        }).collect::<Vec<_>>());
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else {
-                        let p = Paragraph::new(line.clone());
-                        f.render_widget(p, line_area);
-                    }
-                    y_offset += 1;
-                }
-            }
         }
     }
 }
 
-/// Find the row offset where a heading appears in the rendered output.
-fn find_heading_row(elements: &[ContentElement], toc_entries: &[TocEntry], toc_index: usize) -> Option<usize> {
+/// Render a single styled line into a 1-row area, optionally applying a search
+/// highlight (current match: yellow background; other match: dim yellow).
+fn render_styled_line(
+    f: &mut Frame,
+    area: Rect,
+    line: &Line<'_>,
+    is_match: bool,
+    is_current: bool,
+) {
+    if is_current {
+        let highlighted = Line::from(
+            line.spans
+                .iter()
+                .map(|s| {
+                    Span::styled(
+                        s.content.to_string(),
+                        s.style.bg(Color::Yellow).fg(Color::Black),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Paragraph::new(highlighted), area);
+    } else if is_match {
+        let highlighted = Line::from(
+            line.spans
+                .iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style.bg(Color::Rgb(80, 80, 0))))
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Paragraph::new(highlighted), area);
+    } else {
+        let copied = Line::from(
+            line.spans
+                .iter()
+                .map(|s| Span::styled(s.content.to_string(), s.style))
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Paragraph::new(copied), area);
+    }
+}
+
+/// Find the element index of the heading matching `toc_entries[toc_index]`.
+/// Substring match on the element's concatenated text (matches the original
+/// behavior; the caller resolves the index to a row at the current width).
+fn find_heading_element(
+    elements: &[ContentElement],
+    toc_entries: &[TocEntry],
+    toc_index: usize,
+) -> Option<usize> {
     let entry = toc_entries.get(toc_index)?;
     let search_text = &entry.text;
-    let mut row_offset: usize = 0;
-
-    for element in elements {
-        match element {
-            ContentElement::TextLine(line) => {
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if line_text.contains(search_text) {
-                    return Some(row_offset);
-                }
-                row_offset += 1;
-            }
-            ContentElement::Image { height, .. } => {
-                row_offset += *height as usize;
-            }
-            ContentElement::ImagePlaceholder(line) => {
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if line_text.contains(search_text) {
-                    return Some(row_offset);
-                }
-                row_offset += 1;
-            }
+    for (i, element) in elements.iter().enumerate() {
+        // Only consider wrapping text elements (headings are emitted as wrap=true);
+        // skip non-wrap rules/underlines to avoid landing on a separator that happens
+        // to share the heading's slug characters.
+        if matches!(element, ContentElement::TextLine { wrap: true, .. })
+            && element.text().contains(search_text)
+        {
+            return Some(i);
         }
     }
-
     None
 }
 
@@ -565,8 +793,8 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
     let mut elements = Vec::new();
     for item in text_lines {
         match item {
-            ParsedLine::Text(line) => {
-                elements.push(ContentElement::TextLine(line));
+            ParsedLine::Text { line, wrap } => {
+                elements.push(ContentElement::TextLine { line, wrap });
             }
             ParsedLine::MermaidRef { source } => {
                 // Try to render mermaid diagram as an image
@@ -623,7 +851,7 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                         }
                         Err(_) => {
                             let label = if alt.is_empty() { "image".to_string() } else { alt };
-                            elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
+                            elements.push(text_line_no_wrap(Line::from(Span::styled(
                                 format!("[Image: {}]", label),
                                 Style::default().fg(Color::Magenta).italic(),
                             ))));
@@ -632,7 +860,7 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                 } else {
                     // No picker available (terminal doesn't support image protocols or detection failed)
                     let label = if alt.is_empty() { "image".to_string() } else { alt };
-                    elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
+                    elements.push(text_line_no_wrap(Line::from(Span::styled(
                         format!("[Image: {}]", label),
                         Style::default().fg(Color::Magenta).italic(),
                     ))));
@@ -646,21 +874,21 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
 
 /// Push a mermaid code block as fallback text when rendering fails or no picker is available.
 fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) {
-    elements.push(ContentElement::TextLine(Line::from(Span::styled(
+    elements.push(text_line_no_wrap(Line::from(Span::styled(
         "┌─ mermaid ─────────────────────────────────┐".to_string(),
         Style::default().fg(Color::DarkGray),
     ))));
     for line in source.lines() {
-        elements.push(ContentElement::TextLine(Line::from(Span::styled(
+        elements.push(text_line_no_wrap(Line::from(Span::styled(
             format!("│ {}", line),
             Style::default().fg(Color::Green),
         ))));
     }
-    elements.push(ContentElement::TextLine(Line::from(Span::styled(
+    elements.push(text_line_no_wrap(Line::from(Span::styled(
         "└─────────────────────────────────────────┘".to_string(),
         Style::default().fg(Color::DarkGray),
     ))));
-    elements.push(ContentElement::TextLine(Line::from("")));
+    elements.push(text_line_no_wrap(Line::from("")));
 }
 
 /// Load an image from a URL, data URI, or local file path.
@@ -762,10 +990,26 @@ fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::e
 
 /// Intermediate representation for parsed markdown lines.
 enum ParsedLine {
-    Text(Line<'static>),
+    Text {
+        line: Line<'static>,
+        /// When true, the line is word-wrapped to the content width at render
+        /// time. Used for prose: paragraphs, list items, blockquotes, task
+        /// items, and heading text. When false (default for code lines, table
+        /// rows, borders, horizontal rules, heading underlines) the line is
+        /// rendered as-is and truncated if it overflows.
+        wrap: bool,
+    },
     ImageRef { alt: String, url: String },
     /// A mermaid diagram source extracted from a ```mermaid code block.
     MermaidRef { source: String },
+}
+
+fn pt_wrap(line: Line<'static>) -> ParsedLine {
+    ParsedLine::Text { line, wrap: true }
+}
+
+fn pt_nowrap(line: Line<'static>) -> ParsedLine {
+    ParsedLine::Text { line, wrap: false }
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
@@ -787,11 +1031,11 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                     mermaid_source.clear();
                 } else {
                     in_code_block = false;
-                    items.push(ParsedLine::Text(Line::from(Span::styled(
+                    items.push(pt_nowrap(Line::from(Span::styled(
                         "└─────────────────────────────────────────┘",
                         Style::default().fg(Color::DarkGray),
                     ))));
-                    items.push(ParsedLine::Text(Line::from("")));
+                    items.push(pt_nowrap(Line::from("")));
                 }
             } else {
                 in_code_block = true;
@@ -805,7 +1049,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                     } else {
                         format!("┌─ {} {}", code_lang, "─".repeat(38usize.saturating_sub(code_lang.len())))
                     };
-                    items.push(ParsedLine::Text(Line::from(Span::styled(
+                    items.push(pt_nowrap(Line::from(Span::styled(
                         header,
                         Style::default().fg(Color::DarkGray),
                     ))));
@@ -822,7 +1066,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                 }
                 mermaid_source.push_str(line);
             } else {
-                items.push(ParsedLine::Text(Line::from(Span::styled(
+                items.push(pt_nowrap(Line::from(Span::styled(
                     format!("│ {}", line),
                     Style::default().fg(Color::Green),
                 ))));
@@ -830,44 +1074,44 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
             continue;
         }
 
-        // Headings
+        // Headings: text wraps; underline rule does not.
         if line.starts_with("# ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from("")));
+            items.push(pt_wrap(Line::from(Span::styled(
                 line[2..].to_string(),
                 Style::default().fg(Color::Cyan).bold().underlined(),
             ))));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from(Span::styled(
                 "═".repeat(line.len().saturating_sub(2).min(60)),
                 Style::default().fg(Color::Cyan),
             ))));
-            items.push(ParsedLine::Text(Line::from("")));
+            items.push(pt_nowrap(Line::from("")));
             continue;
         }
         if line.starts_with("## ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from("")));
+            items.push(pt_wrap(Line::from(Span::styled(
                 line[3..].to_string(),
                 Style::default().fg(Color::Blue).bold(),
             ))));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from(Span::styled(
                 "─".repeat(line.len().saturating_sub(3).min(50)),
                 Style::default().fg(Color::Blue),
             ))));
-            items.push(ParsedLine::Text(Line::from("")));
+            items.push(pt_nowrap(Line::from("")));
             continue;
         }
         if line.starts_with("### ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from("")));
+            items.push(pt_wrap(Line::from(Span::styled(
                 line[4..].to_string(),
                 Style::default().fg(Color::Yellow).bold(),
             ))));
-            items.push(ParsedLine::Text(Line::from("")));
+            items.push(pt_nowrap(Line::from("")));
             continue;
         }
         if line.starts_with("#### ") {
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_wrap(Line::from(Span::styled(
                 line[5..].to_string(),
                 Style::default().fg(Color::Magenta).bold(),
             ))));
@@ -876,18 +1120,18 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
 
         // Horizontal rule
         if line.starts_with("---") || line.starts_with("***") || line.starts_with("___") {
-            items.push(ParsedLine::Text(Line::from(Span::styled(
+            items.push(pt_nowrap(Line::from(Span::styled(
                 "─".repeat(60),
                 Style::default().fg(Color::DarkGray),
             ))));
             continue;
         }
 
-        // Table rows
+        // Table rows (column alignment depends on no-wrap; long rows are truncated).
         if line.contains('|') && line.trim().starts_with('|') {
             if line.contains("---") && !in_table {
                 in_table = true;
-                items.push(ParsedLine::Text(Line::from(Span::styled(
+                items.push(pt_nowrap(Line::from(Span::styled(
                     line.to_string(),
                     Style::default().fg(Color::DarkGray),
                 ))));
@@ -906,7 +1150,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                 v.push(Span::styled(cell.to_string(), Style::default().fg(Color::White)));
                 v
             }).collect();
-            items.push(ParsedLine::Text(Line::from(spans)));
+            items.push(pt_nowrap(Line::from(spans)));
             continue;
         } else {
             in_table = false;
@@ -914,7 +1158,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
 
         // Blockquote
         if line.starts_with("> ") {
-            items.push(ParsedLine::Text(Line::from(vec![
+            items.push(pt_wrap(Line::from(vec![
                 Span::styled("▎ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(line[2..].to_string(), Style::default().fg(Color::Gray).italic()),
             ])));
@@ -924,7 +1168,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         // Task list
         if line.trim_start().starts_with("- [x] ") {
             let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
+            items.push(pt_wrap(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("☑ ", Style::default().fg(Color::Green)),
                 Span::styled(
@@ -936,7 +1180,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         }
         if line.trim_start().starts_with("- [ ] ") {
             let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
+            items.push(pt_wrap(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("☐ ", Style::default().fg(Color::Yellow)),
                 Span::styled(line.trim_start()[6..].to_string(), Style::default()),
@@ -947,7 +1191,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         // Unordered list
         if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
             let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
+            items.push(pt_wrap(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("• ", Style::default().fg(Color::Cyan)),
                 Span::styled(
@@ -961,7 +1205,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         // Ordered list
         if let Some(rest) = try_parse_ordered_list(line) {
             let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
+            items.push(pt_wrap(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled(rest.0.clone(), Style::default().fg(Color::Cyan)),
                 Span::styled(rest.1.clone(), Style::default()),
@@ -977,8 +1221,8 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
             }
         }
 
-        // Regular text with inline formatting
-        items.push(ParsedLine::Text(parse_inline_formatting(line)));
+        // Regular text with inline formatting (wrapped paragraph).
+        items.push(pt_wrap(parse_inline_formatting(line)));
     }
 
     items
@@ -1191,9 +1435,12 @@ mod tests {
         // Build content elements (without a picker, images become placeholders OR succeed via rasterize)
         let elements = build_content_elements(md, &md_path, &None);
 
-        // Should have parsed lines including the image reference
-        // Without a picker, SVG falls back to placeholder — but the markdown parser should find it
-        let has_image_ref = elements.iter().any(|e| matches!(e, ContentElement::ImagePlaceholder(_)));
+        // Without a picker, SVG falls back to placeholder — but the markdown parser should find it.
+        // Placeholders are now emitted as non-wrapping TextLines styled with magenta italic.
+        let has_image_ref = elements.iter().any(|e| {
+            matches!(e, ContentElement::TextLine { wrap: false, .. })
+                && e.text().starts_with("[Image:")
+        });
         assert!(has_image_ref, "Should find an image placeholder for the SVG reference");
 
         // Now test load_image directly to confirm SVG rasterization works
@@ -1243,7 +1490,7 @@ mod tests {
 
         // Should NOT have green code lines for mermaid content
         let has_green_code = items.iter().any(|item| {
-            if let ParsedLine::Text(line) = item {
+            if let ParsedLine::Text { line, .. } = item {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 text.contains("│ graph LR") || text.contains("│   A-->B")
             } else {
@@ -1261,9 +1508,9 @@ mod tests {
         let has_mermaid_ref = items.iter().any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
         assert!(!has_mermaid_ref, "Non-mermaid code blocks should NOT produce MermaidRef");
 
-        // Should have regular code text
+        // Should have regular code text emitted as non-wrapping lines (truncated, not wrapped).
         let has_code_text = items.iter().any(|item| {
-            if let ParsedLine::Text(line) = item {
+            if let ParsedLine::Text { line, wrap: false } = item {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 text.contains("│ fn main()")
             } else {
@@ -1280,12 +1527,334 @@ mod tests {
         let md_path = std::path::PathBuf::from("/tmp/test_mermaid.md");
         let elements = build_content_elements(md, &md_path, &None);
 
-        // Without picker, mermaid rendering should either produce TextLines (fallback)
-        // or ImagePlaceholder - but NOT be empty
         assert!(!elements.is_empty(), "Should produce content elements for mermaid block");
 
-        // Check that we have some text lines (the fallback code display)
-        let has_text = elements.iter().any(|e| matches!(e, ContentElement::TextLine(_)));
+        // The fallback uses non-wrapping text lines (preserve box-drawing).
+        let has_text = elements.iter().any(|e| matches!(e, ContentElement::TextLine { .. }));
         assert!(has_text, "Mermaid fallback should produce text lines");
+    }
+
+    // --- wrap tests ---
+
+    #[test]
+    fn wrap_short_line_is_single_row() {
+        let line = Line::from("hello world");
+        assert_eq!(wrapped_line_count(&line, 80), 1);
+        assert_eq!(wrap_line_into_sublines(&line, 80).len(), 1);
+    }
+
+    #[test]
+    fn wrap_breaks_on_whitespace() {
+        let line = Line::from("one two three four five six");
+        // Width 11 = "one two" (7) + space — second word "three" (5) overflows → wrap.
+        let count = wrapped_line_count(&line, 11);
+        assert!(count >= 2, "expected at least 2 rows, got {}", count);
+        let subs = wrap_line_into_sublines(&line, 11);
+        assert_eq!(subs.len() as u16, count);
+        // No sub-line should exceed the width.
+        for s in &subs {
+            let text: String = s.spans.iter().map(|sp| sp.content.as_ref()).collect();
+            assert!(text.chars().count() <= 11, "sub-line too wide: {:?}", text);
+        }
+    }
+
+    #[test]
+    fn wrap_preserves_span_styles_within_sublines() {
+        let line = Line::from(vec![
+            Span::styled("hello ", Style::default().fg(Color::Red)),
+            Span::styled("world", Style::default().fg(Color::Blue)),
+        ]);
+        let subs = wrap_line_into_sublines(&line, 100);
+        assert_eq!(subs.len(), 1);
+        // Should still have two styled spans, not merged into one.
+        assert_eq!(subs[0].spans.len(), 2);
+        assert_eq!(subs[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(subs[0].spans[1].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn wrap_empty_line_is_one_row() {
+        assert_eq!(wrapped_line_count(&Line::from(""), 80), 1);
+        let subs = wrap_line_into_sublines(&Line::from(""), 80);
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn wrap_long_word_hard_breaks() {
+        // A single word longer than the width must be broken.
+        let line = Line::from("abcdefghij");
+        let count = wrapped_line_count(&line, 4);
+        assert!(count >= 2, "long word should break; got {} rows", count);
+    }
+
+    // --- wrap linebreakchars ("++++") tests ---
+
+    fn subline_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn wrap_first_subline_has_no_linebreakchars() {
+        // A long-enough paragraph at a width that forces wrapping.
+        let line = Line::from("one two three four five six seven eight nine ten");
+        let subs = wrap_line_into_sublines(&line, 12);
+        assert!(subs.len() >= 2, "expected wrapping, got {} sub-lines", subs.len());
+        assert!(
+            !subline_text(&subs[0]).starts_with(WRAP_LINEBREAKCHARS),
+            "first sub-line must not have the linebreakchars, got {:?}",
+            subline_text(&subs[0])
+        );
+    }
+
+    #[test]
+    fn wrap_continuation_sublines_have_linebreakchars() {
+        let line = Line::from("one two three four five six seven eight nine ten");
+        let subs = wrap_line_into_sublines(&line, 12);
+        assert!(subs.len() >= 2);
+        for (i, s) in subs.iter().enumerate().skip(1) {
+            let text = subline_text(s);
+            assert!(
+                text.starts_with(WRAP_LINEBREAKCHARS),
+                "sub-line {} should start with linebreakchars {:?}, got {:?}",
+                i,
+                WRAP_LINEBREAKCHARS,
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_linebreakchars_are_dimmed_dark_gray() {
+        let line = Line::from("one two three four five six seven eight nine ten");
+        let subs = wrap_line_into_sublines(&line, 12);
+        assert!(subs.len() >= 2);
+        let first_span_of_cont = &subs[1].spans[0];
+        assert_eq!(first_span_of_cont.content.as_ref(), WRAP_LINEBREAKCHARS);
+        assert_eq!(first_span_of_cont.style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn wrap_sublines_fit_within_width_including_linebreakchars() {
+        // Linebreakchars (WRAP_LINEBREAKCHARS_WIDTH) + content must not exceed
+        // the available width.
+        let line = Line::from("aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk");
+        for width in [12u16, 20, 40] {
+            let subs = wrap_line_into_sublines(&line, width);
+            for (i, s) in subs.iter().enumerate() {
+                let n = subline_text(s).chars().count() as u16;
+                assert!(
+                    n <= width,
+                    "sub-line {} at width {} too wide: {} cols",
+                    i,
+                    width,
+                    n
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_no_linebreakchars_at_very_narrow_widths() {
+        // When width <= WRAP_LINEBREAKCHARS_WIDTH + 1, the chars would leave
+        // no room for content; behaviour falls back to no-prefix wrapping.
+        let line = Line::from("abc def ghi");
+        let subs = wrap_line_into_sublines(&line, WRAP_LINEBREAKCHARS_WIDTH);
+        for s in &subs {
+            assert!(
+                !subline_text(s).starts_with(WRAP_LINEBREAKCHARS),
+                "no linebreakchars expected at narrow width, got {:?}",
+                subline_text(s)
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_count_reflects_linebreakchars_width_reservation() {
+        // Same content wraps to more rows when the linebreakchars steal columns
+        // from continuation rows (compared to a hypothetical no-prefix run).
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let with_chars = count_wrapped_rows(text, 20, 20 - WRAP_LINEBREAKCHARS_WIDTH);
+        let without_chars = count_wrapped_rows(text, 20, 20);
+        assert!(
+            with_chars >= without_chars,
+            "linebreakchars-aware count ({}) should be >= no-prefix count ({})",
+            with_chars,
+            without_chars
+        );
+    }
+
+    #[test]
+    fn wrap_empty_line_has_no_linebreakchars() {
+        let subs = wrap_line_into_sublines(&Line::from(""), 80);
+        assert_eq!(subs.len(), 1);
+        assert!(!subline_text(&subs[0]).starts_with(WRAP_LINEBREAKCHARS));
+    }
+
+    #[test]
+    fn match_to_row_jumps_past_linebreakchars_widths() {
+        // With linebreakchars reducing continuation widths, a late match should
+        // still resolve to the correct (further) sub-line.
+        let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let elements = vec![
+            ContentElement::TextLine { line: Line::from(para), wrap: true },
+        ];
+        let m = SearchMatch {
+            element_idx: 0,
+            char_offset: para.find("lambda").unwrap(),
+        };
+        let row = match_to_row(&elements, &m, 20);
+        let total = total_content_rows(&elements, 20);
+        assert!(row > 0, "match should not be on first sub-line");
+        assert!(row < total, "match row {} should be < total {}", row, total);
+    }
+
+    #[test]
+    fn row_height_no_wrap_is_one() {
+        let elem = ContentElement::TextLine {
+            line: Line::from("this is a very long line that would wrap if it were allowed to"),
+            wrap: false,
+        };
+        assert_eq!(elem.row_height(20), 1);
+    }
+
+    #[test]
+    fn row_height_wrap_grows_at_narrow_width() {
+        let elem = ContentElement::TextLine {
+            line: Line::from("alpha beta gamma delta epsilon zeta eta theta iota"),
+            wrap: true,
+        };
+        let wide = elem.row_height(200);
+        let narrow = elem.row_height(15);
+        assert_eq!(wide, 1, "should fit on one row when wide");
+        assert!(narrow > wide, "should wrap to more rows when narrow");
+    }
+
+    #[test]
+    fn total_content_rows_scales_with_width() {
+        // A paragraph that needs wrapping should contribute more rows at narrow widths.
+        let para = "one two three four five six seven eight nine ten eleven twelve";
+        let elements = vec![
+            ContentElement::TextLine { line: Line::from(para), wrap: true },
+        ];
+        let wide = total_content_rows(&elements, 200);
+        let narrow = total_content_rows(&elements, 20);
+        assert_eq!(wide, 1);
+        assert!(narrow > 1, "narrow width should produce more rows");
+    }
+
+    #[test]
+    fn parser_marks_paragraphs_as_wrap() {
+        let md = "This is a plain paragraph.\n";
+        let items = markdown_to_lines_with_images(md);
+        let para = items.iter().find_map(|it| {
+            if let ParsedLine::Text { line, wrap } = it {
+                let txt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if txt.contains("plain paragraph") {
+                    return Some(*wrap);
+                }
+            }
+            None
+        });
+        assert_eq!(para, Some(true), "paragraph should be wrap=true");
+    }
+
+    #[test]
+    fn parser_marks_code_lines_as_nowrap() {
+        let md = "```\nfn main() { println!(\"hi\"); }\n```\n";
+        let items = markdown_to_lines_with_images(md);
+        let code = items.iter().find_map(|it| {
+            if let ParsedLine::Text { line, wrap } = it {
+                let txt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if txt.contains("fn main") {
+                    return Some(*wrap);
+                }
+            }
+            None
+        });
+        assert_eq!(code, Some(false), "code line should be wrap=false");
+    }
+
+    #[test]
+    fn parser_marks_table_rows_as_nowrap() {
+        let md = "| col |\n| --- |\n| value |\n";
+        let items = markdown_to_lines_with_images(md);
+        let any_wrap = items.iter().any(|it| matches!(it, ParsedLine::Text { wrap: true, .. }));
+        assert!(!any_wrap, "table rows should all be wrap=false");
+    }
+
+    #[test]
+    fn parser_marks_heading_text_wrap_underline_nowrap() {
+        let md = "# Heading One\n";
+        let items = markdown_to_lines_with_images(md);
+        // Find the heading text line and the underline rule line.
+        let heading_text = items.iter().find_map(|it| {
+            if let ParsedLine::Text { line, wrap } = it {
+                let txt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if txt == "Heading One" {
+                    return Some(*wrap);
+                }
+            }
+            None
+        });
+        assert_eq!(heading_text, Some(true), "heading text should wrap");
+
+        let has_nowrap_rule = items.iter().any(|it| {
+            if let ParsedLine::Text { line, wrap: false } = it {
+                let txt: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                txt.chars().all(|c| c == '═')
+            } else {
+                false
+            }
+        });
+        assert!(has_nowrap_rule, "heading underline should be non-wrapping");
+    }
+
+    #[test]
+    fn search_matches_resolve_to_correct_subline_after_wrap() {
+        // Build a single wrapping paragraph with a known match position.
+        let para = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+        let elements = vec![
+            ContentElement::TextLine { line: Line::from(para), wrap: true },
+        ];
+        let m = SearchMatch {
+            element_idx: 0,
+            char_offset: para.find("kappa").unwrap(),
+        };
+        // Narrow width forces wrapping. The match for "kappa" should not land on row 0.
+        let row = match_to_row(&elements, &m, 10);
+        assert!(row > 0, "match for late word should be on a later sub-line, got row {}", row);
+        // Wide width: everything on one row, match is on row 0.
+        let row_wide = match_to_row(&elements, &m, 200);
+        assert_eq!(row_wide, 0);
+    }
+
+    #[test]
+    fn element_start_row_accounts_for_wrap() {
+        let para = "one two three four five six seven eight nine ten";
+        let elements = vec![
+            ContentElement::TextLine { line: Line::from("first"), wrap: true },
+            ContentElement::TextLine { line: Line::from(para), wrap: true },
+            ContentElement::TextLine { line: Line::from("after"), wrap: true },
+        ];
+        // At a width where the middle paragraph wraps, the third element starts
+        // later than at a wide width.
+        let narrow = element_start_row(&elements, 2, 15);
+        let wide = element_start_row(&elements, 2, 200);
+        assert!(narrow > wide, "narrow={} should exceed wide={}", narrow, wide);
+        // The first element occupies 1 row at any width.
+        assert_eq!(wide, 2);
+    }
+
+    #[test]
+    fn find_heading_element_returns_element_index() {
+        let md = "# Title\n\nSome body text.\n\n## Sub\n\nMore text.\n";
+        let md_path = std::path::PathBuf::from("/tmp/test_find_heading.md");
+        let elements = build_content_elements(md, &md_path, &None);
+        let toc = crate::core::toc::extract_toc(md);
+        let idx_title = find_heading_element(&elements, &toc, 0).expect("Title found");
+        let idx_sub = find_heading_element(&elements, &toc, 1).expect("Sub found");
+        assert!(idx_title < idx_sub, "Title element should come before Sub");
+        assert!(matches!(&elements[idx_title], ContentElement::TextLine { wrap: true, .. }));
+        assert!(matches!(&elements[idx_sub], ContentElement::TextLine { wrap: true, .. }));
     }
 }
