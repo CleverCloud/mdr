@@ -685,6 +685,8 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
                 return Err("path traversal blocked: image path escapes base directory".into());
             }
         }
+        crate::core::image_validation::validate_image_file(&path)
+            .map_err(|e| format!("invalid image file: {}", e))?;
         // SVG files need rasterization
         if path.extension().and_then(|e| e.to_str()) == Some("svg") {
             let svg_data = std::fs::read_to_string(&path)?;

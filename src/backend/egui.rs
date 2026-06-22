@@ -6,14 +6,60 @@ use std::sync::mpsc::Receiver;
 use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
 
+/// Load system fonts into egui to support non-Latin scripts (CJK, etc.).
+fn load_system_fonts(ctx: &egui::Context) {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+
+    let mut fonts = egui::FontDefinitions::default();
+
+    let mut counter = 0usize;
+    for face in db.faces() {
+        let source = match &face.source {
+            fontdb::Source::Binary(_) => continue,
+            fontdb::Source::File(path) => path,
+            fontdb::Source::SharedFile(path, _) => path,
+        };
+
+        let name = face
+            .families
+            .first()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| format!("font_{}", counter));
+
+        if let Ok(data) = std::fs::read(source) {
+            let key = format!("{}_{}", name, face.index);
+            fonts.font_data.insert(
+                key.clone(),
+                egui::FontData::from_owned(data).into(),
+            );
+
+            // Insert into proportional and monospace fallbacks
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push(key.clone());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push(key);
+        }
+        counter += 1;
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let canonical_file = std::fs::canonicalize(&file_path)
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&file_path))
-                .unwrap_or_else(|_| file_path.clone())
-        });
-    let base_dir = canonical_file.parent()
+    let canonical_file = std::fs::canonicalize(&file_path).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&file_path))
+            .unwrap_or_else(|_| file_path.clone())
+    });
+    let base_dir = canonical_file
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let raw_markdown = std::fs::read_to_string(&file_path)
@@ -44,7 +90,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "mdr",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            load_system_fonts(&cc.egui_ctx);
             Ok(Box::new(MdrApp {
                 markdown,
                 sections,
@@ -59,6 +106,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 search_query: String::new(),
                 search_section_matches: Vec::new(),
                 current_match: 0,
+                toc_visible: true,
             }))
         }),
     )
@@ -71,11 +119,17 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 fn split_by_headings(markdown: &str) -> (bool, Vec<String>) {
     let mut sections = Vec::new();
     let mut current = String::new();
+    let mut code_fence = None;
 
     for line in markdown.lines() {
-        if line.starts_with('#') && !line.starts_with("#!") {
-            let trimmed = line.trim_start_matches('#');
-            if trimmed.starts_with(' ') && !current.is_empty() {
+        if let Some(fence) = code_fence {
+            if is_closing_code_fence(line, fence) {
+                code_fence = None;
+            }
+        } else if let Some(fence) = opening_code_fence(line) {
+            code_fence = Some(fence);
+        } else if is_section_heading(line) {
+            if !current.is_empty() {
                 sections.push(current);
                 current = String::new();
             }
@@ -88,15 +142,73 @@ fn split_by_headings(markdown: &str) -> (bool, Vec<String>) {
     }
 
     // Check if section 0 starts with a heading or is preamble text
-    let has_preamble = sections.first()
+    let has_preamble = sections
+        .first()
         .map(|s| {
             let first_line = s.lines().next().unwrap_or("");
-            let trimmed = first_line.trim_start_matches('#');
-            !(first_line.starts_with('#') && trimmed.starts_with(' '))
+            !is_section_heading(first_line)
         })
         .unwrap_or(false);
 
     (has_preamble, sections)
+}
+
+#[derive(Clone, Copy)]
+struct CodeFence {
+    marker: char,
+    len: usize,
+}
+
+fn is_section_heading(line: &str) -> bool {
+    if !line.starts_with('#') || line.starts_with("#!") {
+        return false;
+    }
+
+    line.trim_start_matches('#').starts_with(' ')
+}
+
+fn opening_code_fence(line: &str) -> Option<CodeFence> {
+    let line = strip_fence_indent(line)?;
+    let marker = line.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+
+    let len = line.chars().take_while(|ch| *ch == marker).count();
+    if len < 3 {
+        return None;
+    }
+
+    Some(CodeFence { marker, len })
+}
+
+fn is_closing_code_fence(line: &str, fence: CodeFence) -> bool {
+    let line = match strip_fence_indent(line) {
+        Some(line) => line,
+        None => return false,
+    };
+
+    let len = line.chars().take_while(|ch| *ch == fence.marker).count();
+    if len < fence.len {
+        return false;
+    }
+
+    line[len..].trim().is_empty()
+}
+
+fn strip_fence_indent(line: &str) -> Option<&str> {
+    let mut rest = line;
+    let mut spaces = 0;
+    while spaces < 4 && rest.starts_with(' ') {
+        rest = &rest[1..];
+        spaces += 1;
+    }
+
+    if spaces > 3 {
+        return None;
+    }
+
+    Some(rest)
 }
 
 struct MdrApp {
@@ -113,12 +225,15 @@ struct MdrApp {
     search_query: String,
     search_section_matches: Vec<usize>,
     current_match: usize,
+    toc_visible: bool,
 }
 
 impl eframe::App for MdrApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
+
         // Ensure text in labels is selectable and copyable (Cmd+C / Ctrl+C)
-        ctx.style_mut(|s| s.interaction.selectable_labels = true);
+        ctx.global_style_mut(|s| s.interaction.selectable_labels = true);
 
         // Check for file changes
         if self.watcher_rx.try_recv().is_ok() {
@@ -139,6 +254,11 @@ impl eframe::App for MdrApp {
             self.caches.push(CommonMarkCache::default());
         }
 
+        // Handle F10 to toggle TOC
+        if ctx.input(|i| i.key_pressed(egui::Key::F10)) {
+            self.toc_visible = !self.toc_visible;
+        }
+
         // Handle Ctrl+F for search
         if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
             self.search_active = !self.search_active;
@@ -155,7 +275,7 @@ impl eframe::App for MdrApp {
 
         // Search bar panel
         if self.search_active {
-            egui::TopBottomPanel::top("search_bar").show(ctx, |ui| {
+            egui::Panel::top("search_bar").show_inside(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Search:");
                     let response = ui.text_edit_singleline(&mut self.search_query);
@@ -176,33 +296,57 @@ impl eframe::App for MdrApp {
                         }
                     }
                     // Request focus on first show
-                    if response.gained_focus() || ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) {
+                    if response.gained_focus()
+                        || ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl)
+                    {
                         response.request_focus();
                     }
 
                     let match_text = if self.search_section_matches.is_empty() {
-                        if self.search_query.is_empty() { "".to_string() }
-                        else { "No matches".to_string() }
+                        if self.search_query.is_empty() {
+                            "".to_string()
+                        } else {
+                            "No matches".to_string()
+                        }
                     } else {
-                        format!("{}/{}", self.current_match + 1, self.search_section_matches.len())
+                        format!(
+                            "{}/{}",
+                            self.current_match + 1,
+                            self.search_section_matches.len()
+                        )
                     };
                     ui.label(&match_text);
 
-                    if ui.button("\u{25B2}").clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.shift) && self.search_active) {
+                    if ui.button("\u{25B2}").clicked()
+                        || (ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.shift)
+                            && self.search_active)
+                    {
                         if !self.search_section_matches.is_empty() {
                             self.current_match = if self.current_match == 0 {
                                 self.search_section_matches.len() - 1
                             } else {
                                 self.current_match - 1
                             };
-                            self.scroll_to_section = Some(self.search_section_matches[self.current_match]);
+                            self.scroll_to_section =
+                                Some(self.search_section_matches[self.current_match]);
                         }
                     }
-                    if ui.button("\u{25BC}").clicked() || (ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && self.search_active) {
+                    if ui.button("\u{25BC}").clicked()
+                        || (ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                            && self.search_active)
+                    {
                         if !self.search_section_matches.is_empty() {
-                            self.current_match = (self.current_match + 1) % self.search_section_matches.len();
-                            self.scroll_to_section = Some(self.search_section_matches[self.current_match]);
+                            self.current_match =
+                                (self.current_match + 1) % self.search_section_matches.len();
+                            self.scroll_to_section =
+                                Some(self.search_section_matches[self.current_match]);
                         }
+                    }
+                    if ui
+                        .button(if self.toc_visible { "Hide TOC" } else { "Show TOC" })
+                        .clicked()
+                    {
+                        self.toc_visible = !self.toc_visible;
                     }
                     if ui.button("\u{2715}").clicked() {
                         self.search_active = false;
@@ -217,43 +361,42 @@ impl eframe::App for MdrApp {
         let has_preamble = self.has_preamble;
         let scroll_target = &mut self.scroll_to_section;
 
-        egui::SidePanel::left("toc_panel")
-            .default_width(220.0)
-            .show(ctx, |ui| {
-                ui.heading("Table of Contents");
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (i, entry) in self.toc_entries.iter().enumerate() {
-                        let indent = ((entry.level as f32 - 1.0) * 12.0).max(0.0);
-                        ui.horizontal(|ui| {
-                            ui.add_space(indent);
-                            let text = match entry.level {
-                                1 => egui::RichText::new(&entry.text).strong(),
-                                2 => egui::RichText::new(&entry.text).strong().size(13.0),
-                                3 => egui::RichText::new(&entry.text).size(13.0),
-                                _ => egui::RichText::new(&entry.text).size(12.0).weak(),
-                            };
-                            if ui.link(text).clicked() {
-                                // Map TOC index to section index
-                                let section_idx = if has_preamble { i + 1 } else { i };
-                                *scroll_target = Some(section_idx);
-                            }
-                        });
-                    }
+        if self.toc_visible {
+            egui::Panel::left("toc_panel")
+                .default_size(220.0)
+                .show_inside(root_ui, |ui| {
+                    ui.heading("Table of Contents");
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (i, entry) in self.toc_entries.iter().enumerate() {
+                            let indent = ((entry.level as f32 - 1.0) * 12.0).max(0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(indent);
+                                let text = match entry.level {
+                                    1 => egui::RichText::new(&entry.text).strong(),
+                                    2 => egui::RichText::new(&entry.text).strong().size(13.0),
+                                    3 => egui::RichText::new(&entry.text).size(13.0),
+                                    _ => egui::RichText::new(&entry.text).size(12.0).weak(),
+                                };
+                                if ui.link(text).clicked() {
+                                    // Map TOC index to section index
+                                    let section_idx = if has_preamble { i + 1 } else { i };
+                                    *scroll_target = Some(section_idx);
+                                }
+                            });
+                        }
+                    });
                 });
-            });
+        }
 
         // Main content - render each section with scroll anchors
         let scroll_to = self.scroll_to_section.take();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(root_ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (i, section) in self.sections.iter().enumerate() {
                     // Place an invisible anchor widget before the section
-                    let response = ui.allocate_response(
-                        egui::vec2(0.0, 0.0),
-                        egui::Sense::hover(),
-                    );
+                    let response = ui.allocate_response(egui::vec2(0.0, 0.0), egui::Sense::hover());
 
                     // If this is the target section, scroll to the anchor
                     if scroll_to == Some(i) {
@@ -263,8 +406,7 @@ impl eframe::App for MdrApp {
                     // Render the section
                     let anchor_id = ui.id().with(format!("section_{}", i));
                     ui.push_id(anchor_id, |ui| {
-                        CommonMarkViewer::new()
-                            .show(ui, &mut self.caches[i], section);
+                        CommonMarkViewer::new().show(ui, &mut self.caches[i], section);
                     });
                 }
             });
@@ -342,6 +484,15 @@ mod tests {
     }
 
     #[test]
+    fn split_by_headings_fenced_code_hash_not_split() {
+        let md = "# Title\n\n```bash\n$>cat file\n# Comment in code rendered as title\n```\n";
+        let (has_preamble, sections) = split_by_headings(md);
+        assert!(!has_preamble);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].contains("# Comment in code rendered as title"));
+    }
+
+    #[test]
     fn split_by_headings_shebang_as_first_line() {
         let md = "#!/bin/bash\n# Title\nContent\n";
         let (has_preamble, sections) = split_by_headings(md);
@@ -392,21 +543,33 @@ fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> Stri
         let alt = &caps[1];
         let src = &caps[2];
         // Skip URLs and data URIs
-        if src.starts_with("http://") || src.starts_with("https://")
-            || src.starts_with("data:") || src.starts_with("file://")
+        if src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("data:")
+            || src.starts_with("file://")
         {
             return caps[0].to_string();
         }
         let abs_path = base_dir.join(src);
         // Path traversal protection: ensure resolved path is within base_dir
-        if let (Ok(canonical), Ok(canonical_base)) = (abs_path.canonicalize(), base_dir.canonicalize()) {
+        if let (Ok(canonical), Ok(canonical_base)) =
+            (abs_path.canonicalize(), base_dir.canonicalize())
+        {
             if !canonical.starts_with(&canonical_base) {
                 return caps[0].to_string();
             }
         }
         if abs_path.exists() {
+            if let Err(e) = crate::core::image_validation::validate_image_file(&abs_path) {
+                return format!(
+                    "[⚠ Invalid image: {} — {}]",
+                    abs_path.file_name().unwrap_or_default().to_string_lossy(),
+                    e
+                );
+            }
             // SVG files: rasterize to PNG data URI to avoid parsing failures
-            let is_svg = abs_path.extension()
+            let is_svg = abs_path
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("svg"))
                 .unwrap_or(false);
@@ -455,7 +618,9 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
 
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
 /// Caps dimensions at 8192px to avoid GPU texture overflow.
-fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+fn rasterize_svg_to_png_data_uri(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
     use std::sync::{Arc, OnceLock};
 
@@ -465,7 +630,10 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
 
     // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
     let trimmed = svg_data.trim_start();
-    if !trimmed.starts_with('<') || trimmed.starts_with("<!DOCTYPE html") || trimmed.starts_with("<html") {
+    if !trimmed.starts_with('<')
+        || trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+    {
         if !trimmed.contains("<svg") {
             return Err("File is not a valid SVG (possibly an HTML page)".into());
         }
@@ -502,8 +670,7 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
         return Err("SVG too small after scaling".into());
     }
 
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or("Failed to create pixmap")?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 

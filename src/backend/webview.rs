@@ -161,6 +161,14 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
             }
         }
         if abs_path.exists() {
+            if let Err(e) = crate::core::image_validation::validate_image_file(&abs_path) {
+                vlog!("    → INVALID image: {}", e);
+                return format!(
+                    "<span style=\"color:red;\">[⚠ Invalid image: {} — {}]</span>",
+                    abs_path.file_name().unwrap_or_default().to_string_lossy(),
+                    e
+                );
+            }
             let is_svg = abs_path.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("svg"))

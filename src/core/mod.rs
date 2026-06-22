@@ -1,5 +1,6 @@
 pub mod config;
 pub mod icon;
+pub mod image_validation;
 pub mod markdown;
 pub mod mermaid;
 pub mod search;
