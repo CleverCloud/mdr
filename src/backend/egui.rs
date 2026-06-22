@@ -29,10 +29,9 @@ fn load_system_fonts(ctx: &egui::Context) {
 
         if let Ok(data) = std::fs::read(source) {
             let key = format!("{}_{}", name, face.index);
-            fonts.font_data.insert(
-                key.clone(),
-                egui::FontData::from_owned(data).into(),
-            );
+            fonts
+                .font_data
+                .insert(key.clone(), egui::FontData::from_owned(data).into());
 
             // Insert into proportional and monospace fallbacks
             fonts
@@ -343,7 +342,11 @@ impl eframe::App for MdrApp {
                         }
                     }
                     if ui
-                        .button(if self.toc_visible { "Hide TOC" } else { "Show TOC" })
+                        .button(if self.toc_visible {
+                            "Hide TOC"
+                        } else {
+                            "Show TOC"
+                        })
                         .clicked()
                     {
                         self.toc_visible = !self.toc_visible;
@@ -364,6 +367,7 @@ impl eframe::App for MdrApp {
         if self.toc_visible {
             egui::Panel::left("toc_panel")
                 .default_size(220.0)
+                .resizable(true)
                 .show_inside(root_ui, |ui| {
                     ui.heading("Table of Contents");
                     ui.separator();
@@ -598,8 +602,19 @@ fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> Stri
 }
 
 /// Convert a local file to a base64 data URI string.
+const MAX_IMAGE_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
+
 fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_IMAGE_FILE_SIZE {
+        return Err(format!(
+            "image file too large ({} bytes, max {})",
+            metadata.len(),
+            MAX_IMAGE_FILE_SIZE
+        )
+        .into());
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mime = match ext.to_lowercase().as_str() {
         "png" => "image/png",

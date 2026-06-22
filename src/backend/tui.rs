@@ -2,9 +2,13 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
@@ -122,7 +126,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Enter => {
                             if !app.search_matches.is_empty() {
-                                app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
+                                app.current_match_idx =
+                                    (app.current_match_idx + 1) % app.search_matches.len();
                                 app.scroll_offset = app.search_matches[app.current_match_idx];
                             }
                         }
@@ -150,7 +155,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('n') => {
                             if !app.search_matches.is_empty() {
-                                app.current_match_idx = (app.current_match_idx + 1) % app.search_matches.len();
+                                app.current_match_idx =
+                                    (app.current_match_idx + 1) % app.search_matches.len();
                                 app.scroll_offset = app.search_matches[app.current_match_idx];
                             }
                         }
@@ -198,7 +204,11 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Enter => {
                             if app.focus_toc {
-                                if let Some(offset) = find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected) {
+                                if let Some(offset) = find_heading_row(
+                                    &app.rendered,
+                                    &app.toc_entries,
+                                    app.toc_selected,
+                                ) {
                                     app.scroll_offset = offset;
                                     app.focus_toc = false;
                                 }
@@ -217,7 +227,11 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     Ok(())
@@ -283,23 +297,24 @@ fn total_content_rows(elements: &[ContentElement]) -> usize {
 fn ui(f: &mut Frame, app: &mut TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(30),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(30), Constraint::Min(1)])
         .split(f.area());
 
     // TOC sidebar
-    let toc_items: Vec<ListItem> = app.toc_entries.iter().map(|entry| {
-        let indent = "  ".repeat((entry.level as usize).saturating_sub(1));
-        let style = match entry.level {
-            1 => Style::default().fg(Color::Cyan).bold(),
-            2 => Style::default().fg(Color::Blue).bold(),
-            3 => Style::default().fg(Color::White),
-            _ => Style::default().fg(Color::DarkGray),
-        };
-        ListItem::new(format!("{}{}", indent, entry.text)).style(style)
-    }).collect();
+    let toc_items: Vec<ListItem> = app
+        .toc_entries
+        .iter()
+        .map(|entry| {
+            let indent = "  ".repeat((entry.level as usize).saturating_sub(1));
+            let style = match entry.level {
+                1 => Style::default().fg(Color::Cyan).bold(),
+                2 => Style::default().fg(Color::Blue).bold(),
+                3 => Style::default().fg(Color::White),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            ListItem::new(format!("{}{}", indent, entry.text)).style(style)
+        })
+        .collect();
 
     let toc_border_style = if app.focus_toc {
         Style::default().fg(Color::Cyan)
@@ -308,11 +323,13 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     };
 
     let toc = List::new(toc_items)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(toc_border_style)
-            .title(" TOC ")
-            .title_style(Style::default().bold()))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(toc_border_style)
+                .title(" TOC ")
+                .title_style(Style::default().bold()),
+        )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol(">> ");
 
@@ -355,33 +372,61 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     f.render_widget(border_block, content_area);
 
     // Now render content elements within the inner area, respecting scroll offset
-    render_content_elements(f, inner_area, &mut app.rendered, scroll, content_height, &app.search_matches, app.current_match_idx);
+    render_content_elements(
+        f,
+        inner_area,
+        &mut app.rendered,
+        scroll,
+        content_height,
+        &app.search_matches,
+        app.current_match_idx,
+    );
 
     // Bottom bar
     let bar_text = if app.search_mode {
         let match_info = if app.search_matches.is_empty() {
-            if app.search_query.is_empty() { String::new() }
-            else { " (no matches)".to_string() }
+            if app.search_query.is_empty() {
+                String::new()
+            } else {
+                " (no matches)".to_string()
+            }
         } else {
-            format!(" ({}/{})", app.current_match_idx + 1, app.search_matches.len())
+            format!(
+                " ({}/{})",
+                app.current_match_idx + 1,
+                app.search_matches.len()
+            )
         };
-        format!(" /{}{}  [Enter: next | Esc: close]", app.search_query, match_info)
+        format!(
+            " /{}{}  [Enter: next | Esc: close]",
+            app.search_query, match_info
+        )
     } else if !app.search_matches.is_empty() {
-        format!(" Search: '{}' ({}/{})  [n/N: next/prev | /: search]",
-            app.search_query, app.current_match_idx + 1, app.search_matches.len())
+        format!(
+            " Search: '{}' ({}/{})  [n/N: next/prev | /: search]",
+            app.search_query,
+            app.current_match_idx + 1,
+            app.search_matches.len()
+        )
     } else {
-        " q: quit | Tab: switch focus | j/k: scroll | /: search | Space/PgDn: page down ".to_string()
+        " q: quit | Tab: switch focus | j/k: scroll | /: search | Space/PgDn: page down "
+            .to_string()
     };
 
     let help_area = Rect {
         x: content_area.x + 1,
         y: content_area.y + content_area.height - 1,
-        width: content_area.width.saturating_sub(2).min(bar_text.len() as u16),
+        width: content_area
+            .width
+            .saturating_sub(2)
+            .min(bar_text.len() as u16),
         height: 1,
     };
 
     let bar_style = if app.search_mode {
-        Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 40))
+        Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Rgb(40, 40, 40))
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -441,18 +486,35 @@ fn render_content_elements(
                     };
                     // Check if this line matches search
                     let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
+                    let is_current = is_match
+                        && search_matches.get(current_match) == Some(&current_absolute_row);
 
                     if is_current {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
-                        }).collect::<Vec<_>>());
+                        let highlighted_line = Line::from(
+                            line.spans
+                                .iter()
+                                .map(|s| {
+                                    Span::styled(
+                                        s.content.clone(),
+                                        s.style.bg(Color::Yellow).fg(Color::Black),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                         let p = Paragraph::new(highlighted_line);
                         f.render_widget(p, line_area);
                     } else if is_match {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
-                        }).collect::<Vec<_>>());
+                        let highlighted_line = Line::from(
+                            line.spans
+                                .iter()
+                                .map(|s| {
+                                    Span::styled(
+                                        s.content.clone(),
+                                        s.style.bg(Color::Rgb(80, 80, 0)),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                         let p = Paragraph::new(highlighted_line);
                         f.render_widget(p, line_area);
                     } else {
@@ -463,7 +525,9 @@ fn render_content_elements(
                 }
                 // If skip_within > 0 for a 1-row element, it's fully scrolled past
             }
-            ContentElement::Image { protocol, height, .. } => {
+            ContentElement::Image {
+                protocol, height, ..
+            } => {
                 // Show the visible portion of the image.
                 // When partially scrolled, show only the remaining rows.
                 let visible_height = (*height as usize).saturating_sub(skip_within) as u16;
@@ -494,18 +558,35 @@ fn render_content_elements(
                         height: 1,
                     };
                     let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match && search_matches.get(current_match) == Some(&current_absolute_row);
+                    let is_current = is_match
+                        && search_matches.get(current_match) == Some(&current_absolute_row);
 
                     if is_current {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Yellow).fg(Color::Black))
-                        }).collect::<Vec<_>>());
+                        let highlighted_line = Line::from(
+                            line.spans
+                                .iter()
+                                .map(|s| {
+                                    Span::styled(
+                                        s.content.clone(),
+                                        s.style.bg(Color::Yellow).fg(Color::Black),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                         let p = Paragraph::new(highlighted_line);
                         f.render_widget(p, line_area);
                     } else if is_match {
-                        let highlighted_line = Line::from(line.spans.iter().map(|s| {
-                            Span::styled(s.content.clone(), s.style.bg(Color::Rgb(80, 80, 0)))
-                        }).collect::<Vec<_>>());
+                        let highlighted_line = Line::from(
+                            line.spans
+                                .iter()
+                                .map(|s| {
+                                    Span::styled(
+                                        s.content.clone(),
+                                        s.style.bg(Color::Rgb(80, 80, 0)),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
                         let p = Paragraph::new(highlighted_line);
                         f.render_widget(p, line_area);
                     } else {
@@ -520,7 +601,11 @@ fn render_content_elements(
 }
 
 /// Find the row offset where a heading appears in the rendered output.
-fn find_heading_row(elements: &[ContentElement], toc_entries: &[TocEntry], toc_index: usize) -> Option<usize> {
+fn find_heading_row(
+    elements: &[ContentElement],
+    toc_entries: &[TocEntry],
+    toc_index: usize,
+) -> Option<usize> {
     let entry = toc_entries.get(toc_index)?;
     let search_text = &entry.text;
     let mut row_offset: usize = 0;
@@ -551,15 +636,19 @@ fn find_heading_row(elements: &[ContentElement], toc_entries: &[TocEntry], toc_i
 }
 
 /// Build content elements from markdown, loading images where possible.
-fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Picker>) -> Vec<ContentElement> {
+fn build_content_elements(
+    content: &str,
+    file_path: &PathBuf,
+    picker: &Option<Picker>,
+) -> Vec<ContentElement> {
     let text_lines = markdown_to_lines_with_images(content);
-    let canonical_file = std::fs::canonicalize(file_path)
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(file_path))
-                .unwrap_or_else(|_| file_path.clone())
-        });
-    let base_dir = canonical_file.parent()
+    let canonical_file = std::fs::canonicalize(file_path).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(file_path))
+            .unwrap_or_else(|_| file_path.clone())
+    });
+    let base_dir = canonical_file
+        .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
 
     let mut elements = Vec::new();
@@ -578,7 +667,8 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                                     let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
                                     let aspect = img_h as f64 / img_w as f64;
                                     let target_cols = 100u16;
-                                    let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                                    let target_rows =
+                                        ((target_cols as f64) * aspect / 2.0).ceil() as u16;
                                     let height = target_rows.clamp(4, 40);
 
                                     let protocol = picker.new_resize_protocol(dyn_img);
@@ -622,16 +712,26 @@ fn build_content_elements(content: &str, file_path: &PathBuf, picker: &Option<Pi
                             });
                         }
                         Err(_) => {
-                            let label = if alt.is_empty() { "image".to_string() } else { alt };
-                            elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
-                                format!("[Image: {}]", label),
-                                Style::default().fg(Color::Magenta).italic(),
-                            ))));
+                            let label = if alt.is_empty() {
+                                "image".to_string()
+                            } else {
+                                alt
+                            };
+                            elements.push(ContentElement::ImagePlaceholder(Line::from(
+                                Span::styled(
+                                    format!("[Image: {}]", label),
+                                    Style::default().fg(Color::Magenta).italic(),
+                                ),
+                            )));
                         }
                     }
                 } else {
                     // No picker available (terminal doesn't support image protocols or detection failed)
-                    let label = if alt.is_empty() { "image".to_string() } else { alt };
+                    let label = if alt.is_empty() {
+                        "image".to_string()
+                    } else {
+                        alt
+                    };
                     elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
                         format!("[Image: {}]", label),
                         Style::default().fg(Color::Magenta).italic(),
@@ -665,7 +765,10 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
 
 /// Load an image from a URL, data URI, or local file path.
 /// SVG files are rasterized via resvg/usvg before returning.
-fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+fn load_image(
+    url: &str,
+    base_dir: &std::path::Path,
+) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     if url.starts_with("data:") {
         // data: URI - decode base64
         load_image_from_data_uri(url)
@@ -680,7 +783,8 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
             base_dir.join(url)
         };
         // Path traversal protection: ensure resolved path is within base_dir
-        if let (Ok(canonical), Ok(canonical_base)) = (path.canonicalize(), base_dir.canonicalize()) {
+        if let (Ok(canonical), Ok(canonical_base)) = (path.canonicalize(), base_dir.canonicalize())
+        {
             if !canonical.starts_with(&canonical_base) {
                 return Err("path traversal blocked: image path escapes base directory".into());
             }
@@ -702,16 +806,18 @@ fn load_image(url: &str, base_dir: &std::path::Path) -> Result<image::DynamicIma
 fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     const MAX_DATA_URI_LEN: usize = 50 * 1024 * 1024; // 50 MB
     if uri.len() > MAX_DATA_URI_LEN {
-        return Err(format!("data URI too large ({} bytes, max {})", uri.len(), MAX_DATA_URI_LEN).into());
+        return Err(format!(
+            "data URI too large ({} bytes, max {})",
+            uri.len(),
+            MAX_DATA_URI_LEN
+        )
+        .into());
     }
     // Format: data:[<mediatype>][;base64],<data>
     let comma_pos = uri.find(',').ok_or("Invalid data URI: no comma found")?;
     let header = &uri[..comma_pos];
     let data_part = &uri[comma_pos + 1..];
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_part,
-    )?;
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_part)?;
     // SVG data URIs need rasterization
     if header.contains("image/svg") {
         let svg_str = String::from_utf8(decoded)?;
@@ -743,8 +849,7 @@ fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::err
         return Err("SVG has zero dimensions".into());
     }
 
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or("Failed to create pixmap")?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
 
     // Convert RGBA pixmap to DynamicImage
@@ -753,9 +858,17 @@ fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::err
     Ok(image::DynamicImage::ImageRgba8(img))
 }
 
-/// Load an image from an HTTP(S) URL using ureq.
+/// Load an image from an HTTP(S) URL using ureq (30s timeout).
 fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
-    let response = ureq::get(url).call()?;
+    use std::sync::OnceLock;
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .into()
+    });
+    let response = agent.get(url).call()?;
     let mut bytes = Vec::new();
     response.into_body().into_reader().read_to_end(&mut bytes)?;
     let img = image::load_from_memory(&bytes)?;
@@ -765,9 +878,14 @@ fn load_image_from_http(url: &str) -> Result<image::DynamicImage, Box<dyn std::e
 /// Intermediate representation for parsed markdown lines.
 enum ParsedLine {
     Text(Line<'static>),
-    ImageRef { alt: String, url: String },
+    ImageRef {
+        alt: String,
+        url: String,
+    },
     /// A mermaid diagram source extracted from a ```mermaid code block.
-    MermaidRef { source: String },
+    MermaidRef {
+        source: String,
+    },
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
@@ -785,7 +903,9 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                     // End of mermaid block: emit a MermaidRef instead of code lines
                     in_mermaid_block = false;
                     in_code_block = false;
-                    items.push(ParsedLine::MermaidRef { source: mermaid_source.clone() });
+                    items.push(ParsedLine::MermaidRef {
+                        source: mermaid_source.clone(),
+                    });
                     mermaid_source.clear();
                 } else {
                     in_code_block = false;
@@ -805,7 +925,11 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                     let header = if code_lang.is_empty() {
                         "┌─ code ──────────────────────────────────┐".to_string()
                     } else {
-                        format!("┌─ {} {}", code_lang, "─".repeat(38usize.saturating_sub(code_lang.len())))
+                        format!(
+                            "┌─ {} {}",
+                            code_lang,
+                            "─".repeat(38usize.saturating_sub(code_lang.len()))
+                        )
                     };
                     items.push(ParsedLine::Text(Line::from(Span::styled(
                         header,
@@ -896,18 +1020,26 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
                 continue;
             }
             in_table = true;
-            let cells: Vec<&str> = line.split('|')
+            let cells: Vec<&str> = line
+                .split('|')
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim())
                 .collect();
-            let spans: Vec<Span> = cells.iter().enumerate().flat_map(|(i, cell)| {
-                let mut v = vec![];
-                if i > 0 {
-                    v.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-                }
-                v.push(Span::styled(cell.to_string(), Style::default().fg(Color::White)));
-                v
-            }).collect();
+            let spans: Vec<Span> = cells
+                .iter()
+                .enumerate()
+                .flat_map(|(i, cell)| {
+                    let mut v = vec![];
+                    if i > 0 {
+                        v.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                    }
+                    v.push(Span::styled(
+                        cell.to_string(),
+                        Style::default().fg(Color::White),
+                    ));
+                    v
+                })
+                .collect();
             items.push(ParsedLine::Text(Line::from(spans)));
             continue;
         } else {
@@ -918,7 +1050,10 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         if line.starts_with("> ") {
             items.push(ParsedLine::Text(Line::from(vec![
                 Span::styled("▎ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(line[2..].to_string(), Style::default().fg(Color::Gray).italic()),
+                Span::styled(
+                    line[2..].to_string(),
+                    Style::default().fg(Color::Gray).italic(),
+                ),
             ])));
             continue;
         }
@@ -952,10 +1087,7 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
             items.push(ParsedLine::Text(Line::from(vec![
                 Span::raw(" ".repeat(indent)),
                 Span::styled("• ", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    line.trim_start()[2..].to_string(),
-                    Style::default(),
-                ),
+                Span::styled(line.trim_start()[2..].to_string(), Style::default()),
             ])));
             continue;
         }
@@ -1027,10 +1159,15 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                 }
                 let mut code = String::new();
                 for c in chars.by_ref() {
-                    if c == '`' { break; }
+                    if c == '`' {
+                        break;
+                    }
                     code.push(c);
                 }
-                spans.push(Span::styled(code, Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30))));
+                spans.push(Span::styled(
+                    code,
+                    Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30)),
+                ));
             }
             '*' if chars.peek() == Some(&'*') => {
                 chars.next();
@@ -1055,7 +1192,9 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                 }
                 let mut italic = String::new();
                 for ch in chars.by_ref() {
-                    if ch == c { break; }
+                    if ch == c {
+                        break;
+                    }
                     italic.push(ch);
                 }
                 spans.push(Span::styled(italic, Style::default().italic()));
@@ -1076,7 +1215,9 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                 }
                 spans.push(Span::styled(
                     strike,
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::CROSSED_OUT),
                 ));
             }
             '!' if chars.peek() == Some(&'[') => {
@@ -1085,21 +1226,30 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                 let mut alt = String::new();
                 let mut found_close = false;
                 for ch in chars.by_ref() {
-                    if ch == ']' { found_close = true; break; }
+                    if ch == ']' {
+                        found_close = true;
+                        break;
+                    }
                     alt.push(ch);
                 }
                 if found_close && chars.peek() == Some(&'(') {
                     chars.next();
                     let mut _url = String::new();
                     for ch in chars.by_ref() {
-                        if ch == ')' { break; }
+                        if ch == ')' {
+                            break;
+                        }
                         _url.push(ch);
                     }
                     if !current.is_empty() {
                         spans.push(Span::raw(current.clone()));
                         current.clear();
                     }
-                    let label = if alt.is_empty() { "image".to_string() } else { alt };
+                    let label = if alt.is_empty() {
+                        "image".to_string()
+                    } else {
+                        alt
+                    };
                     spans.push(Span::styled(
                         format!("[Image: {}]", label),
                         Style::default().fg(Color::Magenta).italic(),
@@ -1108,7 +1258,9 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                     current.push('!');
                     current.push('[');
                     current.push_str(&alt);
-                    if found_close { current.push(']'); }
+                    if found_close {
+                        current.push(']');
+                    }
                 }
             }
             '[' => {
@@ -1116,25 +1268,35 @@ fn parse_inline_formatting(line: &str) -> Line<'static> {
                 let mut text = String::new();
                 let mut found_close = false;
                 for ch in chars.by_ref() {
-                    if ch == ']' { found_close = true; break; }
+                    if ch == ']' {
+                        found_close = true;
+                        break;
+                    }
                     text.push(ch);
                 }
                 if found_close && chars.peek() == Some(&'(') {
                     chars.next();
                     let mut _url = String::new();
                     for ch in chars.by_ref() {
-                        if ch == ')' { break; }
+                        if ch == ')' {
+                            break;
+                        }
                         _url.push(ch);
                     }
                     if !current.is_empty() {
                         spans.push(Span::raw(current.clone()));
                         current.clear();
                     }
-                    spans.push(Span::styled(text, Style::default().fg(Color::Blue).underlined()));
+                    spans.push(Span::styled(
+                        text,
+                        Style::default().fg(Color::Blue).underlined(),
+                    ));
                 } else {
                     current.push('[');
                     current.push_str(&text);
-                    if found_close { current.push(']'); }
+                    if found_close {
+                        current.push(']');
+                    }
                 }
             }
             _ => current.push(c),
@@ -1168,7 +1330,11 @@ mod tests {
 
         let result = load_image("test.svg", &dir);
         // This should succeed — SVG files must be rasterized before display
-        assert!(result.is_ok(), "load_image should handle SVG files but got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "load_image should handle SVG files but got: {:?}",
+            result.err()
+        );
         let img = result.unwrap();
         assert!(img.width() > 0 && img.height() > 0);
 
@@ -1195,12 +1361,21 @@ mod tests {
 
         // Should have parsed lines including the image reference
         // Without a picker, SVG falls back to placeholder — but the markdown parser should find it
-        let has_image_ref = elements.iter().any(|e| matches!(e, ContentElement::ImagePlaceholder(_)));
-        assert!(has_image_ref, "Should find an image placeholder for the SVG reference");
+        let has_image_ref = elements
+            .iter()
+            .any(|e| matches!(e, ContentElement::ImagePlaceholder(_)));
+        assert!(
+            has_image_ref,
+            "Should find an image placeholder for the SVG reference"
+        );
 
         // Now test load_image directly to confirm SVG rasterization works
         let img = load_image("logo.svg", &dir);
-        assert!(img.is_ok(), "load_image should rasterize SVG, got: {:?}", img.err());
+        assert!(
+            img.is_ok(),
+            "load_image should rasterize SVG, got: {:?}",
+            img.err()
+        );
         let img = img.unwrap();
         assert_eq!(img.width(), 100);
         assert_eq!(img.height(), 100);
@@ -1211,11 +1386,16 @@ mod tests {
     #[test]
     fn load_image_svg_data_uri() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg.as_bytes());
+        let b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg.as_bytes());
         let data_uri = format!("data:image/svg+xml;base64,{}", b64);
 
         let result = load_image(&data_uri, std::path::Path::new("."));
-        assert!(result.is_ok(), "load_image should handle SVG data URIs but got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "load_image should handle SVG data URIs but got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1223,19 +1403,34 @@ mod tests {
         let md = "# Title\n\n```mermaid\ngraph LR\n  A-->B\n```\n\nSome text after.\n";
         let items = markdown_to_lines_with_images(md);
 
-        let has_mermaid_ref = items.iter().any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
-        assert!(has_mermaid_ref, "Mermaid code block should produce a MermaidRef variant");
+        let has_mermaid_ref = items
+            .iter()
+            .any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
+        assert!(
+            has_mermaid_ref,
+            "Mermaid code block should produce a MermaidRef variant"
+        );
 
         // Verify the source is captured correctly
-        let mermaid_source = items.iter().find_map(|item| {
-            if let ParsedLine::MermaidRef { source } = item {
-                Some(source.clone())
-            } else {
-                None
-            }
-        }).expect("Should have a MermaidRef");
-        assert!(mermaid_source.contains("graph LR"), "MermaidRef should contain the mermaid source, got: {}", mermaid_source);
-        assert!(mermaid_source.contains("A-->B"), "MermaidRef should contain the diagram content");
+        let mermaid_source = items
+            .iter()
+            .find_map(|item| {
+                if let ParsedLine::MermaidRef { source } = item {
+                    Some(source.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Should have a MermaidRef");
+        assert!(
+            mermaid_source.contains("graph LR"),
+            "MermaidRef should contain the mermaid source, got: {}",
+            mermaid_source
+        );
+        assert!(
+            mermaid_source.contains("A-->B"),
+            "MermaidRef should contain the diagram content"
+        );
     }
 
     #[test]
@@ -1252,7 +1447,10 @@ mod tests {
                 false
             }
         });
-        assert!(!has_green_code, "Mermaid content should NOT appear as regular code text");
+        assert!(
+            !has_green_code,
+            "Mermaid content should NOT appear as regular code text"
+        );
     }
 
     #[test]
@@ -1260,8 +1458,13 @@ mod tests {
         let md = "```rust\nfn main() {}\n```\n";
         let items = markdown_to_lines_with_images(md);
 
-        let has_mermaid_ref = items.iter().any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
-        assert!(!has_mermaid_ref, "Non-mermaid code blocks should NOT produce MermaidRef");
+        let has_mermaid_ref = items
+            .iter()
+            .any(|item| matches!(item, ParsedLine::MermaidRef { .. }));
+        assert!(
+            !has_mermaid_ref,
+            "Non-mermaid code blocks should NOT produce MermaidRef"
+        );
 
         // Should have regular code text
         let has_code_text = items.iter().any(|item| {
@@ -1272,7 +1475,10 @@ mod tests {
                 false
             }
         });
-        assert!(has_code_text, "Non-mermaid code should appear as regular code text");
+        assert!(
+            has_code_text,
+            "Non-mermaid code should appear as regular code text"
+        );
     }
 
     #[test]
@@ -1284,10 +1490,15 @@ mod tests {
 
         // Without picker, mermaid rendering should either produce TextLines (fallback)
         // or ImagePlaceholder - but NOT be empty
-        assert!(!elements.is_empty(), "Should produce content elements for mermaid block");
+        assert!(
+            !elements.is_empty(),
+            "Should produce content elements for mermaid block"
+        );
 
         // Check that we have some text lines (the fallback code display)
-        let has_text = elements.iter().any(|e| matches!(e, ContentElement::TextLine(_)));
+        let has_text = elements
+            .iter()
+            .any(|e| matches!(e, ContentElement::TextLine(_)));
         assert!(has_text, "Mermaid fallback should produce text lines");
     }
 }

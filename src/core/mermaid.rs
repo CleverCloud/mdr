@@ -74,7 +74,9 @@ fn suppress_stderr() -> StderrGuard {
                 if devnull >= 0 {
                     libc::dup2(devnull, 2);
                     libc::close(devnull);
-                    return StderrGuard { saved_fd: Some(saved) };
+                    return StderrGuard {
+                        saved_fd: Some(saved),
+                    };
                 }
                 libc::close(saved);
             }
@@ -90,16 +92,15 @@ fn suppress_stderr() -> StderrGuard {
 pub fn process_mermaid_blocks(html: &str) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r#"<pre><code class="language-mermaid">([\s\S]*?)</code></pre>"#).unwrap());
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"<pre><code class="language-mermaid">([\s\S]*?)</code></pre>"#).unwrap()
+    });
 
     re.replace_all(html, |caps: &regex::Captures| {
         let source = html_decode(&caps[1]);
         match render_mermaid_to_svg(&source) {
             Ok(svg) => format!(r#"<div class="mermaid-diagram">{}</div>"#, svg),
-            Err(_) => format!(
-                r#"<pre class="mermaid">{}</pre>"#,
-                html_encode(&source)
-            ),
+            Err(_) => format!(r#"<pre class="mermaid">{}</pre>"#, html_encode(&source)),
         }
     })
     .to_string()
@@ -118,9 +119,15 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
         match render_mermaid_to_svg(source) {
             Ok(svg) => match svg_to_png_base64(&svg) {
                 Ok(b64) => format!("![mermaid diagram](data:image/png;base64,{})", b64),
-                Err(_) => format!("> **◇ Mermaid Diagram** *(SVG to PNG conversion failed)*\n\n```\n{}```", source),
+                Err(_) => format!(
+                    "> **◇ Mermaid Diagram** *(SVG to PNG conversion failed)*\n\n```\n{}```",
+                    source
+                ),
             },
-            Err(_) => format!("> **◇ Mermaid Diagram** *(unsupported by native renderer)*\n\n```\n{}```", source),
+            Err(_) => format!(
+                "> **◇ Mermaid Diagram** *(unsupported by native renderer)*\n\n```\n{}```",
+                source
+            ),
         }
     })
     .to_string()
@@ -169,8 +176,7 @@ fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
         return Err("SVG dimensions too small after scaling".into());
     }
 
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or("Failed to create pixmap")?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
@@ -271,8 +277,11 @@ mod tests {
         // (depends on mermaid-rs-renderer capabilities at runtime)
         match result {
             Ok(svg) => {
-                assert!(svg.contains("<svg") || svg.contains("<SVG"),
-                    "Expected SVG output, got: {}", svg);
+                assert!(
+                    svg.contains("<svg") || svg.contains("<SVG"),
+                    "Expected SVG output, got: {}",
+                    svg
+                );
             }
             Err(e) => {
                 // If it errors, the error should be descriptive
@@ -322,11 +331,16 @@ mod tests {
   A--&gt;B</code></pre><p>After</p>"#;
         let result = process_mermaid_blocks(html);
         // The mermaid code block should be replaced
-        assert!(!result.contains(r#"class="language-mermaid""#),
-            "Mermaid code block should be replaced, got: {}", result);
+        assert!(
+            !result.contains(r#"class="language-mermaid""#),
+            "Mermaid code block should be replaced, got: {}",
+            result
+        );
         // Should contain either a rendered diagram or an error
         assert!(
-            result.contains("mermaid-diagram") || result.contains("mermaid-error") || result.contains("mermaid-fallback"),
+            result.contains("mermaid-diagram")
+                || result.contains("mermaid-error")
+                || result.contains("mermaid-fallback"),
             "Should contain diagram or fallback div, got: {}",
             result
         );
@@ -374,8 +388,11 @@ mod tests {
             let md = "Before\n\n```mermaid\ngraph LR\n  A-->B\n```\n\nAfter";
             let result = preprocess_mermaid_for_egui(md);
             // The mermaid block should be replaced with either an image or error message
-            assert!(!result.contains("```mermaid"),
-                "Mermaid block should be replaced, got: {}", result);
+            assert!(
+                !result.contains("```mermaid"),
+                "Mermaid block should be replaced, got: {}",
+                result
+            );
             assert!(result.contains("Before"));
             assert!(result.contains("After"));
         }

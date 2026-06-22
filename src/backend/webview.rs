@@ -1,9 +1,9 @@
+use muda::{Menu, PredefinedMenuItem, Submenu};
 use std::path::PathBuf;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
-use muda::{Menu, Submenu, PredefinedMenuItem};
 
 use crate::core::markdown::{parse_markdown, GITHUB_CSS};
 use crate::core::toc;
@@ -13,20 +13,23 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Canonicalize the file path first so parent() always gives an absolute directory.
     // Without this, a bare filename like "README.md" gives parent() = "" (empty),
     // which breaks relative image resolution when CWD differs from expected.
-    let canonical_file = std::fs::canonicalize(&file_path)
-        .unwrap_or_else(|_| {
-            // If canonicalize fails, try current_dir + file_path
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&file_path))
-                .unwrap_or_else(|_| file_path.clone())
-        });
-    let base_dir = canonical_file.parent()
+    let canonical_file = std::fs::canonicalize(&file_path).unwrap_or_else(|_| {
+        // If canonicalize fails, try current_dir + file_path
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&file_path))
+            .unwrap_or_else(|_| file_path.clone())
+    });
+    let base_dir = canonical_file
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let markdown_content = std::fs::read_to_string(&file_path)?;
     vlog!("webview: file_path={}", file_path.display());
     vlog!("webview: base_dir={}", base_dir.display());
-    vlog!("webview: markdown_content length={} bytes", markdown_content.len());
+    vlog!(
+        "webview: markdown_content length={} bytes",
+        markdown_content.len()
+    );
     let html_body = parse_markdown(&markdown_content);
     vlog!("webview: html_body length={} bytes", html_body.len());
     // In verbose mode, dump all <img> tags found in the HTML
@@ -67,7 +70,9 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let window = WindowBuilder::new()
         .with_title(format!("mdr - {}", file_path.display()))
         .with_inner_size(tao::dpi::LogicalSize::new(1100.0, 900.0))
-        .with_window_icon(Some(tao::window::Icon::from_rgba(icon_rgba, icon_w, icon_h).unwrap()))
+        .with_window_icon(Some(
+            tao::window::Icon::from_rgba(icon_rgba, icon_w, icon_h).unwrap(),
+        ))
         .build(&event_loop)?;
 
     // On macOS, init the menu for the app so Cmd+C/V/X/A work via the responder chain
@@ -141,8 +146,10 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         let src = &caps[1];
         vlog!("  IMG src={:?}", src);
         // Skip URLs and existing data URIs
-        if src.starts_with("http://") || src.starts_with("https://")
-            || src.starts_with("data:") || src.starts_with("file://")
+        if src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("data:")
+            || src.starts_with("file://")
         {
             vlog!("    → skipped (remote/data URL)");
             return full_tag.to_string();
@@ -154,9 +161,15 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         vlog!("    abs_path={}", abs_path.display());
         vlog!("    exists={}", abs_path.exists());
         // Path traversal protection: ensure resolved path is within base_dir
-        if let (Ok(canonical), Ok(canonical_base)) = (abs_path.canonicalize(), base_dir.canonicalize()) {
+        if let (Ok(canonical), Ok(canonical_base)) =
+            (abs_path.canonicalize(), base_dir.canonicalize())
+        {
             if !canonical.starts_with(&canonical_base) {
-                vlog!("    → BLOCKED (path traversal: {} escapes {})", canonical.display(), canonical_base.display());
+                vlog!(
+                    "    → BLOCKED (path traversal: {} escapes {})",
+                    canonical.display(),
+                    canonical_base.display()
+                );
                 return full_tag.to_string();
             }
         }
@@ -169,7 +182,8 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                     e
                 );
             }
-            let is_svg = abs_path.extension()
+            let is_svg = abs_path
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("svg"))
                 .unwrap_or(false);
@@ -178,7 +192,9 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 match rasterize_svg_to_png_data_uri(&abs_path) {
                     Ok(png_data_uri) => {
                         vlog!("    → SVG rasterized to PNG ({} bytes)", png_data_uri.len());
-                                return re_src.replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str()).to_string();
+                        return re_src
+                            .replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str())
+                            .to_string();
                     }
                     Err(e) => {
                         vlog!("    → SVG rasterization FAILED: {}", e);
@@ -188,7 +204,9 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 match file_to_data_uri(&abs_path) {
                     Ok(data_uri) => {
                         vlog!("    → SVG embedded as data URI ({} bytes)", data_uri.len());
-                                return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                        return re_src
+                            .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                            .to_string();
                     }
                     Err(e) => {
                         vlog!("    → SVG file_to_data_uri FAILED: {}", e);
@@ -201,7 +219,9 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
             match file_to_data_uri(&abs_path) {
                 Ok(data_uri) => {
                     vlog!("    → embedded as data URI ({} bytes)", data_uri.len());
-                        return re_src.replace(full_tag, format!("src=\"{}\"", data_uri).as_str()).to_string();
+                    return re_src
+                        .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                        .to_string();
                 }
                 Err(e) => {
                     vlog!("    → file_to_data_uri FAILED: {}", e);
@@ -238,8 +258,19 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Convert a local file to a base64 data URI string.
+const MAX_IMAGE_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
+
 fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_IMAGE_FILE_SIZE {
+        return Err(format!(
+            "image file too large ({} bytes, max {})",
+            metadata.len(),
+            MAX_IMAGE_FILE_SIZE
+        )
+        .into());
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mime = match ext.to_lowercase().as_str() {
         "png" => "image/png",
@@ -331,7 +362,9 @@ const HIGHLIGHT_CSS: &str = concat!(
 /// This is safer than inlining SVG because SVG can contain scripts, links, and styles
 /// that would execute in the page context and cause unwanted navigation/requests.
 /// Returns Err if the file is not a valid SVG (e.g., an HTML page saved with .svg extension).
-fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+fn rasterize_svg_to_png_data_uri(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
     use std::sync::{Arc, OnceLock};
 
@@ -339,7 +372,10 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
 
     // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
     let trimmed = svg_data.trim_start();
-    if !trimmed.starts_with('<') || trimmed.starts_with("<!DOCTYPE html") || trimmed.starts_with("<html") {
+    if !trimmed.starts_with('<')
+        || trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+    {
         if !trimmed.contains("<svg") {
             return Err("File is not a valid SVG (possibly an HTML page)".into());
         }
@@ -380,8 +416,7 @@ fn rasterize_svg_to_png_data_uri(path: &std::path::Path) -> Result<String, Box<d
         return Err("SVG dimensions too small after scaling".into());
     }
 
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .ok_or("Failed to create pixmap")?;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
     let transform = tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
@@ -658,9 +693,15 @@ mod tests {
         // or not have a restrictive default-src that prevents copy operations
         // The key is that the webview's native copy (Cmd+C/Ctrl+C) works through
         // the OS menu, not through CSP-gated JavaScript APIs
-        assert!(html.contains("Content-Security-Policy"), "CSP should be present");
+        assert!(
+            html.contains("Content-Security-Policy"),
+            "CSP should be present"
+        );
         // Verify CSP doesn't block scripts (needed for search, mermaid, etc.)
-        assert!(html.contains("script-src 'unsafe-inline'"), "Scripts must be allowed for search to work");
+        assert!(
+            html.contains("script-src 'unsafe-inline'"),
+            "Scripts must be allowed for search to work"
+        );
     }
 
     // --- highlight.js / KDL highlighting tests ---
@@ -670,81 +711,169 @@ mod tests {
         let toc = vec![];
         let body = r#"<pre><code class="language-rust">fn main() {}</code></pre>"#;
         let html = build_html(body, &toc);
-        assert!(html.contains("hljs.highlightAll()"), "hljs.highlightAll() must be present when code blocks exist");
-        assert!(html.contains("hljsDefineKdl"), "KDL language definition must be injected");
-        assert!(html.contains("hljs.registerLanguage('kdl'"), "KDL must be registered with highlight.js");
+        assert!(
+            html.contains("hljs.highlightAll()"),
+            "hljs.highlightAll() must be present when code blocks exist"
+        );
+        assert!(
+            html.contains("hljsDefineKdl"),
+            "KDL language definition must be injected"
+        );
+        assert!(
+            html.contains("hljs.registerLanguage('kdl'"),
+            "KDL must be registered with highlight.js"
+        );
     }
 
     #[test]
     fn highlight_js_not_injected_for_prose_only() {
         let toc = vec![];
         let html = build_html("<p>No code here</p>", &toc);
-        assert!(!html.contains("hljs.highlightAll()"), "hljs should not be injected for prose-only content");
-        assert!(!html.contains("hljsDefineKdl"), "KDL grammar should not be injected for prose-only content");
+        assert!(
+            !html.contains("hljs.highlightAll()"),
+            "hljs should not be injected for prose-only content"
+        );
+        assert!(
+            !html.contains("hljsDefineKdl"),
+            "KDL grammar should not be injected for prose-only content"
+        );
     }
 
     #[test]
     fn kdl_grammar_registers_correct_language_name() {
         // The grammar file must declare hljsDefineKdl and reference 'kdl' as the language name
-        assert!(HIGHLIGHT_KDL.contains("hljsDefineKdl"), "Grammar must export hljsDefineKdl function");
-        assert!(HIGHLIGHT_KDL.contains("name: 'KDL'"), "Grammar must declare name: 'KDL'");
-        assert!(HIGHLIGHT_KDL.contains("aliases: ['kdl']"), "Grammar must include 'kdl' alias");
+        assert!(
+            HIGHLIGHT_KDL.contains("hljsDefineKdl"),
+            "Grammar must export hljsDefineKdl function"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("name: 'KDL'"),
+            "Grammar must declare name: 'KDL'"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("aliases: ['kdl']"),
+            "Grammar must include 'kdl' alias"
+        );
     }
 
     #[test]
     fn kdl_grammar_covers_key_token_types() {
         // Verify the grammar handles all major KDL v2 token types
-        assert!(HIGHLIGHT_KDL.contains("title.function"), "Node names need title.function scope");
-        assert!(HIGHLIGHT_KDL.contains("'attr'"), "Property keys need attr scope");
-        assert!(HIGHLIGHT_KDL.contains("'string'"), "Strings need string scope");
-        assert!(HIGHLIGHT_KDL.contains("'number'"), "Numbers need number scope");
-        assert!(HIGHLIGHT_KDL.contains("'literal'"), "Keyword literals need literal scope");
-        assert!(HIGHLIGHT_KDL.contains("'type'"), "Type annotations need type scope");
-        assert!(HIGHLIGHT_KDL.contains("'comment'"), "Comments need comment scope");
+        assert!(
+            HIGHLIGHT_KDL.contains("title.function"),
+            "Node names need title.function scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'attr'"),
+            "Property keys need attr scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'string'"),
+            "Strings need string scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'number'"),
+            "Numbers need number scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'literal'"),
+            "Keyword literals need literal scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'type'"),
+            "Type annotations need type scope"
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("'comment'"),
+            "Comments need comment scope"
+        );
     }
 
     #[test]
     fn kdl_grammar_handles_all_literals() {
         // #true #false #null #inf #-inf #nan must all be covered
-        assert!(HIGHLIGHT_KDL.contains("#(?:true|false|null|nan|-inf|inf)") ||
-                (HIGHLIGHT_KDL.contains("true") && HIGHLIGHT_KDL.contains("false") &&
-                 HIGHLIGHT_KDL.contains("null") && HIGHLIGHT_KDL.contains("inf")),
-            "Grammar must cover all KDL v2 keyword literals");
+        assert!(
+            HIGHLIGHT_KDL.contains("#(?:true|false|null|nan|-inf|inf)")
+                || (HIGHLIGHT_KDL.contains("true")
+                    && HIGHLIGHT_KDL.contains("false")
+                    && HIGHLIGHT_KDL.contains("null")
+                    && HIGHLIGHT_KDL.contains("inf")),
+            "Grammar must cover all KDL v2 keyword literals"
+        );
     }
 
     #[test]
     fn kdl_grammar_handles_raw_strings() {
         // Raw strings #"..."# syntax must be present
-        assert!(HIGHLIGHT_KDL.contains("#+\""), "Grammar must handle raw string start #\"");
-        assert!(HIGHLIGHT_KDL.contains("\"#+"), "Grammar must handle raw string end \"#");
+        assert!(
+            HIGHLIGHT_KDL.contains("#+\""),
+            "Grammar must handle raw string start #\""
+        );
+        assert!(
+            HIGHLIGHT_KDL.contains("\"#+"),
+            "Grammar must handle raw string end \"#"
+        );
     }
 
     #[test]
     fn kdl_grammar_handles_slashdash() {
-        assert!(HIGHLIGHT_KDL.contains("/-"), "Grammar must handle slashdash comments");
+        assert!(
+            HIGHLIGHT_KDL.contains("/-"),
+            "Grammar must handle slashdash comments"
+        );
     }
 
     #[test]
     fn highlight_css_includes_both_themes() {
-        assert!(HIGHLIGHT_CSS.contains("prefers-color-scheme:light"), "Must include light theme");
-        assert!(HIGHLIGHT_CSS.contains("prefers-color-scheme:dark"), "Must include dark theme");
+        assert!(
+            HIGHLIGHT_CSS.contains("prefers-color-scheme:light"),
+            "Must include light theme"
+        );
+        assert!(
+            HIGHLIGHT_CSS.contains("prefers-color-scheme:dark"),
+            "Must include dark theme"
+        );
         // Both themes must define .hljs background
-        assert!(HIGHLIGHT_CSS.contains("#fff"), "Light theme must set white background");
-        assert!(HIGHLIGHT_CSS.contains("#0d1117"), "Dark theme must set dark background");
+        assert!(
+            HIGHLIGHT_CSS.contains("#fff"),
+            "Light theme must set white background"
+        );
+        assert!(
+            HIGHLIGHT_CSS.contains("#0d1117"),
+            "Dark theme must set dark background"
+        );
     }
 
     #[test]
     fn highlight_css_includes_kdl_overrides() {
         // Node names: bold red
-        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-title"), "KDL node name override must be present");
-        assert!(HIGHLIGHT_CSS.contains("font-weight:bold"), "KDL node names must be bold");
+        assert!(
+            HIGHLIGHT_CSS.contains(".language-kdl .hljs-title"),
+            "KDL node name override must be present"
+        );
+        assert!(
+            HIGHLIGHT_CSS.contains("font-weight:bold"),
+            "KDL node names must be bold"
+        );
         // Property keys: italic
-        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-attr"), "KDL property key override must be present");
-        assert!(HIGHLIGHT_CSS.contains("font-style:italic"), "KDL property keys must be italic");
+        assert!(
+            HIGHLIGHT_CSS.contains(".language-kdl .hljs-attr"),
+            "KDL property key override must be present"
+        );
+        assert!(
+            HIGHLIGHT_CSS.contains("font-style:italic"),
+            "KDL property keys must be italic"
+        );
         // Attribute values: light blue
-        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-string"), "KDL value override must be present");
+        assert!(
+            HIGHLIGHT_CSS.contains(".language-kdl .hljs-string"),
+            "KDL value override must be present"
+        );
         // Dark mode overrides present
-        assert!(HIGHLIGHT_CSS.contains(".language-kdl .hljs-title,.language-kdl .function_"), "Dark mode KDL node name override must be present");
+        assert!(
+            HIGHLIGHT_CSS.contains(".language-kdl .hljs-title,.language-kdl .function_"),
+            "Dark mode KDL node name override must be present"
+        );
     }
 
     #[test]
@@ -759,9 +888,20 @@ mod tests {
         let result = resolve_local_images(html, &dir);
 
         // SVG should be rasterized to PNG data URI (not inlined as raw SVG)
-        assert!(result.contains("data:image/png;base64,"), "SVG should be rasterized to PNG, got: {}", result);
-        assert!(!result.contains("<svg"), "Raw SVG should NOT be inlined (security), got: {}", result);
-        assert!(result.contains("<img"), "Should remain an <img> tag with PNG data URI");
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "SVG should be rasterized to PNG, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("<svg"),
+            "Raw SVG should NOT be inlined (security), got: {}",
+            result
+        );
+        assert!(
+            result.contains("<img"),
+            "Should remain an <img> tag with PNG data URI"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -780,10 +920,16 @@ mod tests {
         let result = resolve_local_images(html, &dir);
 
         // Must NOT contain raw SVG with links
-        assert!(!result.contains("href=\"https://example.com\""),
-            "SVG links must not leak into page, got: {}", result);
-        assert!(result.contains("data:image/png;base64,"),
-            "Should be rasterized to safe PNG, got: {}", result);
+        assert!(
+            !result.contains("href=\"https://example.com\""),
+            "SVG links must not leak into page, got: {}",
+            result
+        );
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "Should be rasterized to safe PNG, got: {}",
+            result
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -801,8 +947,16 @@ mod tests {
         let html = r#"<img src="test.png" alt="pixel">"#;
         let result = resolve_local_images(html, &dir);
 
-        assert!(result.contains("data:image/png;base64,"), "PNG should use data URI, got: {}", result);
-        assert!(result.contains("<img"), "img tag should be preserved for PNG, got: {}", result);
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "PNG should use data URI, got: {}",
+            result
+        );
+        assert!(
+            result.contains("<img"),
+            "img tag should be preserved for PNG, got: {}",
+            result
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -832,11 +986,16 @@ mod tests {
         let html = r#"<img src="assets/screenshots/chart.png" alt="Revenue chart" />"#;
         let result = resolve_local_images(html, &dir);
 
-        assert!(result.contains("data:image/png;base64,"),
+        assert!(
+            result.contains("data:image/png;base64,"),
             "PNG in subdirectory should be resolved to data URI, got: {}",
-            &result[..result.len().min(200)]);
+            &result[..result.len().min(200)]
+        );
         assert!(result.contains("<img"), "Should still be an img tag");
-        assert!(result.contains("alt=\"Revenue chart\""), "Alt text should be preserved");
+        assert!(
+            result.contains("alt=\"Revenue chart\""),
+            "Alt text should be preserved"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -856,17 +1015,22 @@ mod tests {
         // With proper base_dir, it should work
         let html = r#"<img src="test.png" alt="test" />"#;
         let result = resolve_local_images(html, &dir);
-        assert!(result.contains("data:image/png;base64,"),
-            "Should resolve with proper base_dir, got: {}", &result[..result.len().min(200)]);
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "Should resolve with proper base_dir, got: {}",
+            &result[..result.len().min(200)]
+        );
 
         // With empty base_dir, the file won't be found (unless CWD happens to match)
         let empty = std::path::PathBuf::from("");
         let result2 = resolve_local_images(html, &empty);
         // This will likely NOT find the file since CWD != dir
         // The tag should be returned unchanged
-        assert!(result2.contains("src=\"test.png\"") || result2.contains("data:image/png;base64,"),
+        assert!(
+            result2.contains("src=\"test.png\"") || result2.contains("data:image/png;base64,"),
             "With empty base_dir, should either find file or return original, got: {}",
-            &result2[..result2.len().min(200)]);
+            &result2[..result2.len().min(200)]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -887,10 +1051,19 @@ mod tests {
         let html = r#"<p><img src="assets/screenshots/revenue.png" alt="Monthly Revenue Growth — Jan 2023 to Feb 2026" /></p>"#;
         let result = resolve_local_images(html, &dir);
 
-        assert!(result.contains("data:image/png;base64,"),
-            "Comrak-style img tag should be resolved, got: {}", &result[..result.len().min(300)]);
-        assert!(result.contains("alt=\"Monthly Revenue Growth"), "Alt text with special chars should be preserved");
-        assert!(result.contains("<p>") && result.contains("</p>"), "Surrounding <p> tags should be preserved");
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "Comrak-style img tag should be resolved, got: {}",
+            &result[..result.len().min(300)]
+        );
+        assert!(
+            result.contains("alt=\"Monthly Revenue Growth"),
+            "Alt text with special chars should be preserved"
+        );
+        assert!(
+            result.contains("<p>") && result.contains("</p>"),
+            "Surrounding <p> tags should be preserved"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -913,7 +1086,13 @@ mod tests {
 
         // Both images should be resolved
         let count = result.matches("data:image/png;base64,").count();
-        assert_eq!(count, 2, "Both images should be resolved to data URIs, got {} matches in: {}", count, &result[..result.len().min(300)]);
+        assert_eq!(
+            count,
+            2,
+            "Both images should be resolved to data URIs, got {} matches in: {}",
+            count,
+            &result[..result.len().min(300)]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -949,10 +1128,15 @@ mod tests {
         let result = resolve_local_images(html, &subdir);
 
         // Should NOT resolve to data URI — the path escapes subdir
-        assert!(!result.contains("data:image/png;base64,"),
-            "Path traversal should be blocked, got: {}", &result[..result.len().min(200)]);
-        assert!(result.contains("src=\"../secret.png\""),
-            "Original src should be preserved when blocked");
+        assert!(
+            !result.contains("data:image/png;base64,"),
+            "Path traversal should be blocked, got: {}",
+            &result[..result.len().min(200)]
+        );
+        assert!(
+            result.contains("src=\"../secret.png\""),
+            "Original src should be preserved when blocked"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

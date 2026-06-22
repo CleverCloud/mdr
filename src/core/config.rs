@@ -13,8 +13,7 @@ mod tests {
 
     #[test]
     fn default_config_is_valid_kdl_v2() {
-        kdl::KdlDocument::parse_v2(DEFAULT_CONFIG)
-            .expect("DEFAULT_CONFIG must be valid KDL v2");
+        kdl::KdlDocument::parse_v2(DEFAULT_CONFIG).expect("DEFAULT_CONFIG must be valid KDL v2");
     }
 
     #[test]
@@ -70,8 +69,7 @@ mod tests {
         write_default(&path).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        kdl::KdlDocument::parse_v2(&content)
-            .expect("written config must be valid KDL v2");
+        kdl::KdlDocument::parse_v2(&content).expect("written config must be valid KDL v2");
         assert!(content.contains("backend webview"));
         let _ = std::fs::remove_file(&path);
     }

@@ -1,5 +1,5 @@
-use comrak::{markdown_to_html, Options};
 use crate::core::mermaid::process_mermaid_blocks;
+use comrak::{markdown_to_html, Options};
 
 /// Convert markdown content to HTML with all GFM extensions enabled.
 /// Processes mermaid code blocks into inline SVG diagrams.
@@ -43,7 +43,15 @@ fn strip_html_tags(html: &str) -> String {
 fn slugify(text: &str) -> String {
     text.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else if c == ' ' { '-' } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c == ' ' {
+                '-'
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -153,7 +161,9 @@ mod tests {
         // The mermaid block should not remain as a raw code block with language-mermaid class
         // It should either be a rendered SVG diagram or a mermaid-error div
         assert!(
-            result.contains("mermaid-diagram") || result.contains("mermaid-error") || result.contains("mermaid-fallback"),
+            result.contains("mermaid-diagram")
+                || result.contains("mermaid-error")
+                || result.contains("mermaid-fallback"),
             "Mermaid block should be processed, got: {}",
             result
         );
@@ -181,16 +191,32 @@ mod tests {
         // Business docs often use raw HTML <img> tags for sizing
         let md = r#"<img src="chart.png" alt="Revenue chart" width="600" />"#;
         let result = parse_markdown(md);
-        assert!(result.contains("<img"), "Raw HTML <img> tags should be preserved, got: {}", result);
-        assert!(result.contains("chart.png"), "Image src should be preserved, got: {}", result);
+        assert!(
+            result.contains("<img"),
+            "Raw HTML <img> tags should be preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("chart.png"),
+            "Image src should be preserved, got: {}",
+            result
+        );
     }
 
     #[test]
     fn parse_markdown_raw_html_img_with_attributes() {
         let md = r#"<p align="center"><img src="logo.png" alt="logo" width="200"/></p>"#;
         let result = parse_markdown(md);
-        assert!(result.contains("<img"), "Centered HTML image should be preserved, got: {}", result);
-        assert!(result.contains("logo.png"), "Image src should be preserved, got: {}", result);
+        assert!(
+            result.contains("<img"),
+            "Centered HTML image should be preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("logo.png"),
+            "Image src should be preserved, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -198,8 +224,16 @@ mod tests {
         // Standard markdown images should always work
         let md = "![alt text](image.png)";
         let result = parse_markdown(md);
-        assert!(result.contains("<img"), "Markdown image should produce <img>, got: {}", result);
-        assert!(result.contains("image.png"), "Image src should be present, got: {}", result);
+        assert!(
+            result.contains("<img"),
+            "Markdown image should produce <img>, got: {}",
+            result
+        );
+        assert!(
+            result.contains("image.png"),
+            "Image src should be present, got: {}",
+            result
+        );
     }
 }
 

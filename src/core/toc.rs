@@ -1,5 +1,5 @@
-use comrak::{parse_document, Arena, Options};
 use comrak::nodes::NodeValue;
+use comrak::{parse_document, Arena, Options};
 
 #[derive(Debug, Clone)]
 pub struct TocEntry {
@@ -26,7 +26,11 @@ pub fn extract_toc(content: &str) -> Vec<TocEntry> {
             let level = heading.level;
             let text = collect_text(node);
             let anchor = slugify(&text);
-            entries.push(TocEntry { level, text, anchor });
+            entries.push(TocEntry {
+                level,
+                text,
+                anchor,
+            });
         }
     }
 
@@ -34,7 +38,9 @@ pub fn extract_toc(content: &str) -> Vec<TocEntry> {
 }
 
 /// Collect all text content from a node and its children.
-fn collect_text<'a>(node: &'a comrak::arena_tree::Node<'a, std::cell::RefCell<comrak::nodes::Ast>>) -> String {
+fn collect_text<'a>(
+    node: &'a comrak::arena_tree::Node<'a, std::cell::RefCell<comrak::nodes::Ast>>,
+) -> String {
     let mut text = String::new();
     for child in node.descendants() {
         if let NodeValue::Text(ref t) = child.data.borrow().value {
@@ -51,7 +57,15 @@ fn collect_text<'a>(node: &'a comrak::arena_tree::Node<'a, std::cell::RefCell<co
 fn slugify(text: &str) -> String {
     text.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else if c == ' ' { '-' } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else if c == ' ' {
+                '-'
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()

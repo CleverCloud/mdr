@@ -21,8 +21,7 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
     };
 
     if let Some((magic, kind)) = expected {
-        let data = std::fs::read(path)
-            .map_err(|e| format!("cannot read file: {}", e))?;
+        let data = std::fs::read(path).map_err(|e| format!("cannot read file: {}", e))?;
         if data.len() < magic.len() {
             return Err(format!("file too small to be a valid {}", kind));
         }
@@ -44,8 +43,7 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
 }
 
 fn validate_svg(path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read file: {}", e))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read file: {}", e))?;
     let trimmed = text.trim_start();
     if trimmed.starts_with("<svg")
         || trimmed.starts_with("<?xml")
@@ -68,21 +66,27 @@ mod tests {
     #[test]
     fn valid_png_passes() {
         let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
-        tmp.as_file().write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00]).unwrap();
+        tmp.as_file()
+            .write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00])
+            .unwrap();
         assert!(validate_image_file(tmp.path()).is_ok());
     }
 
     #[test]
     fn html_saved_as_svg_fails() {
         let tmp = tempfile::NamedTempFile::with_suffix(".svg").unwrap();
-        tmp.as_file().write_all(b"<!DOCTYPE html><html></html>").unwrap();
+        tmp.as_file()
+            .write_all(b"<!DOCTYPE html><html></html>")
+            .unwrap();
         assert!(validate_image_file(tmp.path()).is_err());
     }
 
     #[test]
     fn valid_svg_passes() {
         let tmp = tempfile::NamedTempFile::with_suffix(".svg").unwrap();
-        tmp.as_file().write_all(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>").unwrap();
+        tmp.as_file()
+            .write_all(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
+            .unwrap();
         assert!(validate_image_file(tmp.path()).is_ok());
     }
 
