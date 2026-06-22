@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-22
+
+### Added
+- TOC toggle in egui backend: press **F10** or click *Hide TOC / Show TOC* in the search bar (#32, #41)
+- Window size and position persistence in egui backend via eframe's `persistence` feature (#43)
+- System font loading in egui backend for non-Latin script support (CJK, etc.) (#31)
+- Image file validation by magic bytes across all backends — invalid/mislabeled images render a visible placeholder instead of failing silently (#14)
+
+### Fixed
+- Headings inside fenced code blocks are no longer treated as section boundaries in egui (#30)
+
+### Changed
+- Cargo dependencies bumped:
+  - `eframe` 0.33 → 0.34
+  - `egui_commonmark` 0.22 → 0.23
+  - `ratatui` 0.29 → 0.30
+  - `ratatui-image` 4.2 → 11.0
+
 ## [0.3.0] - 2026-05-20
 
 ### Added
@@ -115,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TOC scroll navigation in egui backend
 - Mermaid rendering robustness in egui backend
 
+[0.3.1]: https://github.com/CleverCloud/mdr/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/CleverCloud/mdr/compare/v0.2.8...v0.3.0
 [0.2.6]: https://github.com/CleverCloud/mdr/compare/v0.2.5...v0.2.6
 [0.2.4]: https://github.com/CleverCloud/mdr/compare/v0.2.3...v0.2.4

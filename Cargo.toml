@@ -1,6 +1,6 @@
 [package]
 name = "mdr"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 license = "MIT"
@@ -13,9 +13,34 @@ keywords = ["markdown", "viewer", "mermaid", "tui", "webview"]
 
 [features]
 default = ["egui-backend", "webview-backend", "tui-backend"]
-egui-backend = ["dep:eframe", "dep:egui_commonmark", "dep:resvg", "dep:usvg", "dep:tiny-skia", "dep:fontdb"]
-webview-backend = ["dep:wry", "dep:tao", "dep:muda", "dep:resvg", "dep:usvg", "dep:tiny-skia"]
-tui-backend = ["dep:ratatui", "dep:crossterm", "dep:ratatui-image", "dep:ureq", "dep:resvg", "dep:usvg", "dep:tiny-skia", "image/jpeg", "image/gif", "image/webp"]
+egui-backend = [
+  "dep:eframe",
+  "dep:egui_commonmark",
+  "dep:resvg",
+  "dep:usvg",
+  "dep:tiny-skia",
+  "dep:fontdb",
+]
+webview-backend = [
+  "dep:wry",
+  "dep:tao",
+  "dep:muda",
+  "dep:resvg",
+  "dep:usvg",
+  "dep:tiny-skia",
+]
+tui-backend = [
+  "dep:ratatui",
+  "dep:crossterm",
+  "dep:ratatui-image",
+  "dep:ureq",
+  "dep:resvg",
+  "dep:usvg",
+  "dep:tiny-skia",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]
 
 [dependencies]
 # Core
@@ -31,7 +56,12 @@ kdl = "6"
 
 # egui backend
 eframe = { version = "0.34", features = ["persistence"], optional = true }
-egui_commonmark = { version = "0.23", features = ["better_syntax_highlighting", "load-images", "svg", "embedded_image"], optional = true }
+egui_commonmark = { version = "0.23", features = [
+  "better_syntax_highlighting",
+  "load-images",
+  "svg",
+  "embedded_image",
+], optional = true }
 resvg = { version = "0.47", optional = true }
 usvg = { version = "0.47", optional = true }
 tiny-skia = { version = "0.12", optional = true }
@@ -45,7 +75,10 @@ muda = { version = "0.19", optional = true }
 # tui backend
 ratatui = { version = "0.30", optional = true }
 crossterm = { version = "0.29", optional = true }
-ratatui-image = { version = "11.0", default-features = false, features = ["image-defaults", "crossterm"], optional = true }
+ratatui-image = { version = "11.0", default-features = false, features = [
+  "image-defaults",
+  "crossterm",
+], optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = { version = "3", optional = true }
 
@@ -57,12 +90,10 @@ libc = "0.2"
 
 [package.metadata.deb]
 section = "text"
-assets = [
-    ["target/release/mdr", "/usr/bin/mdr", "755"],
-]
+assets = [["target/release/mdr", "/usr/bin/mdr", "755"]]
 extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI)."
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/mdr", dest = "/usr/bin/mdr", mode = "0755" },
+  { source = "target/release/mdr", dest = "/usr/bin/mdr", mode = "0755" },
 ]
