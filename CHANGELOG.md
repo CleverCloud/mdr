@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-06-22
+
+### Added
+- TOC panel in egui is now **resizable** by dragging its edge (#27)
+- HTTP image fetching in TUI now has a **30-second timeout**
+- `file_to_data_uri()` now rejects image files larger than **100 MB** to prevent OOM
+
+### Fixed
+- Replaced `std::mem::forget` with explicit `Box::leak` in `watcher.rs` (#16)
+- Mermaid diamond-node panic reported upstream; workaround already in place (#4)
+- `cargo binstall mdr` confirmed working (#22)
+
 ## [0.3.1] - 2026-06-22
 
 ### Added
@@ -133,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TOC scroll navigation in egui backend
 - Mermaid rendering robustness in egui backend
 
+[0.3.2]: https://github.com/CleverCloud/mdr/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/CleverCloud/mdr/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/CleverCloud/mdr/compare/v0.2.8...v0.3.0
 [0.2.6]: https://github.com/CleverCloud/mdr/compare/v0.2.5...v0.2.6
