@@ -186,8 +186,16 @@ cargo clippy
 
 ### Linux dependencies
 
+#### Ubuntu
+
 ```bash
 sudo apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libgl1-mesa-dev
+```
+
+#### Fedora
+
+```bash
+sudo dnf install gtk3-devel webkit2gtk4.1-devel libxdo-devel mesa-libGL-devel
 ```
 
 ## Releases
