@@ -18,30 +18,277 @@ use ratatui_image::{Resize, StatefulImage};
 
 use crate::core::toc::{self, TocEntry};
 
+/// One logical line of text together with its wrapped rendering.
+///
+/// The unwrapped `source` is kept so the line can be folded again when the
+/// terminal is resized, and so search and TOC lookups keep working on the
+/// original text rather than on whatever the current width happens to be.
+struct WrappedText {
+    source: Line<'static>,
+    lines: Vec<Line<'static>>,
+}
+
+impl WrappedText {
+    fn new(source: Line<'static>) -> Self {
+        Self {
+            lines: vec![source.clone()],
+            source,
+        }
+    }
+
+    fn rewrap(&mut self, width: usize) {
+        self.lines = wrap_line(&self.source, width);
+    }
+
+    /// Rows this line occupies on screen once wrapped.
+    fn height(&self) -> usize {
+        self.lines.len().max(1)
+    }
+
+    /// The unwrapped text, without styling.
+    fn text(&self) -> String {
+        self.source
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+}
+
 /// Represents a single line element in the rendered content.
 /// Lines can be either text (rendered as ratatui Lines) or images (rendered as StatefulImage).
 enum ContentElement {
-    TextLine(Line<'static>),
+    TextLine(WrappedText),
     /// An image element that spans a number of rows in the terminal.
     /// Stores the stateful protocol, alt text (for fallback), and the desired height in rows.
+    ///
+    /// `StatefulProtocol` is by far the largest variant, so it is boxed to keep
+    /// `Vec<ContentElement>` — one entry per rendered line — small.
     Image {
-        protocol: StatefulProtocol,
+        protocol: Box<StatefulProtocol>,
         _alt: String,
         height: u16,
     },
     /// Fallback placeholder when image loading fails.
-    ImagePlaceholder(Line<'static>),
+    ImagePlaceholder(WrappedText),
 }
 
 impl ContentElement {
     /// Returns the number of terminal rows this element occupies.
     fn row_height(&self) -> u16 {
         match self {
-            ContentElement::TextLine(_) => 1,
+            ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) => {
+                text.height() as u16
+            }
             ContentElement::Image { height, .. } => *height,
-            ContentElement::ImagePlaceholder(_) => 1,
         }
     }
+}
+
+/// Re-fold every text element to `width` columns. Images keep their own height.
+fn rewrap_elements(elements: &mut [ContentElement], width: usize) {
+    for element in elements.iter_mut() {
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
+            text.rewrap(width);
+        }
+    }
+}
+
+/// Display width of a string, in terminal columns.
+fn str_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+fn char_width(ch: char) -> usize {
+    let mut buf = [0u8; 4];
+    str_width(ch.encode_utf8(&mut buf))
+}
+
+/// Split `s` so that the first part is at most `width` columns wide.
+fn split_at_width(s: &str, width: usize) -> (&str, &str) {
+    let mut used = 0usize;
+    for (idx, ch) in s.char_indices() {
+        let cw = char_width(ch);
+        if used + cw > width {
+            return s.split_at(idx);
+        }
+        used += cw;
+    }
+    (s, "")
+}
+
+/// The prefix continuation lines get, so wrapped text keeps its visual column.
+///
+/// A code-block line repeats its `│ ` gutter verbatim, which keeps the drawn box
+/// closed; every other marker (bullets, task boxes, blockquote bars, ordered
+/// list numbers) is replaced by blanks so the continuation lines up under the
+/// text of the first line instead of under its marker.
+fn continuation_prefix(line: &Line<'_>) -> Span<'static> {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let indent_len = text.chars().take_while(|c| *c == ' ').count();
+    let indent = " ".repeat(indent_len);
+    let rest = &text[indent_len..];
+
+    const GUTTER: &str = "│ ";
+    if rest.starts_with(GUTTER) {
+        // Keep the gutter, and its colour, on every folded row.
+        let style = line.spans.first().map(|s| s.style).unwrap_or_default();
+        return Span::styled(format!("{}{}", indent, GUTTER), style);
+    }
+
+    const MARKERS: &[&str] = &["• ", "☑ ", "☐ ", "▎ ", "- ", "* "];
+    for marker in MARKERS {
+        if rest.starts_with(marker) {
+            return Span::raw(format!("{}{}", indent, " ".repeat(str_width(marker))));
+        }
+    }
+
+    // Ordered lists: "12. "
+    if let Some(dot) = rest.find(". ") {
+        let num = &rest[..dot];
+        if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+            return Span::raw(format!("{}{}", indent, " ".repeat(dot + 2)));
+        }
+    }
+
+    Span::raw(indent)
+}
+
+/// A run of characters sharing one style, either all blanks or none.
+struct WrapToken {
+    text: String,
+    style: Style,
+    is_space: bool,
+}
+
+fn tokenize(line: &Line<'_>) -> Vec<WrapToken> {
+    let mut tokens = Vec::new();
+    for span in &line.spans {
+        let mut chunk = String::new();
+        let mut chunk_is_space = false;
+        for ch in span.content.chars() {
+            let is_space = ch == ' ' || ch == '\t';
+            if !chunk.is_empty() && is_space != chunk_is_space {
+                tokens.push(WrapToken {
+                    text: std::mem::take(&mut chunk),
+                    style: span.style,
+                    is_space: chunk_is_space,
+                });
+            }
+            chunk_is_space = is_space;
+            chunk.push(ch);
+        }
+        if !chunk.is_empty() {
+            tokens.push(WrapToken {
+                text: chunk,
+                style: span.style,
+                is_space: chunk_is_space,
+            });
+        }
+    }
+    tokens
+}
+
+/// Fold a styled line to `width` columns, preserving every span's style (#54).
+///
+/// Folding happens on blanks where possible; a single word wider than the line
+/// is split mid-word rather than dropped. Blanks that land on a fold are
+/// discarded so continuation lines start at their indent. A `width` of 0 means
+/// "unknown width" and leaves the line untouched.
+fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 || line.width() <= width {
+        return vec![line.clone()];
+    }
+
+    let prefix = continuation_prefix(line);
+    let prefix_width = str_width(&prefix.content);
+    // A prefix eating half the line would leave no usable room for the text.
+    let (prefix, prefix_width) = if prefix_width * 2 >= width {
+        (Span::raw(""), 0)
+    } else {
+        (prefix, prefix_width)
+    };
+
+    let mut folded: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+
+    for token in tokenize(line) {
+        let mut remaining: &str = &token.text;
+        loop {
+            let limit = if folded.is_empty() {
+                width
+            } else {
+                width - prefix_width
+            };
+
+            if token.is_space {
+                // Blanks never open a continuation line (the leading indent of
+                // the very first line is text, not a fold artefact), and never
+                // overflow one.
+                let opens_a_fold = current.is_empty() && !folded.is_empty();
+                if !opens_a_fold && current_width + str_width(remaining) <= limit {
+                    current_width += str_width(remaining);
+                    current.push(Span::styled(remaining.to_string(), token.style));
+                }
+                break;
+            }
+
+            let token_width = str_width(remaining);
+            if current_width + token_width <= limit {
+                current.push(Span::styled(remaining.to_string(), token.style));
+                current_width += token_width;
+                break;
+            }
+
+            if current_width > 0 {
+                // Try the word again on a fresh line.
+                folded.push(std::mem::take(&mut current));
+                current_width = 0;
+                continue;
+            }
+
+            // The word alone is wider than the line: split it mid-word, taking
+            // at least one character so this never spins.
+            let (head, tail) = split_at_width(remaining, limit);
+            let (head, tail) = if head.is_empty() {
+                let idx = remaining
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len());
+                remaining.split_at(idx)
+            } else {
+                (head, tail)
+            };
+            current.push(Span::styled(head.to_string(), token.style));
+            folded.push(std::mem::take(&mut current));
+            current_width = 0;
+            remaining = tail;
+            if remaining.is_empty() {
+                break;
+            }
+        }
+    }
+
+    if !current.is_empty() || folded.is_empty() {
+        folded.push(current);
+    }
+
+    folded
+        .into_iter()
+        .enumerate()
+        .map(|(i, spans)| {
+            if i == 0 || prefix_width == 0 {
+                Line::from(spans)
+            } else {
+                let mut with_prefix = Vec::with_capacity(spans.len() + 1);
+                with_prefix.push(prefix.clone());
+                with_prefix.extend(spans);
+                Line::from(with_prefix)
+            }
+        })
+        .collect()
 }
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,11 +309,13 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Initialize the image picker for protocol detection.
-    // from_query_stdio should be called after entering the alternate screen.
-    let picker = Picker::from_query_stdio().ok();
-
-    let rendered = build_content_elements(&content, &file_path, &picker);
+    // The picker is deliberately *not* initialized here: detecting the image
+    // protocol means writing a query to the terminal and waiting for its answer,
+    // which costs a full two-second timeout on terminals that never reply (#58).
+    // The document is drawn first, and the query only happens for documents that
+    // actually have something to draw.
+    let needs_picker = document_needs_picker(&content);
+    let rendered = build_content_elements(&content, &file_path, &None);
     let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
 
     let mut app = TuiApp {
@@ -75,7 +324,9 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         toc_entries,
         file_path,
         watcher_rx,
-        picker,
+        picker: None,
+        picker_queried: false,
+        content_width: 0,
         scroll_offset: 0,
         toc_selected: 0,
         focus_toc: false,
@@ -86,6 +337,20 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         current_match_idx: 0,
     };
 
+    // Show the document immediately, then pay for the capability query — and
+    // only when the document has an image or a diagram to display.
+    terminal.draw(|f| ui(f, &mut app))?;
+    if needs_picker {
+        ensure_picker(&mut app);
+        if app.picker.is_some() {
+            // Only worth re-rendering when the terminal can actually draw pixels.
+            rebuild_rendered(&mut app);
+        }
+        // The query talks to the terminal behind ratatui's back; repaint from
+        // scratch so a stray reply cannot be left on screen.
+        terminal.clear()?;
+    }
+
     // Main loop
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -95,8 +360,11 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             while app.watcher_rx.try_recv().is_ok() {}
             if let Ok(new_content) = std::fs::read_to_string(&app.file_path) {
                 app.toc_entries = toc::extract_toc(&new_content);
-                app.rendered = build_content_elements(&new_content, &app.file_path, &app.picker);
+                if document_needs_picker(&new_content) {
+                    ensure_picker(&mut app);
+                }
                 app.content = new_content;
+                rebuild_rendered(&mut app);
             }
         }
 
@@ -202,16 +470,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Tab => {
                             app.focus_toc = !app.focus_toc;
                         }
-                        KeyCode::Enter => {
-                            if app.focus_toc {
-                                if let Some(offset) = find_heading_row(
-                                    &app.rendered,
-                                    &app.toc_entries,
-                                    app.toc_selected,
-                                ) {
-                                    app.scroll_offset = offset;
-                                    app.focus_toc = false;
-                                }
+                        KeyCode::Enter if app.focus_toc => {
+                            if let Some(offset) =
+                                find_heading_row(&app.rendered, &app.toc_entries, app.toc_selected)
+                            {
+                                app.scroll_offset = offset;
+                                app.focus_toc = false;
                             }
                         }
                         _ => {}
@@ -243,7 +507,14 @@ struct TuiApp {
     toc_entries: Vec<TocEntry>,
     file_path: PathBuf,
     watcher_rx: Receiver<()>,
+    /// The terminal's image protocol, once it has been asked for. `None` means
+    /// either "not asked yet" or "the terminal cannot display images"; the
+    /// `picker_queried` flag tells the two apart.
     picker: Option<Picker>,
+    picker_queried: bool,
+    /// Width the text is currently wrapped to, in columns. 0 until the first
+    /// frame tells us how wide the content panel really is.
+    content_width: usize,
     scroll_offset: usize,
     toc_selected: usize,
     focus_toc: bool,
@@ -254,35 +525,52 @@ struct TuiApp {
     current_match_idx: usize,
 }
 
-fn update_search_matches(app: &mut TuiApp) {
-    app.search_matches.clear();
-    app.current_match_idx = 0;
-    if app.search_query.is_empty() {
+/// Ask the terminal which image protocol it speaks, at most once per run.
+///
+/// `Picker::from_query_stdio()` writes an escape sequence and blocks until the
+/// terminal answers — two seconds on terminals that never do. Calling it lazily
+/// keeps that cost out of the startup path of text-only documents (#58).
+fn ensure_picker(app: &mut TuiApp) {
+    if app.picker_queried {
         return;
     }
-    let query_lower = app.search_query.to_lowercase();
+    app.picker_queried = true;
+    app.picker = Picker::from_query_stdio().ok();
+}
+
+/// Rebuild the rendered elements from the current document content.
+fn rebuild_rendered(app: &mut TuiApp) {
+    let content = std::mem::take(&mut app.content);
+    app.rendered = build_content_elements(&content, &app.file_path, &app.picker);
+    rewrap_elements(&mut app.rendered, app.content_width);
+    app.content = content;
+}
+
+/// Row offsets of the lines matching `query`, in the current wrapped layout.
+///
+/// Offsets are counted in *rendered* rows, wrapped height included, so that
+/// scrolling to a match lands on it (#54).
+fn compute_search_matches(elements: &[ContentElement], query: &str) -> Vec<usize> {
+    let mut matches = Vec::new();
+    if query.is_empty() {
+        return matches;
+    }
+    let query_lower = query.to_lowercase();
     let mut row_offset: usize = 0;
-    for element in &app.rendered {
-        match element {
-            ContentElement::TextLine(line) => {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if text.to_lowercase().contains(&query_lower) {
-                    app.search_matches.push(row_offset);
-                }
-                row_offset += 1;
-            }
-            ContentElement::Image { height, .. } => {
-                row_offset += *height as usize;
-            }
-            ContentElement::ImagePlaceholder(line) => {
-                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if text.to_lowercase().contains(&query_lower) {
-                    app.search_matches.push(row_offset);
-                }
-                row_offset += 1;
+    for element in elements {
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
+            if text.text().to_lowercase().contains(&query_lower) {
+                matches.push(row_offset);
             }
         }
+        row_offset += element.row_height() as usize;
     }
+    matches
+}
+
+fn update_search_matches(app: &mut TuiApp) {
+    app.search_matches = compute_search_matches(&app.rendered, &app.search_query);
+    app.current_match_idx = 0;
     // Auto-scroll to first match
     if !app.search_matches.is_empty() {
         app.scroll_offset = app.search_matches[0];
@@ -351,6 +639,17 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
         .title(format!(" {} ", app.file_path.display()))
         .title_style(Style::default().bold())
         .inner(content_area);
+
+    // Fold the text to the panel width, and only when that width changes: the
+    // wrapped height feeds every scroll offset below (#54).
+    if inner_area.width as usize != app.content_width {
+        app.content_width = inner_area.width as usize;
+        rewrap_elements(&mut app.rendered, app.content_width);
+        app.search_matches = compute_search_matches(&app.rendered, &app.search_query);
+        if app.current_match_idx >= app.search_matches.len() {
+            app.current_match_idx = 0;
+        }
+    }
 
     let content_height = inner_area.height as usize;
     let total_rows = total_content_rows(&app.rendered);
@@ -468,62 +767,35 @@ fn render_content_elements(
         }
 
         // This element is at least partially visible
-        let skip_within = if rows_skipped < scroll {
-            scroll - rows_skipped
-        } else {
-            0
-        };
+        let skip_within = scroll.saturating_sub(rows_skipped);
         rows_skipped += elem_height;
 
         match element {
-            ContentElement::TextLine(line) => {
-                if skip_within == 0 {
+            ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) => {
+                // A search hit is recorded at the first row of the logical line,
+                // so every one of its wrapped rows is highlighted together.
+                let is_match = search_matches.contains(&current_absolute_row);
+                let is_current =
+                    is_match && search_matches.get(current_match) == Some(&current_absolute_row);
+
+                for line in text.lines.iter().skip(skip_within) {
+                    if y_offset >= available_height {
+                        break;
+                    }
                     let line_area = Rect {
                         x: area.x,
                         y: area.y + y_offset,
                         width: area.width,
                         height: 1,
                     };
-                    // Check if this line matches search
-                    let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match
-                        && search_matches.get(current_match) == Some(&current_absolute_row);
-
-                    if is_current {
-                        let highlighted_line = Line::from(
-                            line.spans
-                                .iter()
-                                .map(|s| {
-                                    Span::styled(
-                                        s.content.clone(),
-                                        s.style.bg(Color::Yellow).fg(Color::Black),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else if is_match {
-                        let highlighted_line = Line::from(
-                            line.spans
-                                .iter()
-                                .map(|s| {
-                                    Span::styled(
-                                        s.content.clone(),
-                                        s.style.bg(Color::Rgb(80, 80, 0)),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
+                    let rendered = if is_match {
+                        highlight_line(line, is_current)
                     } else {
-                        let p = Paragraph::new(line.clone());
-                        f.render_widget(p, line_area);
-                    }
+                        line.clone()
+                    };
+                    f.render_widget(Paragraph::new(rendered), line_area);
                     y_offset += 1;
                 }
-                // If skip_within > 0 for a 1-row element, it's fully scrolled past
             }
             ContentElement::Image {
                 protocol, height, ..
@@ -546,58 +818,28 @@ fn render_content_elements(
                     height: render_height,
                 };
                 let image_widget = StatefulImage::default().resize(Resize::Fit(None));
-                f.render_stateful_widget(image_widget, img_area, protocol);
+                f.render_stateful_widget(image_widget, img_area, protocol.as_mut());
                 y_offset += render_height;
-            }
-            ContentElement::ImagePlaceholder(line) => {
-                if skip_within == 0 {
-                    let line_area = Rect {
-                        x: area.x,
-                        y: area.y + y_offset,
-                        width: area.width,
-                        height: 1,
-                    };
-                    let is_match = search_matches.contains(&current_absolute_row);
-                    let is_current = is_match
-                        && search_matches.get(current_match) == Some(&current_absolute_row);
-
-                    if is_current {
-                        let highlighted_line = Line::from(
-                            line.spans
-                                .iter()
-                                .map(|s| {
-                                    Span::styled(
-                                        s.content.clone(),
-                                        s.style.bg(Color::Yellow).fg(Color::Black),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else if is_match {
-                        let highlighted_line = Line::from(
-                            line.spans
-                                .iter()
-                                .map(|s| {
-                                    Span::styled(
-                                        s.content.clone(),
-                                        s.style.bg(Color::Rgb(80, 80, 0)),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        let p = Paragraph::new(highlighted_line);
-                        f.render_widget(p, line_area);
-                    } else {
-                        let p = Paragraph::new(line.clone());
-                        f.render_widget(p, line_area);
-                    }
-                    y_offset += 1;
-                }
             }
         }
     }
+}
+
+/// Repaint a line with the search highlight, keeping each span's own styling.
+fn highlight_line(line: &Line<'static>, is_current: bool) -> Line<'static> {
+    Line::from(
+        line.spans
+            .iter()
+            .map(|s| {
+                let style = if is_current {
+                    s.style.bg(Color::Yellow).fg(Color::Black)
+                } else {
+                    s.style.bg(Color::Rgb(80, 80, 0))
+                };
+                Span::styled(s.content.clone(), style)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Find the row offset where a heading appears in the rendered output.
@@ -611,25 +853,12 @@ fn find_heading_row(
     let mut row_offset: usize = 0;
 
     for element in elements {
-        match element {
-            ContentElement::TextLine(line) => {
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if line_text.contains(search_text) {
-                    return Some(row_offset);
-                }
-                row_offset += 1;
-            }
-            ContentElement::Image { height, .. } => {
-                row_offset += *height as usize;
-            }
-            ContentElement::ImagePlaceholder(line) => {
-                let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                if line_text.contains(search_text) {
-                    return Some(row_offset);
-                }
-                row_offset += 1;
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
+            if text.text().contains(search_text) {
+                return Some(row_offset);
             }
         }
+        row_offset += element.row_height() as usize;
     }
 
     None
@@ -655,7 +884,7 @@ fn build_content_elements(
     for item in text_lines {
         match item {
             ParsedLine::Text(line) => {
-                elements.push(ContentElement::TextLine(line));
+                elements.push(ContentElement::TextLine(WrappedText::new(line)));
             }
             ParsedLine::MermaidRef { source } => {
                 // Try to render mermaid diagram as an image
@@ -671,7 +900,7 @@ fn build_content_elements(
                                         ((target_cols as f64) * aspect / 2.0).ceil() as u16;
                                     let height = target_rows.clamp(4, 40);
 
-                                    let protocol = picker.new_resize_protocol(dyn_img);
+                                    let protocol = Box::new(picker.new_resize_protocol(dyn_img));
                                     elements.push(ContentElement::Image {
                                         protocol,
                                         _alt: "mermaid diagram".to_string(),
@@ -704,7 +933,7 @@ fn build_content_elements(
                             let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
                             let height = target_rows.clamp(4, 40);
 
-                            let protocol = picker.new_resize_protocol(dyn_img);
+                            let protocol = Box::new(picker.new_resize_protocol(dyn_img));
                             elements.push(ContentElement::Image {
                                 protocol,
                                 _alt: alt,
@@ -717,11 +946,11 @@ fn build_content_elements(
                             } else {
                                 alt
                             };
-                            elements.push(ContentElement::ImagePlaceholder(Line::from(
-                                Span::styled(
+                            elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
+                                Line::from(Span::styled(
                                     format!("[Image: {}]", label),
                                     Style::default().fg(Color::Magenta).italic(),
-                                ),
+                                )),
                             )));
                         }
                     }
@@ -732,10 +961,12 @@ fn build_content_elements(
                     } else {
                         alt
                     };
-                    elements.push(ContentElement::ImagePlaceholder(Line::from(Span::styled(
-                        format!("[Image: {}]", label),
-                        Style::default().fg(Color::Magenta).italic(),
-                    ))));
+                    elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
+                        Line::from(Span::styled(
+                            format!("[Image: {}]", label),
+                            Style::default().fg(Color::Magenta).italic(),
+                        )),
+                    )));
                 }
             }
         }
@@ -746,21 +977,24 @@ fn build_content_elements(
 
 /// Push a mermaid code block as fallback text when rendering fails or no picker is available.
 fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) {
-    elements.push(ContentElement::TextLine(Line::from(Span::styled(
-        "┌─ mermaid ─────────────────────────────────┐".to_string(),
-        Style::default().fg(Color::DarkGray),
+    elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
+        Span::styled(
+            "┌─ mermaid ─────────────────────────────────┐".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
     ))));
     for line in source.lines() {
-        elements.push(ContentElement::TextLine(Line::from(Span::styled(
-            format!("│ {}", line),
-            Style::default().fg(Color::Green),
+        elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
+            Span::styled(format!("│ {}", line), Style::default().fg(Color::Green)),
         ))));
     }
-    elements.push(ContentElement::TextLine(Line::from(Span::styled(
-        "└─────────────────────────────────────────┘".to_string(),
-        Style::default().fg(Color::DarkGray),
+    elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
+        Span::styled(
+            "└─────────────────────────────────────────┘".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
     ))));
-    elements.push(ContentElement::TextLine(Line::from("")));
+    elements.push(ContentElement::TextLine(WrappedText::new(Line::from(""))));
 }
 
 /// Load an image from a URL, data URI, or local file path.
@@ -782,12 +1016,11 @@ fn load_image(
         } else {
             base_dir.join(url)
         };
-        // Path traversal protection: ensure resolved path is within base_dir
-        if let (Ok(canonical), Ok(canonical_base)) = (path.canonicalize(), base_dir.canonicalize())
-        {
-            if !canonical.starts_with(&canonical_base) {
-                return Err("path traversal blocked: image path escapes base directory".into());
-            }
+        // Path traversal protection: the image must stay inside the enclosing
+        // project (see core::paths), so `../images/logo.png` from `docs/page.md`
+        // works while `../../../etc/passwd` does not.
+        if path.exists() && !crate::core::paths::is_within_image_root(&path, base_dir) {
+            return Err("path traversal blocked: image path escapes the project directory".into());
         }
         crate::core::image_validation::validate_image_file(&path)
             .map_err(|e| format!("invalid image file: {}", e))?;
@@ -838,8 +1071,10 @@ fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::err
         Arc::new(db)
     });
 
-    let mut options = usvg::Options::default();
-    options.fontdb = Arc::clone(fontdb);
+    let options = usvg::Options {
+        fontdb: Arc::clone(fontdb),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_str(svg_data, &options)?;
     let size = tree.size();
     let width = size.width() as u32;
@@ -886,6 +1121,22 @@ enum ParsedLine {
     MermaidRef {
         source: String,
     },
+}
+
+/// Whether this document has anything that has to be drawn as pixels: a
+/// standalone image or a mermaid diagram.
+///
+/// This is the gate for the terminal capability query (#58). It is deliberately
+/// built on the very same parser that produces the rendered elements, so the
+/// answer can never disagree with what is actually displayed: an image written
+/// inside a paragraph or a code block is shown as text and needs no picker.
+fn document_needs_picker(content: &str) -> bool {
+    markdown_to_lines_with_images(content).iter().any(|item| {
+        matches!(
+            item,
+            ParsedLine::ImageRef { .. } | ParsedLine::MermaidRef { .. }
+        )
+    })
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
@@ -957,44 +1208,44 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         }
 
         // Headings
-        if line.starts_with("# ") {
+        if let Some(title) = line.strip_prefix("# ") {
             items.push(ParsedLine::Text(Line::from("")));
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                line[2..].to_string(),
+                title.to_string(),
                 Style::default().fg(Color::Cyan).bold().underlined(),
             ))));
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                "═".repeat(line.len().saturating_sub(2).min(60)),
+                "═".repeat(title.len().min(60)),
                 Style::default().fg(Color::Cyan),
             ))));
             items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
-        if line.starts_with("## ") {
+        if let Some(title) = line.strip_prefix("## ") {
             items.push(ParsedLine::Text(Line::from("")));
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                line[3..].to_string(),
+                title.to_string(),
                 Style::default().fg(Color::Blue).bold(),
             ))));
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                "─".repeat(line.len().saturating_sub(3).min(50)),
+                "─".repeat(title.len().min(50)),
                 Style::default().fg(Color::Blue),
             ))));
             items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
-        if line.starts_with("### ") {
+        if let Some(title) = line.strip_prefix("### ") {
             items.push(ParsedLine::Text(Line::from("")));
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                line[4..].to_string(),
+                title.to_string(),
                 Style::default().fg(Color::Yellow).bold(),
             ))));
             items.push(ParsedLine::Text(Line::from("")));
             continue;
         }
-        if line.starts_with("#### ") {
+        if let Some(title) = line.strip_prefix("#### ") {
             items.push(ParsedLine::Text(Line::from(Span::styled(
-                line[5..].to_string(),
+                title.to_string(),
                 Style::default().fg(Color::Magenta).bold(),
             ))));
             continue;
@@ -1047,11 +1298,11 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
         }
 
         // Blockquote
-        if line.starts_with("> ") {
+        if let Some(quoted) = line.strip_prefix("> ") {
             items.push(ParsedLine::Text(Line::from(vec![
                 Span::styled("▎ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    line[2..].to_string(),
+                    quoted.to_string(),
                     Style::default().fg(Color::Gray).italic(),
                 ),
             ])));
@@ -1478,6 +1729,255 @@ mod tests {
         assert!(
             has_code_text,
             "Non-mermaid code should appear as regular code text"
+        );
+    }
+
+    // --- #54: long lines must be wrapped, not cut off -------------------------
+
+    fn plain_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_line_shorter_than_the_width_is_left_alone() {
+        let line = Line::from("hello world");
+        let out = wrap_line(&line, 40);
+        assert_eq!(out.len(), 1);
+        assert_eq!(plain_text(&out[0]), "hello world");
+    }
+
+    #[test]
+    fn a_long_line_is_folded_at_word_boundaries() {
+        let line = Line::from("the quick brown fox jumps over the lazy dog");
+        let out = wrap_line(&line, 20);
+        assert!(out.len() > 1, "a 43-column line must not fit in 20 columns");
+        for l in &out {
+            assert!(l.width() <= 20, "line too wide: {:?}", plain_text(l));
+        }
+        let joined = out
+            .iter()
+            .map(|l| plain_text(l).trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined, "the quick brown fox jumps over the lazy dog");
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_is_hard_split() {
+        let line = Line::from("supercalifragilisticexpialidocious");
+        let out = wrap_line(&line, 10);
+        for l in &out {
+            assert!(l.width() <= 10, "line too wide: {:?}", plain_text(l));
+        }
+        let joined: String = out.iter().map(|l| plain_text(l)).collect();
+        assert_eq!(joined, "supercalifragilisticexpialidocious");
+    }
+
+    #[test]
+    fn wrapping_keeps_the_style_of_every_span() {
+        let line = Line::from(vec![
+            Span::styled("aaaa bbbb ", Style::default().fg(Color::Red)),
+            Span::styled("cccc dddd", Style::default().fg(Color::Blue)),
+        ]);
+        let out = wrap_line(&line, 12);
+        assert!(out.len() > 1);
+
+        let by_color = |color: Color| -> String {
+            out.iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.fg == Some(color))
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .replace(' ', "")
+        };
+        assert_eq!(by_color(Color::Red), "aaaabbbb");
+        assert_eq!(by_color(Color::Blue), "ccccdddd");
+    }
+
+    #[test]
+    fn an_empty_line_stays_a_single_empty_line() {
+        let out = wrap_line(&Line::from(""), 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(plain_text(&out[0]), "");
+    }
+
+    #[test]
+    fn a_tiny_width_still_yields_the_whole_text() {
+        let line = Line::from("alpha beta gamma");
+        for width in 0..6 {
+            let out = wrap_line(&line, width);
+            assert!(!out.is_empty(), "width {} produced no line at all", width);
+            let joined: String = out.iter().map(|l| plain_text(l)).collect();
+            assert!(
+                joined.replace(' ', "").contains("alphabetagamma"),
+                "width {} lost text: {:?}",
+                width,
+                joined
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_list_item_keeps_its_bullet_indent() {
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled("\u{2022} ", Style::default().fg(Color::Cyan)),
+            Span::raw("one two three four five six seven eight"),
+        ]);
+        let out = wrap_line(&line, 20);
+        assert!(out.len() > 1);
+        let second = plain_text(&out[1]);
+        assert!(
+            second.starts_with("    "),
+            "continuation must line up under the item text, got {:?}",
+            second
+        );
+        assert!(
+            !second.contains('\u{2022}'),
+            "the bullet must not be repeated: {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn a_wrapped_code_line_keeps_its_gutter() {
+        let line = Line::from(Span::styled(
+            "\u{2502} let x = some_very_long_expression_here();",
+            Style::default().fg(Color::Green),
+        ));
+        let out = wrap_line(&line, 20);
+        assert!(out.len() > 1);
+        assert!(
+            plain_text(&out[1]).starts_with("\u{2502} "),
+            "the code gutter must be repeated, got {:?}",
+            plain_text(&out[1])
+        );
+    }
+
+    #[test]
+    fn wrapped_lines_count_towards_the_scroll_height() {
+        let md = "a bb ccc dddd eeeee ffffff ggggggg hhhhhhhh iiiiiiiii jjjjjjjjjj\n";
+        let path = std::path::PathBuf::from("/tmp/mdr_wrap_height.md");
+        let mut elements = build_content_elements(md, &path, &None);
+        let unwrapped = total_content_rows(&elements);
+        rewrap_elements(&mut elements, 20);
+        let wrapped = total_content_rows(&elements);
+        assert!(
+            wrapped > unwrapped,
+            "wrapping must be reflected in the scroll height ({} -> {})",
+            unwrapped,
+            wrapped
+        );
+    }
+
+    #[test]
+    fn search_offsets_follow_the_wrapped_layout() {
+        let md = "aaaa bbbb cccc dddd eeee ffff gggg hhhh\n\nneedle\n";
+        let path = std::path::PathBuf::from("/tmp/mdr_wrap_search.md");
+        let mut elements = build_content_elements(md, &path, &None);
+        rewrap_elements(&mut elements, 12);
+
+        let matches = compute_search_matches(&elements, "needle");
+        assert_eq!(matches.len(), 1, "exactly one line holds the needle");
+
+        // The offset must be the sum of the *wrapped* heights of everything
+        // above it, otherwise jumping to a match scrolls to the wrong place.
+        let mut expected = 0usize;
+        for element in &elements {
+            if let ContentElement::TextLine(text) = element {
+                if text.text().contains("needle") {
+                    break;
+                }
+            }
+            expected += element.row_height() as usize;
+        }
+        assert_eq!(matches[0], expected);
+        assert!(
+            expected >= 4,
+            "the wrapped paragraph should push the match down, got {}",
+            expected
+        );
+    }
+
+    // --- #58: the terminal capability query must not delay the first frame ----
+
+    #[test]
+    fn a_document_without_images_needs_no_picker() {
+        let md =
+            "# Title\n\nJust text with `code` and a [link](https://example.com).\n\n- a\n- b\n";
+        assert!(!document_needs_picker(md));
+    }
+
+    #[test]
+    fn a_document_with_a_local_image_needs_a_picker() {
+        assert!(document_needs_picker("# T\n\n![logo](images/logo.png)\n"));
+    }
+
+    #[test]
+    fn a_document_with_a_remote_image_needs_a_picker() {
+        assert!(document_needs_picker(
+            "![logo](https://example.com/logo.png)\n"
+        ));
+    }
+
+    #[test]
+    fn a_document_with_a_mermaid_diagram_needs_a_picker() {
+        assert!(document_needs_picker(
+            "```mermaid\ngraph LR\n  A-->B\n```\n"
+        ));
+    }
+
+    #[test]
+    fn an_image_inside_a_paragraph_needs_no_picker() {
+        // Inline images are rendered as `[Image: alt]` text, never as pixels.
+        assert!(!document_needs_picker("see ![logo](logo.png) in context\n"));
+    }
+
+    #[test]
+    fn an_image_written_inside_a_code_block_needs_no_picker() {
+        assert!(!document_needs_picker("```md\n![logo](logo.png)\n```\n"));
+    }
+
+    // --- #61: images living outside the document's own directory -------------
+
+    /// Write a tiny valid SVG, the cheapest file `validate_image_file` accepts.
+    fn write_svg(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_image_in_a_sibling_directory_of_the_project_is_loaded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(proj.join("docs")).unwrap();
+        std::fs::create_dir_all(proj.join("images")).unwrap();
+        write_svg(&proj.join("images/schema.svg"));
+
+        let img = load_image("../images/schema.svg", &proj.join("docs"));
+        assert!(
+            img.is_ok(),
+            "an image from a parent directory inside the project must load, got: {:?}",
+            img.err()
+        );
+    }
+
+    #[test]
+    fn an_image_outside_the_project_is_still_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(proj.join("docs")).unwrap();
+        write_svg(&tmp.path().join("secret.svg"));
+
+        let img = load_image("../../secret.svg", &proj.join("docs"));
+        assert!(
+            img.is_err(),
+            "an image outside the enclosing project must stay refused"
         );
     }
 
