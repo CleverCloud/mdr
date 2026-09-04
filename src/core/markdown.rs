@@ -1,4 +1,5 @@
 use crate::core::mermaid::process_mermaid_blocks;
+use crate::core::slug::SlugGenerator;
 use comrak::{markdown_to_html, Options};
 
 /// Convert markdown content to HTML with all GFM extensions enabled.
@@ -11,6 +12,9 @@ pub fn parse_markdown(content: &str) -> String {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
+    // Without this, the `---` fence of a YAML front matter block is parsed as a
+    // setext heading and the metadata is rendered as document text (#56).
+    options.extension.front_matter_delimiter = Some("---".to_string());
     options.render.r#unsafe = true;
 
     let html = markdown_to_html(content, &options);
@@ -23,11 +27,15 @@ fn add_heading_ids(html: &str) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"<(h[1-6])>(.*?)</h[1-6]>").unwrap());
+    // `replace_all` visits the headings in document order, which is the same
+    // order `toc::extract_toc` walks them in, so both end up with the same
+    // de-duplicated anchors (#65).
+    let mut slugs = SlugGenerator::new();
     re.replace_all(html, |caps: &regex::Captures| {
         let tag = &caps[1];
         let content = &caps[2];
         let plain_text = strip_html_tags(content);
-        let id = slugify(&plain_text);
+        let id = slugs.generate(&plain_text);
         format!("<{} id=\"{}\">{}</{}>", tag, id, content, tag)
     })
     .to_string()
@@ -38,24 +46,6 @@ fn strip_html_tags(html: &str) -> String {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"<[^>]+>").unwrap());
     re.replace_all(html, "").to_string()
-}
-
-fn slugify(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else if c == ' ' {
-                '-'
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 #[cfg(test)]
@@ -127,6 +117,22 @@ mod tests {
         assert!(result.contains(r#"id="first""#));
         assert!(result.contains(r#"id="second""#));
         assert!(result.contains(r#"id="third""#));
+    }
+
+    #[test]
+    fn duplicate_headings_get_distinct_ids() {
+        let result = parse_markdown("## Setup\n\ntext\n\n## Setup\n\nmore");
+        assert!(result.contains(r#"id="setup""#), "{}", result);
+        assert!(result.contains(r#"id="setup-1""#), "{}", result);
+    }
+
+    #[test]
+    fn yaml_front_matter_is_not_rendered_as_content() {
+        let md = "---\ntitle: front matter\ntags: [a, b]\n---\n\n# Title\n\nText.\n";
+        let result = parse_markdown(md);
+        assert!(!result.contains("title: front matter"), "{}", result);
+        assert!(!result.contains("tags:"), "{}", result);
+        assert!(result.contains("Title"), "{}", result);
     }
 
     #[test]

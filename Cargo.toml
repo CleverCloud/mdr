@@ -20,6 +20,7 @@ egui-backend = [
   "dep:usvg",
   "dep:tiny-skia",
   "dep:fontdb",
+  "dep:ureq",
 ]
 webview-backend = [
   "dep:wry",
@@ -28,6 +29,7 @@ webview-backend = [
   "dep:resvg",
   "dep:usvg",
   "dep:tiny-skia",
+  "dep:ureq",
 ]
 tui-backend = [
   "dep:ratatui",
