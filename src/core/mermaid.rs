@@ -1,3 +1,9 @@
+// `process_mermaid_blocks` and its HTML entity helpers exist for the webview
+// backend's HTML pipeline; egui and tui go through `preprocess_mermaid_for_egui`
+// instead. They are still compiled (and tested) in single-backend builds, so the
+// dead-code lint is silenced only in the builds that genuinely do not call them.
+#![cfg_attr(not(feature = "webview-backend"), allow(dead_code))]
+
 use regex::Regex;
 
 /// Preprocess mermaid source to fix known incompatibilities with mermaid-rs-renderer.
@@ -32,9 +38,10 @@ pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
     // Try with preprocessed source first (fixes common syntax issues)
     let preprocessed = preprocess_mermaid_source(source);
     let preprocessed_clone = preprocessed.clone();
-    match std::panic::catch_unwind(|| mermaid_rs_renderer::render(&preprocessed_clone)) {
-        Ok(Ok(svg)) => return Ok(svg),
-        _ => {}
+    if let Ok(Ok(svg)) =
+        std::panic::catch_unwind(|| mermaid_rs_renderer::render(&preprocessed_clone))
+    {
+        return Ok(svg);
     }
     // Fall back to original source (in case preprocessing made things worse)
     let source = source.to_string();
@@ -70,7 +77,7 @@ fn suppress_stderr() -> StderrGuard {
         unsafe {
             let saved = libc::dup(2);
             if saved >= 0 {
-                let devnull = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_WRONLY);
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
                 if devnull >= 0 {
                     libc::dup2(devnull, 2);
                     libc::close(devnull);
@@ -151,8 +158,10 @@ fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
         Arc::new(db)
     });
 
-    let mut options = usvg::Options::default();
-    options.fontdb = Arc::clone(fontdb);
+    let options = usvg::Options {
+        fontdb: Arc::clone(fontdb),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size();
     let svg_w = size.width();

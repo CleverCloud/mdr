@@ -6,6 +6,9 @@ use comrak::{parse_document, Arena, Options};
 pub struct TocEntry {
     pub level: u8,
     pub text: String,
+    /// Read by the webview backend, which renders the TOC as HTML links; the
+    /// other two backends scroll to a section index instead.
+    #[cfg_attr(not(feature = "webview-backend"), allow(dead_code))]
     pub anchor: String,
 }
 
@@ -201,6 +204,8 @@ mod anchor_tests {
         assert_eq!(toc[1].anchor, "setup-1");
     }
 
+    // The HTML renderer only exists in webview builds.
+    #[cfg(feature = "webview-backend")]
     #[test]
     fn toc_anchors_match_the_rendered_html_ids() {
         let md = "# Intro\n\n## Setup\n\n## Setup\n\n## Usage\n";
