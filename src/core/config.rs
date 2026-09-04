@@ -55,11 +55,34 @@ mod tests {
     }
 
     #[test]
+    fn load_parses_offline_bool() {
+        let path = tmp_config("offline_true", "offline #true\n");
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.offline, Some(true));
+
+        let path2 = tmp_config("offline_false", "offline #false\n");
+        let cfg2 = load(&path2).unwrap();
+        assert_eq!(cfg2.offline, Some(false));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
+    }
+
+    #[test]
+    fn load_bare_offline_node_means_true() {
+        let path = tmp_config("offline_bare", "offline\n");
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.offline, Some(true));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn load_returns_defaults_for_missing_file() {
         let path = PathBuf::from("/nonexistent/mdr_no_such_config.kdl");
         let cfg = load(&path).unwrap();
         assert!(cfg.backend.is_none());
         assert!(cfg.verbose.is_none());
+        assert!(cfg.offline.is_none());
     }
 
     #[test]
@@ -71,6 +94,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         kdl::KdlDocument::parse_v2(&content).expect("written config must be valid KDL v2");
         assert!(content.contains("backend webview"));
+        assert!(content.contains("offline"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -87,6 +111,7 @@ mod tests {
 pub struct Config {
     pub backend: Option<String>,
     pub verbose: Option<bool>,
+    pub offline: Option<bool>,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -97,6 +122,9 @@ backend webview
 
 // Uncomment to enable verbose logging by default
 // verbose #true
+
+// Uncomment to never access the network (remote images are not downloaded)
+// offline #true
 ";
 
 /// Returns the default config file path: `~/.config/mdr/config.kdl`.
@@ -144,6 +172,13 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
             "verbose" => {
                 cfg.verbose = Some(match node.get(0) {
                     None => true, // bare `verbose` node = true
+                    Some(kdl::KdlValue::Bool(b)) => *b,
+                    _ => true,
+                });
+            }
+            "offline" => {
+                cfg.offline = Some(match node.get(0) {
+                    None => true, // bare `offline` node = true
                     Some(kdl::KdlValue::Bool(b)) => *b,
                     _ => true,
                 });
