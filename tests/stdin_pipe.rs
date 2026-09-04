@@ -1,5 +1,5 @@
-use std::process::{Command, Stdio};
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// Helper to get the path to the mdr binary built by cargo test.
@@ -28,7 +28,10 @@ fn stdin_pipe_with_list_backends_exits_successfully() {
     }
 
     let output = child.wait_with_output().expect("failed to wait");
-    assert!(output.status.success(), "mdr --list-backends should exit successfully");
+    assert!(
+        output.status.success(),
+        "mdr --list-backends should exit successfully"
+    );
 }
 
 #[test]
@@ -83,7 +86,9 @@ fn stdin_pipe_creates_temp_file() {
     let _ = child.wait_with_output();
 
     // Verify the temp file was created with PID-scoped name
-    let tmp_file = std::env::temp_dir().join("mdr").join(format!("stdin-{}.md", child_pid));
+    let tmp_file = std::env::temp_dir()
+        .join("mdr")
+        .join(format!("stdin-{}.md", child_pid));
     assert!(
         tmp_file.exists(),
         "temp file should be created at {:?}",
@@ -119,4 +124,3 @@ fn nonexistent_file_shows_error() {
         stderr
     );
 }
-

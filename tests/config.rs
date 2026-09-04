@@ -23,11 +23,13 @@ fn init_creates_config_at_custom_path() {
     assert!(path.exists(), "config file should be created");
 
     let content = std::fs::read_to_string(&path).unwrap();
-    assert!(content.contains("backend webview"), "config should set default backend");
+    assert!(
+        content.contains("backend webview"),
+        "config should set default backend"
+    );
 
     // File must be valid KDL v2
-    kdl::KdlDocument::parse_v2(&content)
-        .expect("--init output must be valid KDL v2");
+    kdl::KdlDocument::parse_v2(&content).expect("--init output must be valid KDL v2");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -43,7 +45,10 @@ fn init_errors_if_config_already_exists() {
         .output()
         .expect("failed to run mdr");
 
-    assert!(!output.status.success(), "mdr --init should fail if config exists");
+    assert!(
+        !output.status.success(),
+        "mdr --init should fail if config exists"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("already exists"),

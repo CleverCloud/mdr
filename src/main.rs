@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use std::process;
 
 #[derive(Parser)]
-#[command(name = "mdr", version, about = "Lightweight Markdown viewer with live reload")]
+#[command(
+    name = "mdr",
+    version,
+    about = "Lightweight Markdown viewer with live reload"
+)]
 struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
@@ -35,19 +39,35 @@ struct Cli {
 
 fn print_backends() {
     fn status(compiled: bool) -> &'static str {
-        if compiled { "✓ compiled" } else { "✗ not compiled" }
+        if compiled {
+            "✓ compiled"
+        } else {
+            "✗ not compiled"
+        }
     }
     eprintln!("Available backends:");
-    eprintln!("  egui      Native GUI window (OpenGL)            [{}]", status(cfg!(feature = "egui-backend")));
-    eprintln!("  webview   System webview (WebKit/WebView2)      [{}]", status(cfg!(feature = "webview-backend")));
-    eprintln!("  tui       Terminal UI with image support         [{}]", status(cfg!(feature = "tui-backend")));
+    eprintln!(
+        "  egui      Native GUI window (OpenGL)            [{}]",
+        status(cfg!(feature = "egui-backend"))
+    );
+    eprintln!(
+        "  webview   System webview (WebKit/WebView2)      [{}]",
+        status(cfg!(feature = "webview-backend"))
+    );
+    eprintln!(
+        "  tui       Terminal UI with image support         [{}]",
+        status(cfg!(feature = "tui-backend"))
+    );
     eprintln!("  auto      Auto-detect best available (default)");
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
     match s {
         "auto" | "egui" | "webview" | "tui" => Ok(s.to_string()),
-        _ => Err(format!("unknown backend '{}', expected 'auto', 'egui', 'webview', or 'tui'", s)),
+        _ => Err(format!(
+            "unknown backend '{}', expected 'auto', 'egui', 'webview', or 'tui'",
+            s
+        )),
     }
 }
 
@@ -94,10 +114,13 @@ fn detect_backend() -> &'static str {
 /// Read stdin and write to a temp file, returning its path.
 fn read_stdin_to_tmpfile() -> PathBuf {
     let mut content = String::new();
-    io::stdin().lock().read_to_string(&mut content).unwrap_or_else(|e| {
-        eprintln!("Error: failed to read from stdin: {}", e);
-        process::exit(1);
-    });
+    io::stdin()
+        .lock()
+        .read_to_string(&mut content)
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to read from stdin: {}", e);
+            process::exit(1);
+        });
     let tmp_dir = std::env::temp_dir().join("mdr");
     std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|e| {
         eprintln!("Error: failed to create temp directory: {}", e);
@@ -120,7 +143,10 @@ fn main() {
     }
 
     if cli.init {
-        let path = cli.config.clone().unwrap_or_else(core::config::default_path);
+        let path = cli
+            .config
+            .clone()
+            .unwrap_or_else(core::config::default_path);
         match core::config::write_default(&path) {
             Ok(()) => {
                 eprintln!("Created config file: {}", path.display());
@@ -134,7 +160,10 @@ fn main() {
     }
 
     // Load config (explicit path errors if missing; default path is optional)
-    let cfg_path = cli.config.clone().unwrap_or_else(core::config::default_path);
+    let cfg_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(core::config::default_path);
     let cfg = if cli.config.is_some() && !cfg_path.exists() {
         eprintln!("Error: config file '{}' not found", cfg_path.display());
         process::exit(1);
@@ -168,7 +197,8 @@ fn main() {
         }
     };
 
-    let backend_str = cli.backend
+    let backend_str = cli
+        .backend
         .or(cfg.backend)
         .unwrap_or_else(|| "auto".to_string());
     let backend = if backend_str == "auto" {
@@ -192,7 +222,9 @@ fn main() {
 
         #[cfg(not(feature = "webview-backend"))]
         "webview" => {
-            eprintln!("Error: webview backend not compiled. Rebuild with --features webview-backend");
+            eprintln!(
+                "Error: webview backend not compiled. Rebuild with --features webview-backend"
+            );
             process::exit(1);
         }
 
