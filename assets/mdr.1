@@ -1,0 +1,112 @@
+.TH MDR 1 "2026-09-04" "mdr" "User Commands"
+.SH NAME
+mdr \- lightweight Markdown viewer with live reload
+.SH SYNOPSIS
+.B mdr
+.RI [ OPTIONS ]
+.RI [ FILE ]
+.SH DESCRIPTION
+.B mdr
+renders a Markdown file with Mermaid diagram support and reloads it
+automatically whenever the file changes on disk.
+.PP
+Three rendering backends are available: a native GUI window
+.RB ( egui ),
+a system webview
+.RB ( webview ),
+and a terminal UI with image support
+.RB ( tui ).
+When no backend is requested, the best available one is auto\-detected for the
+current environment.
+.PP
+If
+.I FILE
+is omitted or is
+.BR - ,
+the document is read from standard input.
+.SH OPTIONS
+.TP
+.BR \-b ", " \-\-backend " " \fIBACKEND\fR
+Rendering backend to use:
+.BR auto ", " egui ", " webview " or " tui .
+.TP
+.BR \-v ", " \-\-verbose
+Enable verbose logging (image resolution, mermaid rendering, etc.).
+.TP
+.B \-\-offline
+Never access the network: remote images are not downloaded. Can also be set in
+the config file with
+.BR "offline #true" .
+The flag only turns the mode on: it cannot re\-enable network access when the
+config file already disables it.
+.TP
+.BR \-\-config " " \fIPATH\fR
+Path to the config file. Defaults to
+.IR ~/.config/mdr/config.kdl .
+.TP
+.B \-\-list\-backends
+List available backends and exit.
+.TP
+.B \-\-init
+Create a default config file and exit.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print version.
+.SH FILES
+.TP
+.I ~/.config/mdr/config.kdl
+Default configuration file, in KDL format. Create it with
+.BR "mdr \-\-init" ,
+or point elsewhere with
+.BR \-\-config .
+.PP
+Three keys are recognised, each mirroring the command line option of the same
+name:
+.TP
+.B backend
+Backend to start with:
+.BR auto ", " egui ", " webview " or " tui .
+.TP
+.B verbose
+Boolean, enables verbose logging by default.
+.TP
+.B offline
+Boolean, never access the network.
+.PP
+Booleans use the KDL syntax
+.RB ( "verbose #true" ", " "offline #false" );
+a bare node such as
+.B offline
+on its own means true. Example:
+.PP
+.RS
+.EX
+backend webview
+offline #true
+.EE
+.RE
+.SH EXAMPLES
+.TP
+Render a file with the auto\-detected backend:
+.B mdr README.md
+.TP
+Force the terminal backend:
+.B mdr \-b tui README.md
+.TP
+Read from standard input:
+.B cat README.md | mdr
+.TP
+Render without touching the network:
+.B mdr \-\-offline README.md
+.SH EXIT STATUS
+.B mdr
+exits with status 0 on success and a non\-zero status if the file cannot be
+read or no rendering backend is available.
+.SH SEE ALSO
+Project homepage:
+.I https://github.com/CleverCloud/mdr
+.SH AUTHOR
+Clever Cloud <opensource@clever\-cloud.com>

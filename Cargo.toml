@@ -2,6 +2,7 @@
 name = "mdr"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.95"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 license = "MIT"
 repository = "https://github.com/CleverCloud/mdr"
@@ -92,10 +93,39 @@ libc = "0.2"
 
 [package.metadata.deb]
 section = "text"
-assets = [["target/release/mdr", "/usr/bin/mdr", "755"]]
+# `$auto` covers everything the binary links directly (GTK 3, WebKitGTK, libxdo,
+# glib…). libGL/libEGL are opened with dlopen() at runtime by x11-dl and
+# khronos-egl, so `ldd` cannot see them and they must be listed by hand.
+depends = "$auto, libgl1, libegl1"
+# `target/release/...` is rewritten to `target/<triple>/release/...` by cargo-deb
+# when it is invoked with `--target`.
+assets = [
+  ["target/release/mdr", "/usr/bin/mdr", "755"],
+  ["assets/mdr.desktop", "/usr/share/applications/mdr.desktop", "644"],
+  [
+    "assets/logo-128.png",
+    "/usr/share/icons/hicolor/128x128/apps/mdr.png",
+    "644",
+  ],
+  ["assets/mdr.1", "/usr/share/man/man1/mdr.1", "644"],
+  ["README.md", "/usr/share/doc/mdr/README.md", "644"],
+]
 extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI)."
 
 [package.metadata.generate-rpm]
 assets = [
   { source = "target/release/mdr", dest = "/usr/bin/mdr", mode = "0755" },
+  { source = "assets/mdr.desktop", dest = "/usr/share/applications/mdr.desktop", mode = "0644" },
+  { source = "assets/logo-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/mdr.png", mode = "0644" },
+  { source = "assets/mdr.1", dest = "/usr/share/man/man1/mdr.1", mode = "0644", doc = true },
+  { source = "README.md", dest = "/usr/share/doc/mdr/README.md", mode = "0644", doc = true },
 ]
+# auto-req is left at its default ("auto"), which detects the shared libraries
+# the binary links against — that is where `libxdo.so.3()(64bit)`,
+# `libgtk-3.so.0()(64bit)`, `libwebkit2gtk-4.1.so.0()(64bit)`… come from.
+# It relies on ldd, so libraries opened with dlopen() at runtime (libGL/libEGL,
+# via x11-dl and khronos-egl) are invisible to it and are declared explicitly.
+# On Fedora these sonames are provided by mesa-libGL and mesa-libEGL.
+[package.metadata.generate-rpm.requires]
+"libGL.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"

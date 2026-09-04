@@ -31,6 +31,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: mdr
             archive: mdr-x86_64-unknown-linux-gnu.tar.gz
+          # Native ARM64 runner: the GTK/WebKit/OpenGL system dependencies make
+          # cross-compilation from x86_64 impractical (it would need a full
+          # aarch64 sysroot), so we build on an aarch64 machine instead.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: mdr
+            archive: mdr-aarch64-unknown-linux-gnu.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: mdr.exe
@@ -72,9 +79,17 @@ jobs:
           path: ${{ matrix.archive }}
 
   build-deb:
-    name: Build .deb package
+    name: Build .deb package (${{ matrix.arch }})
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -89,19 +104,39 @@ jobs:
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
+      # Built natively on each architecture, so the host target is used and the
+      # `target/release/...` asset paths of Cargo.toml need no rewriting.
       - name: Build .deb
         run: cargo deb
+
+      # Makes the resolved dependency set visible in the logs, so a missing
+      # runtime library is caught by reading the release run instead of by a
+      # user's failed install.
+      - name: Show .deb dependencies
+        run: |
+          for f in target/debian/*.deb; do
+            echo "== $f"
+            dpkg-deb -f "$f" Package Version Architecture Depends
+          done
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mdr-deb
+          name: mdr-deb-${{ matrix.arch }}
           path: target/debian/*.deb
 
   build-rpm:
-    name: Build .rpm package
+    name: Build .rpm package (${{ matrix.arch }})
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - uses: actions/checkout@v4
 
@@ -122,10 +157,23 @@ jobs:
       - name: Build .rpm
         run: cargo generate-rpm
 
+      # Same rationale as for the .deb: the auto-detected requires (auto-req is
+      # ldd-based) plus the explicit ones from Cargo.toml are printed here.
+      # `rpm` is installed *after* `cargo generate-rpm` on purpose: installing it
+      # first would make /usr/lib/rpm/find-requires exist, which switches
+      # cargo-generate-rpm from its builtin auto-req to find-requires.
+      - name: Show .rpm dependencies
+        run: |
+          sudo apt-get install -y rpm
+          for f in target/generate-rpm/*.rpm; do
+            echo "== $f"
+            rpm -qp --requires "$f"
+          done
+
       - name: Upload .rpm artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mdr-rpm
+          name: mdr-rpm-${{ matrix.arch }}
           path: target/generate-rpm/*.rpm
 
   update-homebrew:
@@ -145,6 +193,7 @@ jobs:
           echo "sha_aarch64=$(sha256sum artifacts/mdr-aarch64-apple-darwin.tar.gz/mdr-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           echo "sha_x86_64=$(sha256sum artifacts/mdr-x86_64-apple-darwin.tar.gz/mdr-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           echo "sha_linux=$(sha256sum artifacts/mdr-x86_64-unknown-linux-gnu.tar.gz/mdr-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "sha_linux_arm=$(sha256sum artifacts/mdr-aarch64-unknown-linux-gnu.tar.gz/mdr-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
       - name: Extract version
         id: version
@@ -157,6 +206,7 @@ jobs:
           SHA_AARCH64: ${{ steps.sha.outputs.sha_aarch64 }}
           SHA_X86_64: ${{ steps.sha.outputs.sha_x86_64 }}
           SHA_LINUX: ${{ steps.sha.outputs.sha_linux }}
+          SHA_LINUX_ARM: ${{ steps.sha.outputs.sha_linux_arm }}
         run: |
           cat > mdr.rb <<EOF
           class Mdr < Formula
@@ -176,8 +226,13 @@ jobs:
             end
 
             on_linux do
-              url "https://github.com/CleverCloud/mdr/releases/download/v${VERSION}/mdr-x86_64-unknown-linux-gnu.tar.gz"
-              sha256 "${SHA_LINUX}"
+              if Hardware::CPU.arm?
+                url "https://github.com/CleverCloud/mdr/releases/download/v${VERSION}/mdr-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "https://github.com/CleverCloud/mdr/releases/download/v${VERSION}/mdr-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX}"
+              end
             end
 
             def install
@@ -418,14 +473,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Needed to find the previous tag for the "Full Changelog" link.
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      # Extracts the "## [x.y.z]" section of CHANGELOG.md matching the tag.
+      # The notes file is rewritten from scratch on every run, so re-running the
+      # workflow for the same tag replaces the release body instead of growing it.
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          notes="${RUNNER_TEMP}/release-notes.md"
+
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[0-9]/ { exit }
+            found { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > "$notes"
+
+          if [ -s "$notes" ]; then
+            prev=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+            if [ -n "$prev" ]; then
+              printf '\n**Full Changelog**: %s/compare/%s...%s\n' \
+                "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "$prev" "$TAG" >> "$notes"
+            fi
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Using CHANGELOG.md section for $version"
+          else
+            # No matching section: fall back to GitHub's generated notes rather
+            # than failing the release.
+            : > "$notes"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No CHANGELOG.md section found for $version, falling back to generated release notes"
+          fi
+          echo "path=$notes" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.path }}
+          append_body: false
+          generate_release_notes: ${{ steps.notes.outputs.found == 'false' }}
           files: artifacts/**/*
