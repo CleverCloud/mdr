@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Webview backend: full keyboard navigation — quit (`Ctrl/Cmd+Q`), scrolling
+  (`j`/`k`, `Space`, `g`/`G`), zoom (`Ctrl/Cmd` + `+`/`-`/`0`), table of contents
+  toggle (`Ctrl/Cmd+B`), light/dark theme toggle (`Ctrl/Cmd+D`), print and PDF
+  export (`Ctrl/Cmd+P`), search match navigation (`n`/`N`) and a `?` overlay
+  listing every shortcut.
+- Webview backend: a native application menu, so `Cmd+Q` and `Cmd+W` behave as
+  expected on macOS.
+
+### Changed
+
+- `Cargo.lock` is now tracked, making builds reproducible (#53), and
+  semver-compatible dependencies were refreshed.
+
 ## [0.3.2] - 2026-06-22
 
 ### Added

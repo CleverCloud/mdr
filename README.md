@@ -110,6 +110,28 @@ mdr --backend tui README.md
 mdr --help
 ```
 
+### Webview keybindings
+
+Press `?` in the webview backend for this list.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl/Cmd+Q` | Close the window |
+| `Ctrl/Cmd+F` | Search in the document |
+| `n` / `N` | Next / previous search match |
+| `Esc` | Close search, help or the expanded image |
+| `j` / `↓`, `k` / `↑` | Scroll down / up |
+| `Space` / `PgDn`, `PgUp` | Page down / up |
+| `g` / `Home`, `G` / `End` | Go to top / bottom |
+| `Ctrl/Cmd` + `+` / `-` / `0` | Zoom in / out / reset |
+| `Ctrl/Cmd+B` | Show or hide the table of contents |
+| `Ctrl/Cmd+D` | Switch between the light and dark theme |
+| `Ctrl/Cmd+P` | Print or export to PDF |
+| `?` | Show or hide the shortcut list |
+
+`Ctrl/Cmd+D` overrides the system colour scheme for the current window; without it
+the theme follows `prefers-color-scheme`.
+
 ### TUI keybindings
 
 | Key | Action |

@@ -1,13 +1,18 @@
 use muda::{Menu, PredefinedMenuItem, Submenu};
 use std::path::PathBuf;
 use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
 use crate::core::markdown::{parse_markdown, GITHUB_CSS};
 use crate::core::toc;
 use crate::vlog;
+
+/// Events the page can send back to the native event loop.
+enum UserEvent {
+    Quit,
+}
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Canonicalize the file path first so parent() always gives an absolute directory.
@@ -54,10 +59,20 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     let (icon_rgba, icon_w, icon_h) = crate::core::icon::load_icon_rgba();
 
-    let event_loop = EventLoop::new();
+    let event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
+    let quit_proxy = event_loop.create_proxy();
 
     // Create a native Edit menu so that Cmd+C/Ctrl+C/V/X/A work on all platforms
     let menu = Menu::new();
+    // On macOS the first submenu is the application menu; it gives Cmd+Q and
+    // Cmd+W their standard behaviour. Elsewhere the quit shortcut travels
+    // through IPC instead (see UserEvent::Quit).
+    let app_menu = Submenu::new("mdr", true);
+    let _ = app_menu.append_items(&[
+        &PredefinedMenuItem::close_window(None),
+        &PredefinedMenuItem::quit(None),
+    ]);
+    let _ = menu.append(&app_menu);
     let edit_menu = Submenu::new("Edit", true);
     let _ = edit_menu.append_items(&[
         &PredefinedMenuItem::cut(None),
@@ -79,6 +94,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     menu.init_for_nsapp();
 
+    let ipc_handler = move |request: wry::http::Request<String>| {
+        if is_quit_request(request.body()) {
+            let _ = quit_proxy.send_event(UserEvent::Quit);
+        }
+    };
+
     #[cfg(target_os = "linux")]
     let webview = {
         use tao::platform::unix::WindowExtUnix;
@@ -88,6 +109,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             .with_html(&full_html)
             .with_clipboard(true)
             .with_devtools(true)
+            .with_ipc_handler(ipc_handler)
             .build_gtk(vbox)?
     };
     #[cfg(not(target_os = "linux"))]
@@ -95,6 +117,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .with_html(&full_html)
         .with_clipboard(true)
         .with_devtools(true)
+        .with_ipc_handler(ipc_handler)
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
@@ -124,6 +147,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::Quit) => *control_flow = ControlFlow::Exit,
             _ => {}
         }
     });
@@ -449,6 +473,18 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
         String::new()
     };
 
+    // Explicit per-theme rules mirroring the prefers-color-scheme blocks, so
+    // Ctrl/Cmd+D can override the system preference.
+    let theme_overrides = format!(
+        "{}{}",
+        theme_override_css(GITHUB_CSS),
+        if highlight_script.is_empty() {
+            String::new()
+        } else {
+            theme_override_css(HIGHLIGHT_CSS)
+        }
+    );
+
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -479,7 +515,35 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
 #expand-content svg {{ width: 95vw; height: 95vh; }}
 .expandable img, .expandable svg {{ cursor: zoom-in; }}
 .content svg {{ width: 100% !important; height: auto !important; display: block; }}
+body.toc-hidden .sidebar {{ display: none; }}
+body.toc-hidden .content {{ margin-left: 0; }}
+#shortcuts-overlay {{
+    display: none; position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(0,0,0,0.6); z-index: 2147483646;
+    align-items: center; justify-content: center;
+}}
+#shortcuts-panel {{
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 20px 24px; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}}
+#shortcuts-panel h2 {{ margin: 0 0 12px; font-size: 1.1em; border: none; }}
+#shortcuts-panel table {{ border-collapse: collapse; }}
+#shortcuts-panel td {{ padding: 3px 16px 3px 0; font-size: 14px; }}
+#shortcuts-panel kbd {{
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; white-space: nowrap;
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px;
+}}
+@media print {{
+    .sidebar, #shortcuts-overlay, #searchBar {{ display: none !important; }}
+    .content {{ margin-left: 0; max-width: none; }}
+}}
 </style>
+<style>{theme_overrides}</style>
 </head>
 <body>
 <nav class="sidebar">
@@ -584,18 +648,8 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
         updateInfo();
     }};
 
+    // Ctrl/Cmd+F and Escape are handled by the central shortcut dispatcher.
     document.addEventListener('keydown', function(e) {{
-        if ((e.ctrlKey || e.metaKey) && e.key === 'f') {{
-            e.preventDefault();
-            var bar = document.getElementById('searchBar');
-            bar.style.display = 'flex';
-            var input = document.getElementById('searchInput');
-            input.focus();
-            input.select();
-        }}
-        if (e.key === 'Escape') {{
-            window.closeSearch();
-        }}
         if (e.key === 'Enter' && document.activeElement === document.getElementById('searchInput')) {{
             e.preventDefault();
             if (e.shiftKey) {{ window.searchNav(-1); }}
@@ -671,14 +725,408 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
         : document.querySelectorAll('.content img, .content svg').forEach(wrap);
 }})();
 </script>
+{shortcuts_help}
+<script>{keyboard_script}</script>
 </body>
 </html>"#,
         css = GITHUB_CSS,
         toc = toc_html,
         body = body,
         highlight_script = highlight_script,
-        mermaid_script = mermaid_script
+        mermaid_script = mermaid_script,
+        theme_overrides = theme_overrides,
+        shortcuts_help = build_shortcuts_help_html(),
+        keyboard_script = keyboard_script()
     )
+}
+
+// --- Keyboard shortcuts ---------------------------------------------------
+
+/// IPC message the page sends when the user asks to close the window.
+/// JavaScript cannot close a wry window on its own, so the request has to
+/// travel back to the tao event loop.
+const IPC_QUIT: &str = "mdr:quit";
+
+/// Whether an IPC message from the page is a request to close the window.
+/// Matched exactly: the page renders untrusted Markdown, so anything but the
+/// literal request is ignored.
+fn is_quit_request(message: &str) -> bool {
+    message == IPC_QUIT
+}
+
+/// A keyboard shortcut of the webview backend.
+///
+/// `bindings` holds canonical tokens matched against the DOM key event:
+/// an optional `mod+` prefix (Ctrl on Linux/Windows, Cmd on macOS) followed by
+/// either a single character (case-sensitive, so `g` and `G` differ) or a
+/// lowercased DOM key name such as `arrowdown`.
+struct Shortcut {
+    bindings: &'static [&'static str],
+    action: &'static str,
+    label: &'static str,
+    description: &'static str,
+    /// Whether the shortcut still fires while the caret is in the search field.
+    /// Bare keys must not, or they would be swallowed instead of typed.
+    fires_while_typing: bool,
+}
+
+const SHORTCUTS: &[Shortcut] = &[
+    Shortcut {
+        bindings: &["mod+q", "mod+w"],
+        action: "quit",
+        label: "Ctrl/Cmd + Q",
+        description: "Close the window",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+f"],
+        action: "openSearch",
+        label: "Ctrl/Cmd + F",
+        description: "Search in the document",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["n"],
+        action: "searchNext",
+        label: "n",
+        description: "Next search match",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["N"],
+        action: "searchPrev",
+        label: "N",
+        description: "Previous search match",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["escape"],
+        action: "closeOverlays",
+        label: "Esc",
+        description: "Close search, help or the expanded image",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["j", "arrowdown"],
+        action: "scrollDown",
+        label: "j / Down",
+        description: "Scroll down",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["k", "arrowup"],
+        action: "scrollUp",
+        label: "k / Up",
+        description: "Scroll up",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &[" ", "pagedown"],
+        action: "pageDown",
+        label: "Space / PgDn",
+        description: "Page down",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["pageup"],
+        action: "pageUp",
+        label: "PgUp",
+        description: "Page up",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["g", "home"],
+        action: "goTop",
+        label: "g / Home",
+        description: "Go to the top of the document",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["G", "end"],
+        action: "goBottom",
+        label: "G / End",
+        description: "Go to the bottom of the document",
+        fires_while_typing: false,
+    },
+    Shortcut {
+        bindings: &["mod++", "mod+="],
+        action: "zoomIn",
+        label: "Ctrl/Cmd + +",
+        description: "Zoom in",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+-"],
+        action: "zoomOut",
+        label: "Ctrl/Cmd + -",
+        description: "Zoom out",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+0"],
+        action: "zoomReset",
+        label: "Ctrl/Cmd + 0",
+        description: "Reset zoom",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+b"],
+        action: "toggleToc",
+        label: "Ctrl/Cmd + B",
+        description: "Show or hide the table of contents",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+d"],
+        action: "toggleTheme",
+        label: "Ctrl/Cmd + D",
+        description: "Switch between the light and dark theme",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["mod+p"],
+        action: "print",
+        label: "Ctrl/Cmd + P",
+        description: "Print or export to PDF",
+        fires_while_typing: true,
+    },
+    Shortcut {
+        bindings: &["?"],
+        action: "toggleHelp",
+        label: "?",
+        description: "Show or hide this shortcut list",
+        fires_while_typing: false,
+    },
+];
+
+/// Minimal HTML escaping for text interpolated into the generated page.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The shortcut table shown by the `?` overlay, built from [`SHORTCUTS`] so the
+/// documentation can never drift from the actual bindings.
+fn build_shortcuts_help_html() -> String {
+    let mut rows = String::new();
+    for sc in SHORTCUTS {
+        rows.push_str(&format!(
+            "<tr><td><kbd>{}</kbd></td><td>{}</td></tr>",
+            escape_html(sc.label),
+            escape_html(sc.description)
+        ));
+    }
+    format!(
+        r#"<div id="shortcuts-overlay"><div id="shortcuts-panel"><h2>Keyboard shortcuts</h2><table>{rows}</table></div></div>"#
+    )
+}
+
+/// The binding table handed to the page, so the JS dispatcher and the help
+/// overlay share a single source of truth.
+fn bindings_json() -> String {
+    let entries: Vec<serde_json::Value> = SHORTCUTS
+        .iter()
+        .map(|sc| {
+            serde_json::json!({
+                "action": sc.action,
+                "bindings": sc.bindings,
+                "firesWhileTyping": sc.fires_while_typing,
+            })
+        })
+        .collect();
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+}
+
+const KEYBOARD_JS: &str = r#"
+(function() {
+    var BINDINGS = __MDR_BINDINGS__;
+    var byToken = {};
+    BINDINGS.forEach(function(entry) {
+        entry.bindings.forEach(function(token) { byToken[token] = entry; });
+    });
+
+    var ZOOM_STEPS = [70, 80, 90, 100, 110, 125, 150, 175, 200];
+    var DEFAULT_ZOOM = 3;
+    var zoomIdx = DEFAULT_ZOOM;
+    function applyZoom() {
+        document.documentElement.style.fontSize = (16 * ZOOM_STEPS[zoomIdx] / 100) + 'px';
+    }
+
+    function el(id) { return document.getElementById(id); }
+    function isVisible(node) { return node && node.style.display !== 'none' && node.style.display !== ''; }
+    function scrollHeight() {
+        return (document.scrollingElement || document.documentElement).scrollHeight;
+    }
+    function systemTheme() {
+        return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+
+    function closeOverlays() {
+        var help = el('shortcuts-overlay');
+        if (isVisible(help)) { help.style.display = 'none'; return; }
+        var expanded = el('expand-overlay');
+        if (isVisible(expanded)) { expanded.style.display = 'none'; return; }
+        if (window.closeSearch) window.closeSearch();
+    }
+
+    window.mdrActions = {
+        quit: function() {
+            if (window.ipc && window.ipc.postMessage) window.ipc.postMessage('__MDR_IPC_QUIT__');
+        },
+        openSearch: function() {
+            var bar = el('searchBar');
+            if (!bar) return;
+            bar.style.display = 'flex';
+            var input = el('searchInput');
+            if (input) { input.focus(); input.select(); }
+        },
+        searchNext: function() { if (window.searchNav) window.searchNav(1); },
+        searchPrev: function() { if (window.searchNav) window.searchNav(-1); },
+        closeOverlays: closeOverlays,
+        scrollDown: function() { window.scrollBy(0, 80); },
+        scrollUp: function() { window.scrollBy(0, -80); },
+        pageDown: function() { window.scrollBy(0, window.innerHeight * 0.9); },
+        pageUp: function() { window.scrollBy(0, -window.innerHeight * 0.9); },
+        goTop: function() { window.scrollTo(0, 0); },
+        goBottom: function() { window.scrollTo(0, scrollHeight()); },
+        zoomIn: function() { if (zoomIdx < ZOOM_STEPS.length - 1) { zoomIdx++; applyZoom(); } },
+        zoomOut: function() { if (zoomIdx > 0) { zoomIdx--; applyZoom(); } },
+        zoomReset: function() { zoomIdx = DEFAULT_ZOOM; applyZoom(); },
+        toggleToc: function() { document.body.classList.toggle('toc-hidden'); },
+        toggleTheme: function() {
+            var root = document.documentElement;
+            var current = root.getAttribute('data-theme') || systemTheme();
+            root.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
+        },
+        print: function() { window.print(); },
+        toggleHelp: function() {
+            var help = el('shortcuts-overlay');
+            if (!help) return;
+            help.style.display = isVisible(help) ? 'none' : 'flex';
+        }
+    };
+
+    function tokenFor(e) {
+        if (!e.key) return '';
+        var key = (e.key.length === 1) ? e.key : e.key.toLowerCase();
+        return ((e.ctrlKey || e.metaKey) ? 'mod+' : '') + key;
+    }
+
+    function isTyping() {
+        var node = document.activeElement;
+        if (!node) return false;
+        return node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.isContentEditable;
+    }
+
+    document.addEventListener('keydown', function(e) {
+        var entry = byToken[tokenFor(e)];
+        if (!entry) return;
+        if (!entry.firesWhileTyping && isTyping()) return;
+        var action = window.mdrActions[entry.action];
+        if (!action) return;
+        e.preventDefault();
+        action(e);
+    });
+
+    var help = el('shortcuts-overlay');
+    if (help) {
+        help.addEventListener('click', function(e) {
+            if (e.target === help) help.style.display = 'none';
+        });
+    }
+})();
+"#;
+
+/// The keyboard layer of the generated page: the binding table plus its dispatcher.
+fn keyboard_script() -> String {
+    KEYBOARD_JS
+        .replace("__MDR_BINDINGS__", &bindings_json())
+        .replace("__MDR_IPC_QUIT__", IPC_QUIT)
+}
+
+// --- Theme toggle ---------------------------------------------------------
+
+/// Re-emit the `prefers-color-scheme` rules of `css` under an explicit
+/// `html[data-theme="..."]` scope, so the theme can also be switched by hand.
+/// Rules behind any other media query are left out.
+fn theme_override_css(css: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0;
+    while let Some(offset) = css[cursor..].find("@media") {
+        let at = cursor + offset;
+        let Some(open_offset) = css[at..].find('{') else {
+            break;
+        };
+        let open = at + open_offset;
+        let prelude = &css[at..open];
+
+        let mut depth = 0usize;
+        let mut close = None;
+        for (idx, ch) in css[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+
+        if prelude.contains("prefers-color-scheme") {
+            let theme = if prelude.contains("dark") {
+                Some("dark")
+            } else if prelude.contains("light") {
+                Some("light")
+            } else {
+                None
+            };
+            if let Some(theme) = theme {
+                out.push_str(&scope_rules_to_theme(&css[open + 1..close], theme));
+            }
+        }
+        cursor = close + 1;
+    }
+    out
+}
+
+/// Prefix every selector of `rules` with the themed root selector.
+/// `:root` is replaced rather than nested, since it *is* the themed element.
+fn scope_rules_to_theme(rules: &str, theme: &str) -> String {
+    let scope = format!(r#"html[data-theme="{theme}"]"#);
+    let mut out = String::new();
+    let mut rest = rules;
+    while let Some(open) = rest.find('{') {
+        let Some(close_offset) = rest[open..].find('}') else {
+            break;
+        };
+        let close = open + close_offset;
+        let selectors = rest[..open].trim();
+        if !selectors.is_empty() {
+            let scoped: Vec<String> = selectors
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| match s.strip_prefix(":root") {
+                    Some(tail) => format!("{scope}{tail}"),
+                    None => format!("{scope} {s}"),
+                })
+                .collect();
+            out.push_str(&scoped.join(","));
+            out.push_str(" {");
+            out.push_str(&rest[open + 1..close]);
+            out.push_str("}\n");
+        }
+        rest = &rest[close + 1..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1139,5 +1587,235 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- keyboard shortcuts (webview backend) ---
+
+    #[test]
+    fn no_two_shortcuts_claim_the_same_binding() {
+        let mut seen: Vec<&str> = Vec::new();
+        for sc in SHORTCUTS {
+            for binding in sc.bindings {
+                assert!(
+                    !seen.contains(binding),
+                    "binding {:?} is claimed twice (second time by action {:?})",
+                    binding,
+                    sc.action
+                );
+                seen.push(binding);
+            }
+        }
+    }
+
+    #[test]
+    fn every_shortcut_binding_is_a_canonical_token() {
+        for sc in SHORTCUTS {
+            for binding in sc.bindings {
+                let key = binding.strip_prefix("mod+").unwrap_or(binding);
+                assert!(!key.is_empty(), "empty key in action {:?}", sc.action);
+                // Multi-character keys are DOM key names and must be lowercased,
+                // so the JS dispatcher can match them after toLowerCase().
+                assert!(
+                    key.chars().count() == 1 || key == key.to_lowercase(),
+                    "multi-char binding {:?} must be lowercase (action {:?})",
+                    binding,
+                    sc.action
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_script_exposes_a_handler_for_every_shortcut_action() {
+        let script = keyboard_script();
+        for sc in SHORTCUTS {
+            assert!(
+                script.contains(&format!("{}:", sc.action)),
+                "no handler named {:?} in window.mdrActions",
+                sc.action
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_script_embeds_the_shortcut_table() {
+        let script = keyboard_script();
+        for sc in SHORTCUTS {
+            assert!(
+                script.contains(&format!(r#""action":"{}""#, sc.action)),
+                "action {:?} missing from the embedded binding table",
+                sc.action
+            );
+            for binding in sc.bindings {
+                assert!(
+                    script.contains(&format!(r#""{}""#, binding)),
+                    "binding {:?} missing from the embedded binding table",
+                    binding
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bare_letter_shortcuts_do_not_fire_while_typing_in_the_search_field() {
+        // Bare keys like j/k/g/n would otherwise be swallowed as navigation
+        // the moment the user types them into the search input.
+        for sc in SHORTCUTS {
+            let bare_letter = sc
+                .bindings
+                .iter()
+                .any(|b| !b.starts_with("mod+") && b.chars().count() == 1);
+            if bare_letter {
+                assert!(
+                    !sc.fires_while_typing,
+                    "action {:?} binds a bare key and must not fire while typing",
+                    sc.action
+                );
+            }
+        }
+        let script = keyboard_script();
+        assert!(
+            script.contains("firesWhileTyping"),
+            "dispatcher must honour the firesWhileTyping flag"
+        );
+    }
+
+    #[test]
+    fn quit_shortcut_asks_the_native_window_to_close() {
+        let script = keyboard_script();
+        // JavaScript cannot close a wry window on its own; it must go through IPC.
+        assert!(
+            script.contains("ipc.postMessage") && script.contains(IPC_QUIT),
+            "quit must post the {:?} IPC message, got: {}",
+            IPC_QUIT,
+            script
+        );
+    }
+
+    #[test]
+    fn help_overlay_documents_every_shortcut() {
+        let help = build_shortcuts_help_html();
+        for sc in SHORTCUTS {
+            assert!(
+                help.contains(sc.description),
+                "help overlay is missing the description of {:?}",
+                sc.action
+            );
+        }
+    }
+
+    #[test]
+    fn help_overlay_escapes_shortcut_labels() {
+        // Labels are rendered as HTML; a raw "<" would break the markup.
+        let help = build_shortcuts_help_html();
+        assert!(
+            !help.contains("<kbd></kbd>"),
+            "shortcut labels must not render empty, got: {}",
+            help
+        );
+    }
+
+    #[test]
+    fn build_html_wires_up_the_keyboard_layer() {
+        let html = build_html("<p>Hello</p>", &[]);
+        assert!(
+            html.contains("window.mdrActions"),
+            "generated page must include the keyboard action table"
+        );
+        assert!(
+            html.contains("shortcuts-overlay"),
+            "generated page must include the shortcuts help overlay"
+        );
+    }
+
+    // --- theme toggle ---
+
+    #[test]
+    fn theme_override_css_scopes_dark_rules_under_a_data_attribute() {
+        let css = "@media (prefers-color-scheme: dark) { .foo { color: red; } }";
+        let out = theme_override_css(css);
+        assert!(
+            out.contains(r#"html[data-theme="dark"] .foo"#),
+            "dark media rules must be re-emitted under the dark data-theme, got: {}",
+            out
+        );
+        assert!(
+            !out.contains("@media"),
+            "overrides must not stay behind a media query, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn theme_override_css_replaces_the_root_selector_instead_of_nesting_it() {
+        let css = "@media (prefers-color-scheme: light) { :root { --bg: #fff; } }";
+        let out = theme_override_css(css);
+        assert!(
+            out.contains(r#"html[data-theme="light"] { --bg: #fff; }"#),
+            ":root must become the themed root itself, got: {}",
+            out
+        );
+        assert!(
+            !out.contains(":root"),
+            ":root must not survive in the override, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn theme_override_css_handles_comma_separated_selectors() {
+        let css = "@media (prefers-color-scheme: dark) { .a, .b { color: red; } }";
+        let out = theme_override_css(css);
+        assert!(
+            out.contains(r#"html[data-theme="dark"] .a,html[data-theme="dark"] .b"#),
+            "every selector in a list must be scoped, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn theme_override_css_ignores_non_theme_media_queries() {
+        let css = "@media print { .a { color: red; } } @media (prefers-color-scheme: dark) { .b { color: blue; } }";
+        let out = theme_override_css(css);
+        assert!(
+            !out.contains(".a"),
+            "unrelated media queries must be left alone, got: {}",
+            out
+        );
+        assert!(
+            out.contains(".b"),
+            "theme rules must be picked up, got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn theme_toggle_overrides_cover_both_the_page_and_the_code_theme() {
+        let html = build_html("<p><pre><code>x</code></pre></p>", &[]);
+        assert!(
+            html.contains(r#"html[data-theme="dark"]"#)
+                && html.contains(r#"html[data-theme="light"]"#),
+            "both themes must be available as explicit overrides"
+        );
+    }
+
+    // --- IPC ---
+
+    #[test]
+    fn quit_request_is_recognised() {
+        assert!(is_quit_request(IPC_QUIT));
+    }
+
+    #[test]
+    fn unknown_ipc_messages_do_not_close_the_window() {
+        // The page renders untrusted Markdown; a stray postMessage must not
+        // be able to make anything but an exact quit request happen.
+        for message in ["", "quit", "mdr:quit\n", " mdr:quit", "mdr:quit; rm -rf /"] {
+            assert!(
+                !is_quit_request(message),
+                "{:?} must not be treated as a quit request",
+                message
+            );
+        }
     }
 }
