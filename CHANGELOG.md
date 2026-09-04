@@ -108,12 +108,19 @@ Nineteen reported issues are closed.
 
 ### Not verified
 
-Stated plainly, because the release ships them anyway: no GitHub workflow was
-executed, `nix` is not available to evaluate the flake, the `.desktop` file and
-man page could not be linted (`desktop-file-validate` and `groff` absent), the
-snap was not built, and the native `Cmd+Q` menu item was not clicked in a real
-macOS window. Everything else in this list is covered by the test suite or was
-checked by hand.
+Stated plainly, because the release ships them anyway: the *release* workflow
+has never been executed — only the CI one, on the release PR — `nix` is not
+available to evaluate the flake, `mdr.desktop` could not be linted
+(`desktop-file-validate` is absent; the man page *was* checked, `mandoc -T
+lint` is clean), the snap was not built, and the native `Cmd+Q` menu item was
+not clicked in a real macOS window. Everything else in this list is covered by
+the test suite or was checked by hand.
+
+The hardened CI paid for itself on its first run: Windows failed three
+integration tests because they isolated the temp directory through `TMPDIR`
+alone, which `std::env::temp_dir()` ignores on Windows in favour of `TMP` and
+`TEMP`. The tests were writing to the real temp directory and asserting against
+an empty one. Fixed in the tests; the product code was correct.
 
 ## [0.3.2] - 2026-06-22
 

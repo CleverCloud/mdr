@@ -85,7 +85,12 @@ fn stdin_temp_files(mdr_dir: &Path) -> Vec<PathBuf> {
 fn run_piped(tmpdir: &Path, args: &[&str], content: &[u8]) -> (bool, String) {
     let mut child = Command::new(mdr_bin())
         .args(args)
+        // `std::env::temp_dir()` reads TMPDIR on Unix but TMP then TEMP on
+        // Windows, so all three have to be set or the child writes to the real
+        // temp directory and the test loses its isolation.
         .env("TMPDIR", tmpdir)
+        .env("TMP", tmpdir)
+        .env("TEMP", tmpdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
