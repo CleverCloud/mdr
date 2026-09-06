@@ -20,6 +20,7 @@ Most developers end up previewing Markdown in VS Code, pasting into a browser, o
 - **Three backends** — full GUI (egui), native webview (WebKit/WebView2), or terminal UI (TUI) over SSH
 - **Live reload** — edit your file or let your AI tool regenerate it, see changes instantly
 - **In-document search** — Ctrl+F / `/` to find text across all backends
+- **Fully keyboard-driven** — every backend quits, scrolls, searches and navigates from the keyboard
 
 ## Backends
 
@@ -106,9 +107,51 @@ mdr --backend webview README.md
 # Open in terminal (TUI)
 mdr --backend tui README.md
 
+# Never touch the network (remote images are left unresolved)
+mdr --offline README.md
+
 # Show help
 mdr --help
 ```
+
+Clicking an `http(s)` link opens it in your system browser; a link to another
+local `.md` file opens that file in mdr.
+
+### GUI (egui) keybindings
+
+| Key | Action |
+|-----|--------|
+| `q`, `Esc`, `Ctrl/Cmd+Q`, `Ctrl/Cmd+W` | Quit |
+| `Ctrl/Cmd+F` | Search in the document |
+| `Esc` | Close the search (quits when no search is open) |
+| `F10` | Show or hide the table of contents |
+| `j` / `↓`, `k` / `↑` | Scroll down / up |
+| `Space` / `PgDn`, `PgUp` | Page down / up |
+| `g` / `Home`, `G` / `End` | Go to top / bottom |
+
+On macOS the shortcuts use ⌘, not ⌃.
+
+### Webview keybindings
+
+Press `?` in the webview backend for this list.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl/Cmd+Q` | Close the window |
+| `Ctrl/Cmd+F` | Search in the document |
+| `n` / `N` | Next / previous search match |
+| `Esc` | Close search, help or the expanded image |
+| `j` / `↓`, `k` / `↑` | Scroll down / up |
+| `Space` / `PgDn`, `PgUp` | Page down / up |
+| `g` / `Home`, `G` / `End` | Go to top / bottom |
+| `Ctrl/Cmd` + `+` / `-` / `0` | Zoom in / out / reset |
+| `Ctrl/Cmd+B` | Show or hide the table of contents |
+| `Ctrl/Cmd+D` | Switch between the light and dark theme |
+| `Ctrl/Cmd+P` | Print or export to PDF |
+| `?` | Show or hide the shortcut list |
+
+`Ctrl/Cmd+D` overrides the system colour scheme for the current window; without it
+the theme follows `prefers-color-scheme`.
 
 ### TUI keybindings
 
@@ -134,7 +177,26 @@ mdr --help
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts, and more (via mermaid-rs-renderer)
 - **Table of Contents** — auto-generated sidebar from headings with click-to-navigate
 - **Live reload** — file watching with 300ms debounce, updates on save
-- **Dark/Light theme** — follows OS theme (webview backend)
+- **Dark/Light theme** — follows OS theme, overridable with `Ctrl/Cmd+D` (webview backend)
+- **YAML front matter** — recognised as metadata, so it is neither rendered nor listed in the TOC
+- **Unique heading anchors** — repeated headings get `setup`, `setup-1`, … as GitHub does
+
+## Images
+
+Images are inlined into the document before rendering, so nothing is fetched
+while you read.
+
+- **Local images** resolve relative to the Markdown file, and may live anywhere
+  inside the enclosing project — the nearest ancestor directory holding a
+  `.git`, `.hg`, `.svn` or `.jj`. That makes the usual `docs/page.md` →
+  `![](../images/schema.png)` layout work. Outside that root, and above your
+  home directory, images are refused.
+- **Remote images** (`http`/`https`, typically README badges) are downloaded
+  once, cached for the lifetime of the process, and embedded as `data:` URIs.
+  Responses larger than 16 MB are ignored.
+- `mdr --offline file.md` disables every network access; remote images are then
+  left unresolved. The same can be set permanently with `offline #true` in the
+  config file.
 
 ## Mermaid Support
 
@@ -161,7 +223,10 @@ src/
 │   ├── markdown.rs      # GFM parsing (comrak) + CSS
 │   ├── mermaid.rs       # Mermaid → SVG rendering
 │   ├── toc.rs           # Heading extraction for TOC
-│   ├── search.rs       # In-document search
+│   ├── slug.rs          # Heading anchors, shared by the renderer and the TOC
+│   ├── sanitize.rs      # Strips scripts and event handlers from raw HTML
+│   ├── paths.rs         # Which directory tree images may be read from
+│   ├── net.rs           # Remote image fetching (respects --offline)
 │   └── watcher.rs       # File watching (notify, 300ms debounce)
 └── backend/
     ├── egui.rs          # egui/eframe backend
@@ -171,7 +236,7 @@ src/
 
 ## Building
 
-Requires Rust 1.75+.
+Requires Rust 1.95 or later (the floor comes from `kdl`; the MSRV is checked in CI).
 
 ```bash
 # All backends (default)
@@ -180,8 +245,8 @@ cargo build --release
 # Run tests
 cargo test
 
-# Run clippy
-cargo clippy
+# Run clippy exactly as CI does
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 ### Linux dependencies
@@ -194,14 +259,17 @@ sudo apt-get install libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libgl1-mesa-d
 
 Pre-built binaries are available on the [Releases](https://github.com/CleverCloud/mdr/releases) page for:
 - macOS (Apple Silicon + Intel)
-- Linux (x86_64)
+- Linux (x86_64 + aarch64)
 - Windows (x86_64)
+
+Release notes are the matching section of [CHANGELOG.md](CHANGELOG.md), so add
+it before pushing the tag.
 
 To create a release, push a version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 ## License

@@ -1,3 +1,4 @@
+use crate::core::slug::SlugGenerator;
 use comrak::nodes::NodeValue;
 use comrak::{parse_document, Arena, Options};
 
@@ -5,6 +6,9 @@ use comrak::{parse_document, Arena, Options};
 pub struct TocEntry {
     pub level: u8,
     pub text: String,
+    /// Read by the webview backend, which renders the TOC as HTML links; the
+    /// other two backends scroll to a section index instead.
+    #[cfg_attr(not(feature = "webview-backend"), allow(dead_code))]
     pub anchor: String,
 }
 
@@ -17,15 +21,20 @@ pub fn extract_toc(content: &str) -> Vec<TocEntry> {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
+    // Keep front matter out of the TOC, and stop its `---` fence from being
+    // read as a setext heading (#56).
+    options.extension.front_matter_delimiter = Some("---".to_string());
 
     let root = parse_document(&arena, content, &options);
     let mut entries = Vec::new();
+    // Same walk order as `markdown::add_heading_ids`, so the anchors match (#65).
+    let mut slugs = SlugGenerator::new();
 
     for node in root.descendants() {
         if let NodeValue::Heading(heading) = &node.data.borrow().value {
             let level = heading.level;
             let text = collect_text(node);
-            let anchor = slugify(&text);
+            let anchor = slugs.generate(&text);
             entries.push(TocEntry {
                 level,
                 text,
@@ -53,28 +62,10 @@ fn collect_text<'a>(
     text
 }
 
-/// Convert a heading text to a URL-friendly slug.
-fn slugify(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else if c == ' ' {
-                '-'
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::slug::slugify;
 
     // --- slugify tests ---
 
@@ -198,5 +189,42 @@ mod tests {
         assert_eq!(entries[0].text, "B");
         assert_eq!(entries[1].text, "A");
         assert_eq!(entries[2].text, "C");
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_headings_get_distinct_anchors() {
+        let toc = extract_toc("## Setup\n\ntext\n\n## Setup\n\nmore");
+        assert_eq!(toc.len(), 2);
+        assert_eq!(toc[0].anchor, "setup");
+        assert_eq!(toc[1].anchor, "setup-1");
+    }
+
+    // The HTML renderer only exists in webview builds.
+    #[cfg(feature = "webview-backend")]
+    #[test]
+    fn toc_anchors_match_the_rendered_html_ids() {
+        let md = "# Intro\n\n## Setup\n\n## Setup\n\n## Usage\n";
+        let html = crate::core::markdown::parse_markdown(md);
+        for entry in extract_toc(md) {
+            assert!(
+                html.contains(&format!("id=\"{}\"", entry.anchor)),
+                "anchor {} missing from {}",
+                entry.anchor,
+                html
+            );
+        }
+    }
+
+    #[test]
+    fn front_matter_does_not_produce_a_toc_entry() {
+        let md = "---\ntitle: front matter\ntags: [a, b]\n---\n\n# Title\n";
+        let toc = extract_toc(md);
+        assert_eq!(toc.len(), 1, "{:?}", toc);
+        assert_eq!(toc[0].text, "Title");
     }
 }

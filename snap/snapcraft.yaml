@@ -12,6 +12,14 @@ apps:
   mdr-markdown-renderer:
     command: bin/mdr
     aliases: [mdr]
+    # The gnome extension is what exports the runtime environment the snap
+    # needs to reach the Wayland socket, the xkb keymaps and the Mesa drivers
+    # it already ships. Without it the app cannot start on a stock GNOME
+    # Wayland desktop (#47): winit reports "Could not find wayland
+    # compositor", then panics on XKBNotFound, then wgpu fails to create a
+    # surface. The extension also pulls GTK and its themes from the
+    # gnome-42-2204 content snap, so those no longer have to be staged here.
+    extensions: [gnome]
     plugs:
       - desktop
       - desktop-legacy

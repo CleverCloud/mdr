@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=mdr
+GenericName=Markdown Viewer
+Comment=Lightweight Markdown viewer with live reload
+Exec=mdr %f
+Icon=mdr
+Terminal=false
+Categories=Office;Utility;Viewer;TextEditor;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;viewer;mermaid;preview;
+StartupWMClass=mdr

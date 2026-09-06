@@ -1,4 +1,5 @@
 use crate::core::mermaid::process_mermaid_blocks;
+use crate::core::slug::SlugGenerator;
 use comrak::{markdown_to_html, Options};
 
 /// Convert markdown content to HTML with all GFM extensions enabled.
@@ -11,6 +12,9 @@ pub fn parse_markdown(content: &str) -> String {
     options.extension.autolink = true;
     options.extension.tasklist = true;
     options.extension.footnotes = true;
+    // Without this, the `---` fence of a YAML front matter block is parsed as a
+    // setext heading and the metadata is rendered as document text (#56).
+    options.extension.front_matter_delimiter = Some("---".to_string());
     options.render.r#unsafe = true;
 
     let html = markdown_to_html(content, &options);
@@ -23,11 +27,15 @@ fn add_heading_ids(html: &str) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"<(h[1-6])>(.*?)</h[1-6]>").unwrap());
+    // `replace_all` visits the headings in document order, which is the same
+    // order `toc::extract_toc` walks them in, so both end up with the same
+    // de-duplicated anchors (#65).
+    let mut slugs = SlugGenerator::new();
     re.replace_all(html, |caps: &regex::Captures| {
         let tag = &caps[1];
         let content = &caps[2];
         let plain_text = strip_html_tags(content);
-        let id = slugify(&plain_text);
+        let id = slugs.generate(&plain_text);
         format!("<{} id=\"{}\">{}</{}>", tag, id, content, tag)
     })
     .to_string()
@@ -38,203 +46,6 @@ fn strip_html_tags(html: &str) -> String {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"<[^>]+>").unwrap());
     re.replace_all(html, "").to_string()
-}
-
-fn slugify(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else if c == ' ' {
-                '-'
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- add_heading_ids tests ---
-
-    #[test]
-    fn heading_ids_added_to_h1() {
-        let html = "<h1>Hello World</h1>";
-        let result = add_heading_ids(html);
-        assert!(result.contains(r#"<h1 id="hello-world">Hello World</h1>"#));
-    }
-
-    #[test]
-    fn heading_ids_added_to_multiple_levels() {
-        let html = "<h1>Title</h1><h2>Section</h2><h3>Sub</h3>";
-        let result = add_heading_ids(html);
-        assert!(result.contains(r#"<h1 id="title">"#));
-        assert!(result.contains(r#"<h2 id="section">"#));
-        assert!(result.contains(r#"<h3 id="sub">"#));
-    }
-
-    #[test]
-    fn heading_ids_strip_inner_html_tags() {
-        let html = "<h2>Hello <code>world</code></h2>";
-        let result = add_heading_ids(html);
-        assert!(result.contains(r#"id="hello-world""#));
-        // Inner HTML is preserved in content
-        assert!(result.contains("<code>world</code>"));
-    }
-
-    #[test]
-    fn heading_ids_no_headings_unchanged() {
-        let html = "<p>Just a paragraph</p>";
-        let result = add_heading_ids(html);
-        assert_eq!(result, html);
-    }
-
-    // --- strip_html_tags tests ---
-
-    #[test]
-    fn strip_html_tags_removes_tags() {
-        assert_eq!(strip_html_tags("<b>bold</b>"), "bold");
-        assert_eq!(strip_html_tags("no tags"), "no tags");
-        assert_eq!(strip_html_tags("<a href=\"#\">link</a>"), "link");
-    }
-
-    // --- parse_markdown integration tests ---
-
-    #[test]
-    fn parse_markdown_basic_paragraph() {
-        let result = parse_markdown("Hello world");
-        assert!(result.contains("Hello world"));
-        assert!(result.contains("<p>"));
-    }
-
-    #[test]
-    fn parse_markdown_heading_gets_id() {
-        let result = parse_markdown("# My Title");
-        assert!(result.contains(r#"id="my-title""#));
-        assert!(result.contains("My Title"));
-    }
-
-    #[test]
-    fn parse_markdown_multiple_headings_get_ids() {
-        let result = parse_markdown("# First\n## Second\n### Third");
-        assert!(result.contains(r#"id="first""#));
-        assert!(result.contains(r#"id="second""#));
-        assert!(result.contains(r#"id="third""#));
-    }
-
-    #[test]
-    fn parse_markdown_table() {
-        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
-        let result = parse_markdown(md);
-        assert!(result.contains("<table>"));
-        assert!(result.contains("<th>"));
-        assert!(result.contains("<td>"));
-    }
-
-    #[test]
-    fn parse_markdown_tasklist() {
-        let md = "- [x] Done\n- [ ] Todo";
-        let result = parse_markdown(md);
-        assert!(result.contains("checkbox"));
-    }
-
-    #[test]
-    fn parse_markdown_strikethrough() {
-        let md = "This is ~~deleted~~ text.";
-        let result = parse_markdown(md);
-        assert!(result.contains("<del>"));
-        assert!(result.contains("deleted"));
-    }
-
-    #[test]
-    fn parse_markdown_mermaid_block_is_processed() {
-        // A mermaid code block should be processed (either rendered or show error)
-        let md = "```mermaid\ngraph LR\n  A-->B\n```";
-        let result = parse_markdown(md);
-        // The mermaid block should not remain as a raw code block with language-mermaid class
-        // It should either be a rendered SVG diagram or a mermaid-error div
-        assert!(
-            result.contains("mermaid-diagram")
-                || result.contains("mermaid-error")
-                || result.contains("mermaid-fallback"),
-            "Mermaid block should be processed, got: {}",
-            result
-        );
-    }
-
-    #[test]
-    fn parse_markdown_empty_input() {
-        let result = parse_markdown("");
-        // Empty input should produce empty or minimal HTML
-        assert!(result.is_empty() || result.trim().is_empty());
-    }
-
-    #[test]
-    fn parse_markdown_code_block_not_mermaid() {
-        let md = "```rust\nfn main() {}\n```";
-        let result = parse_markdown(md);
-        assert!(result.contains("<code"));
-        assert!(!result.contains("mermaid-diagram"));
-    }
-
-    // --- raw HTML image tests (bug: local images not showing) ---
-
-    #[test]
-    fn parse_markdown_raw_html_img_preserved() {
-        // Business docs often use raw HTML <img> tags for sizing
-        let md = r#"<img src="chart.png" alt="Revenue chart" width="600" />"#;
-        let result = parse_markdown(md);
-        assert!(
-            result.contains("<img"),
-            "Raw HTML <img> tags should be preserved, got: {}",
-            result
-        );
-        assert!(
-            result.contains("chart.png"),
-            "Image src should be preserved, got: {}",
-            result
-        );
-    }
-
-    #[test]
-    fn parse_markdown_raw_html_img_with_attributes() {
-        let md = r#"<p align="center"><img src="logo.png" alt="logo" width="200"/></p>"#;
-        let result = parse_markdown(md);
-        assert!(
-            result.contains("<img"),
-            "Centered HTML image should be preserved, got: {}",
-            result
-        );
-        assert!(
-            result.contains("logo.png"),
-            "Image src should be preserved, got: {}",
-            result
-        );
-    }
-
-    #[test]
-    fn parse_markdown_markdown_image_syntax_works() {
-        // Standard markdown images should always work
-        let md = "![alt text](image.png)";
-        let result = parse_markdown(md);
-        assert!(
-            result.contains("<img"),
-            "Markdown image should produce <img>, got: {}",
-            result
-        );
-        assert!(
-            result.contains("image.png"),
-            "Image src should be present, got: {}",
-            result
-        );
-    }
 }
 
 /// CSS for GitHub-like markdown rendering with dark/light theme support.
@@ -402,3 +213,198 @@ input[type="checkbox"] { margin-right: 0.5em; }
 mark.search-highlight { background: #ffd33d55; color: inherit; border-radius: 2px; }
 mark.search-highlight.current { background: #ffd33d; color: #000; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- add_heading_ids tests ---
+
+    #[test]
+    fn heading_ids_added_to_h1() {
+        let html = "<h1>Hello World</h1>";
+        let result = add_heading_ids(html);
+        assert!(result.contains(r#"<h1 id="hello-world">Hello World</h1>"#));
+    }
+
+    #[test]
+    fn heading_ids_added_to_multiple_levels() {
+        let html = "<h1>Title</h1><h2>Section</h2><h3>Sub</h3>";
+        let result = add_heading_ids(html);
+        assert!(result.contains(r#"<h1 id="title">"#));
+        assert!(result.contains(r#"<h2 id="section">"#));
+        assert!(result.contains(r#"<h3 id="sub">"#));
+    }
+
+    #[test]
+    fn heading_ids_strip_inner_html_tags() {
+        let html = "<h2>Hello <code>world</code></h2>";
+        let result = add_heading_ids(html);
+        assert!(result.contains(r#"id="hello-world""#));
+        // Inner HTML is preserved in content
+        assert!(result.contains("<code>world</code>"));
+    }
+
+    #[test]
+    fn heading_ids_no_headings_unchanged() {
+        let html = "<p>Just a paragraph</p>";
+        let result = add_heading_ids(html);
+        assert_eq!(result, html);
+    }
+
+    // --- strip_html_tags tests ---
+
+    #[test]
+    fn strip_html_tags_removes_tags() {
+        assert_eq!(strip_html_tags("<b>bold</b>"), "bold");
+        assert_eq!(strip_html_tags("no tags"), "no tags");
+        assert_eq!(strip_html_tags("<a href=\"#\">link</a>"), "link");
+    }
+
+    // --- parse_markdown integration tests ---
+
+    #[test]
+    fn parse_markdown_basic_paragraph() {
+        let result = parse_markdown("Hello world");
+        assert!(result.contains("Hello world"));
+        assert!(result.contains("<p>"));
+    }
+
+    #[test]
+    fn parse_markdown_heading_gets_id() {
+        let result = parse_markdown("# My Title");
+        assert!(result.contains(r#"id="my-title""#));
+        assert!(result.contains("My Title"));
+    }
+
+    #[test]
+    fn parse_markdown_multiple_headings_get_ids() {
+        let result = parse_markdown("# First\n## Second\n### Third");
+        assert!(result.contains(r#"id="first""#));
+        assert!(result.contains(r#"id="second""#));
+        assert!(result.contains(r#"id="third""#));
+    }
+
+    #[test]
+    fn duplicate_headings_get_distinct_ids() {
+        let result = parse_markdown("## Setup\n\ntext\n\n## Setup\n\nmore");
+        assert!(result.contains(r#"id="setup""#), "{}", result);
+        assert!(result.contains(r#"id="setup-1""#), "{}", result);
+    }
+
+    #[test]
+    fn yaml_front_matter_is_not_rendered_as_content() {
+        let md = "---\ntitle: front matter\ntags: [a, b]\n---\n\n# Title\n\nText.\n";
+        let result = parse_markdown(md);
+        assert!(!result.contains("title: front matter"), "{}", result);
+        assert!(!result.contains("tags:"), "{}", result);
+        assert!(result.contains("Title"), "{}", result);
+    }
+
+    #[test]
+    fn parse_markdown_table() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let result = parse_markdown(md);
+        assert!(result.contains("<table>"));
+        assert!(result.contains("<th>"));
+        assert!(result.contains("<td>"));
+    }
+
+    #[test]
+    fn parse_markdown_tasklist() {
+        let md = "- [x] Done\n- [ ] Todo";
+        let result = parse_markdown(md);
+        assert!(result.contains("checkbox"));
+    }
+
+    #[test]
+    fn parse_markdown_strikethrough() {
+        let md = "This is ~~deleted~~ text.";
+        let result = parse_markdown(md);
+        assert!(result.contains("<del>"));
+        assert!(result.contains("deleted"));
+    }
+
+    #[test]
+    fn parse_markdown_mermaid_block_is_processed() {
+        // A mermaid code block should be processed (either rendered or show error)
+        let md = "```mermaid\ngraph LR\n  A-->B\n```";
+        let result = parse_markdown(md);
+        // The mermaid block should not remain as a raw code block with language-mermaid class
+        // It should either be a rendered SVG diagram or a mermaid-error div
+        assert!(
+            result.contains("mermaid-diagram")
+                || result.contains("mermaid-error")
+                || result.contains("mermaid-fallback"),
+            "Mermaid block should be processed, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn parse_markdown_empty_input() {
+        let result = parse_markdown("");
+        // Empty input should produce empty or minimal HTML
+        assert!(result.is_empty() || result.trim().is_empty());
+    }
+
+    #[test]
+    fn parse_markdown_code_block_not_mermaid() {
+        let md = "```rust\nfn main() {}\n```";
+        let result = parse_markdown(md);
+        assert!(result.contains("<code"));
+        assert!(!result.contains("mermaid-diagram"));
+    }
+
+    // --- raw HTML image tests (bug: local images not showing) ---
+
+    #[test]
+    fn parse_markdown_raw_html_img_preserved() {
+        // Business docs often use raw HTML <img> tags for sizing
+        let md = r#"<img src="chart.png" alt="Revenue chart" width="600" />"#;
+        let result = parse_markdown(md);
+        assert!(
+            result.contains("<img"),
+            "Raw HTML <img> tags should be preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("chart.png"),
+            "Image src should be preserved, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn parse_markdown_raw_html_img_with_attributes() {
+        let md = r#"<p align="center"><img src="logo.png" alt="logo" width="200"/></p>"#;
+        let result = parse_markdown(md);
+        assert!(
+            result.contains("<img"),
+            "Centered HTML image should be preserved, got: {}",
+            result
+        );
+        assert!(
+            result.contains("logo.png"),
+            "Image src should be preserved, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn parse_markdown_markdown_image_syntax_works() {
+        // Standard markdown images should always work
+        let md = "![alt text](image.png)";
+        let result = parse_markdown(md);
+        assert!(
+            result.contains("<img"),
+            "Markdown image should produce <img>, got: {}",
+            result
+        );
+        assert!(
+            result.contains("image.png"),
+            "Image src should be present, got: {}",
+            result
+        );
+    }
+}

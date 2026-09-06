@@ -27,10 +27,12 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
         }
         if &data[..magic.len()] != magic {
             // WebP is RIFF + 4 bytes + WEBP
-            if kind == "WebP" && data.len() >= 12 {
-                if &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
-                    return Ok(());
-                }
+            if kind == "WebP"
+                && data.len() >= 12
+                && &data[..4] == b"RIFF"
+                && &data[8..12] == b"WEBP"
+            {
+                return Ok(());
             }
             return Err(format!(
                 "file does not appear to be a valid {} (wrong magic bytes)",

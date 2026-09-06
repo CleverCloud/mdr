@@ -8,8 +8,40 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Minimum supported Rust version, kept in sync with `rust-version` in Cargo.toml.
+  #
+  # 1.95 is the highest `rust-version` declared in the dependency tree
+  # (kdl 6.7.1; the next highest is 1.92 for the egui/epaint family), and it was
+  # verified by an actual compilation: `cargo check --all-features --all-targets`
+  # on a 1.95.0 toolchain exits 0.
+  MSRV: "1.95"
 
 jobs:
+  fmt:
+    name: Format & manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # Cheap textual check, kept here so a mismatch is reported in seconds
+      # instead of after the full MSRV build.
+      - name: Check that rust-version matches MSRV
+        run: |
+          declared=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          if [ "$declared" != "${MSRV}" ]; then
+            echo "rust-version in Cargo.toml ($declared) does not match MSRV in ci.yml (${MSRV})" >&2
+            exit 1
+          fi
+
   check:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -24,6 +56,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -32,7 +66,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Install Linux dependencies
@@ -53,9 +87,51 @@ jobs:
       - name: Build (tui only)
         run: cargo build --release --no-default-features --features tui-backend
 
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-        continue-on-error: true
+      # Every feature combination is linted: a warning that only shows up in a
+      # single-backend build is still a warning users see when they build one.
+      - name: Run clippy (all features)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: Run clippy (single backends)
+        # The matrix includes windows-latest, whose default shell is pwsh.
+        shell: bash
+        run: |
+          for feature in egui-backend webview-backend tui-backend; do
+            cargo clippy --no-default-features --features "$feature" -- -D warnings
+          done
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --all-features
+
+  msrv:
+    name: MSRV (Rust 1.95)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.MSRV }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-msrv-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-cargo-
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libgl1-mesa-dev
+
+      - name: Check (all features)
+        run: cargo check --all-features --all-targets
+
+      - name: Test
+        run: cargo test --all-features

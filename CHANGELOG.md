@@ -5,6 +5,123 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-04
+
+Keyboard, images, safety and packaging. Every backend is now fully
+keyboard-driven, a document can no longer run scripts in the webview, images
+resolve the way people actually lay out their repositories, and the Linux
+packages install like real desktop applications.
+
+Nineteen reported issues are closed.
+
+### Security
+
+- **Webview: a `<script>` written inside a Markdown document no longer runs.**
+  Raw document HTML is stripped of scripts, event-handler attributes and
+  `javascript:` URLs before it reaches the page, and the CSP now refuses
+  navigation, framing, form submission and outbound connections. A document
+  could previously exfiltrate its own text to a remote host — which matters
+  because mdr is typically pointed at Markdown that was generated or
+  downloaded rather than written by hand (#62).
+- **Piped input is no longer world-readable.** `<temp>/mdr/stdin-*.md` was
+  created with default permissions, so on a shared `/tmp` anyone on the machine
+  could read it. It is now created `0600`, inside a `0700` directory, and mdr
+  refuses a temp directory that is a symlink or owned by another user (#64).
+
+### Added
+
+- **Webview: full keyboard navigation** — quit (`Ctrl/Cmd+Q`), scrolling
+  (`j`/`k`, `Space`, `g`/`G`), zoom (`Ctrl/Cmd` + `+`/`-`/`0`), table of
+  contents toggle (`Ctrl/Cmd+B`), light/dark theme toggle (`Ctrl/Cmd+D`), print
+  and PDF export (`Ctrl/Cmd+P`), search match navigation (`n`/`N`) and a `?`
+  overlay listing every shortcut. Plus a native application menu, so `Cmd+Q`
+  and `Cmd+W` behave as expected on macOS.
+- **GUI: keyboard navigation to match.** `q`, `Esc`, `Ctrl/Cmd+Q` and
+  `Ctrl/Cmd+W` close the window, and the content scrolls with `j`/`k`, the
+  arrows, `Space`, PageUp/PageDown, `g`/`G` and Home/End (#63).
+- **Webview: links behave.** `http(s)` links open in the system browser instead
+  of replacing the document, links to a local `.md` file open that file in mdr,
+  and `#anchor` links scroll (#55).
+- **Remote images are displayed** in the GUI and webview backends. They are
+  downloaded once, capped at 16 MB, cached for the lifetime of the process so
+  live reload does not re-download them, and inlined as `data:` URIs — which
+  keeps the strict `img-src data:` policy intact (#60).
+- **`--offline`** disables every network access; remote images are then left
+  unresolved. Also settable as `offline #true` in the config file.
+- **`.deb` and `.rpm` install a desktop entry, an icon and a man page**, not
+  just the binary (#52).
+- **Linux `aarch64` binaries, `.deb` and `.rpm`**, built natively on ARM
+  runners (#51).
+
+### Fixed
+
+- **Images in a parent directory are displayed.** The allowed root is the
+  enclosing project — the nearest ancestor holding `.git`, `.hg`, `.svn` or
+  `.jj` — so the usual `docs/page.md` → `![](../images/schema.png)` layout
+  resolves. Traversal outside the project, and above the home directory, is
+  still refused (#61).
+- **Repeated headings get distinct anchors** (`setup`, `setup-1`, …), so the
+  second entry of a table of contents no longer scrolls to the first section.
+  The renderer and the TOC now share one anchor generator and cannot drift
+  apart (#65).
+- **YAML front matter is treated as metadata**: no longer rendered as document
+  text, no longer listed in the table of contents (#56).
+- **GUI: `Cmd+F` opens the search on macOS.** It was testing the physical Ctrl
+  key, which ⌘ never sets (#63).
+- **GUI: table of contents entries scroll to the right section** when the
+  document contains setext headings. Sections are now cut at the heading
+  positions of the same comrak parse the TOC is built from (#57).
+- **TUI: the first frame is drawn immediately.** The terminal image-capability
+  query ran before the first draw for every document, even one without images,
+  and cost a full timeout on terminals that never answer — 7.7 s to first frame
+  on an eleven-line file over a plain pty. It now happens only for documents
+  that have an image or a diagram to show (#58).
+- **TUI: long lines wrap** instead of being cut at the right edge with no way
+  to reach the end of the sentence. Styles, gutters and list indentation are
+  preserved on continuation rows, and scroll offsets account for the folded
+  height (#54).
+- **Stdin temp files are removed on exit**, and files older than a day are
+  swept at startup to recover what a killed run left behind. They used to
+  accumulate for the life of the machine (#64).
+- **Snap launches on Wayland.** The snap shipped the Wayland, xkb and Mesa
+  assets but exported none of the environment needed to reach them inside
+  confinement (#47).
+- **Fedora: `.rpm` dependency resolution** is documented — `dnf install
+  ./mdr-*.rpm` resolves `libxdo.so.3` (from `xdotool-libs`), `rpm -i` does not
+  (#44).
+
+### Changed
+
+- **Release notes are the matching `CHANGELOG.md` section** instead of an
+  auto-generated list of merged pull requests, and re-running the workflow for
+  a tag replaces the body instead of appending to it (#49).
+- **CI: clippy is blocking**, across all features and each backend alone;
+  `cargo fmt --check` runs; and a job pinned to the declared MSRV (Rust 1.95,
+  the floor asked for by `kdl 6.7.1`) checks and tests the crate (#50).
+- **`flake.nix` reads its metadata from `Cargo.toml`**, so the Nix derivation
+  can no longer claim 0.1.0 while the crate is at 0.4.0. The
+  `darwin.apple_sdk.frameworks` block was removed: the attribute no longer
+  exists in the nixpkgs the flake tracks (#48).
+- **`Cargo.lock` is tracked**, making builds reproducible (#53), and
+  semver-compatible dependencies were refreshed.
+- Removed `core::search`, an unused module no backend ever called.
+
+### Not verified
+
+Stated plainly, because the release ships them anyway: the *release* workflow
+has never been executed — only the CI one, on the release PR — `nix` is not
+available to evaluate the flake, `mdr.desktop` could not be linted
+(`desktop-file-validate` is absent; the man page *was* checked, `mandoc -T
+lint` is clean), the snap was not built, and the native `Cmd+Q` menu item was
+not clicked in a real macOS window. Everything else in this list is covered by
+the test suite or was checked by hand.
+
+The hardened CI paid for itself on its first run: Windows failed three
+integration tests because they isolated the temp directory through `TMPDIR`
+alone, which `std::env::temp_dir()` ignores on Windows in favour of `TMP` and
+`TEMP`. The tests were writing to the real temp directory and asserting against
+an empty one. Fixed in the tests; the product code was correct.
+
 ## [0.3.2] - 2026-06-22
 
 ### Added
