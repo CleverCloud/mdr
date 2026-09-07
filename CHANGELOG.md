@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-09-07
+
+One change, and a large one: the terminal backend no longer has a Markdown
+parser of its own.
 
 ### Changed
 
@@ -26,6 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Tight and loose lists are now distinguished as CommonMark defines them: a
   list written without blank lines between its items no longer gains any.
+
+  The rewrite fits behind the existing seam, so image and mermaid extraction,
+  line wrapping, search, the startup gate of #58 and table-of-contents
+  scrolling are untouched — the twenty-five existing terminal tests pass
+  unchanged. Three helpers of the old parser, 190 lines including its inline
+  formatter, are deleted rather than left behind.
+
+  syntect is declared directly rather than only through comrak's `syntect`
+  feature: it was already compiled, so this adds no build cost and no new crate
+  to the lock. It loads lazily — a document with no code block never pays for
+  it. Measured here: 1.28 ms to render an eleven-line document, 26 ms for the
+  first document that does contain a code block (syntax-set load included),
+  2-8 ms after that. Nothing that touches the startup latency fixed in #58.
+
+### Not verified
+
+The terminal backend cannot be driven headlessly in this environment, so the
+rendering was verified through the `Line` structures it produces and by reading
+them, not by looking at a terminal.
 
 ## [0.4.0] - 2026-09-04
 
