@@ -979,7 +979,7 @@ fn build_content_elements(
 fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) {
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
         Span::styled(
-            "┌─ mermaid ─────────────────────────────────┐".to_string(),
+            code_frame_top("mermaid"),
             Style::default().fg(Color::DarkGray),
         ),
     ))));
@@ -989,10 +989,7 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
         ))));
     }
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
-        Span::styled(
-            "└─────────────────────────────────────────┘".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(CODE_FRAME_BOTTOM, Style::default().fg(Color::DarkGray)),
     ))));
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(""))));
 }
@@ -1140,6 +1137,57 @@ fn document_needs_picker(content: &str) -> bool {
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
+/// The bottom edge of a code block frame.
+const CODE_FRAME_BOTTOM: &str = "└─────────────────────────────────────────┘";
+
+/// The top edge, labelled and closed at exactly the width of the bottom one.
+/// A named language used to leave the box open on the right.
+fn code_frame_top(label: &str) -> String {
+    let inner = str_width(CODE_FRAME_BOTTOM).saturating_sub(2);
+    let opening = format!("─ {} ", label);
+    let fill = inner.saturating_sub(str_width(&opening));
+    format!("┌{}{}┐", opening, "─".repeat(fill))
+}
+
+/// Whether the terminal says it has a light background.
+///
+/// `COLORFGBG` is the only signal available without talking to the terminal and
+/// waiting for an answer — which is exactly the two-second stall #58 removed, so
+/// it is not an option here. Terminals that do not set the variable simply give
+/// no answer, and the caller falls back to dark.
+///
+/// The value is `fg;bg` or `fg;<something>;bg`; the background is the last
+/// field, as an ANSI colour index. 0-6 and 8 are the dark half of the palette,
+/// 7 and 9-15 the light half.
+fn terminal_background_is_light(colorfgbg: Option<&str>) -> Option<bool> {
+    let value = colorfgbg?;
+    let bg = value.rsplit(';').next()?.trim();
+    let index: u8 = bg.parse().ok()?;
+    match index {
+        0..=6 | 8 => Some(false),
+        7 | 9..=15 => Some(true),
+        _ => None,
+    }
+}
+
+/// The syntect theme to highlight code with.
+///
+/// An explicit setting always wins; `auto` asks the terminal and falls back to
+/// dark, which is what the overwhelming majority of terminals running a pager
+/// actually are.
+fn syntax_theme_name(setting: crate::core::Theme, colorfgbg: Option<&str>) -> &'static str {
+    let light = match setting {
+        crate::core::Theme::Light => true,
+        crate::core::Theme::Dark => false,
+        crate::core::Theme::Auto => terminal_background_is_light(colorfgbg).unwrap_or(false),
+    };
+    if light {
+        "InspiredGitHub"
+    } else {
+        "base16-ocean.dark"
+    }
+}
+
 /// Syntax highlighting assets, built once. `SyntaxSet` parsing is the expensive
 /// part, so it is shared across every code block of every reload.
 fn syntax_assets() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::Theme) {
@@ -1149,12 +1197,14 @@ fn syntax_assets() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighti
     ASSETS.get_or_init(|| {
         let syntaxes = syntect::parsing::SyntaxSet::load_defaults_newlines();
         let mut themes = syntect::highlighting::ThemeSet::load_defaults();
-        // A dark theme: terminals that matter here are overwhelmingly dark, and
-        // the previous rendering was a flat green on the same assumption.
+        let wanted = syntax_theme_name(
+            crate::core::theme(),
+            std::env::var("COLORFGBG").ok().as_deref(),
+        );
         let theme = themes
             .themes
-            .remove("base16-ocean.dark")
-            .or_else(|| themes.themes.remove("Solarized (dark)"))
+            .remove(wanted)
+            .or_else(|| themes.themes.remove("base16-ocean.dark"))
             .unwrap_or_default();
         (syntaxes, theme)
     })
@@ -1358,28 +1408,14 @@ impl MdRenderer {
                     return;
                 }
                 let gutter = Style::default().fg(Color::DarkGray);
-                let header = if lang.is_empty() {
-                    "┌─ code ──────────────────────────────────┐".to_string()
-                } else {
-                    format!(
-                        "┌─ {} {}",
-                        lang,
-                        "─".repeat(38usize.saturating_sub(lang.len()))
-                    )
-                };
-                self.push(ctx, vec![Span::styled(header, gutter)]);
+                let label = if lang.is_empty() { "code" } else { &lang };
+                self.push(ctx, vec![Span::styled(code_frame_top(label), gutter)]);
                 for mut spans in highlight_code(code.literal.trim_end_matches('\n'), &lang) {
                     let mut line = vec![Span::styled("│ ", gutter)];
                     line.append(&mut spans);
                     self.push(ctx, line);
                 }
-                self.push(
-                    ctx,
-                    vec![Span::styled(
-                        "└─────────────────────────────────────────┘",
-                        gutter,
-                    )],
-                );
+                self.push(ctx, vec![Span::styled(CODE_FRAME_BOTTOM, gutter)]);
                 self.blank();
             }
 
@@ -2204,6 +2240,108 @@ mod fidelity_tests {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    // --- code frame and syntax theme (0.5.1) ---
+
+    /// The frame around a code block used to be left open on the right as soon
+    /// as the fence named a language: `┌─ rust ─────────` with no `┐`.
+    #[test]
+    fn the_code_frame_is_closed_and_square_whatever_the_label() {
+        for label in [
+            "code",
+            "rust",
+            "mermaid",
+            "",
+            "a-very-long-language-name-indeed",
+        ] {
+            let top = code_frame_top(label);
+            assert!(top.starts_with('┌'), "{:?}", top);
+            assert!(
+                top.ends_with('┐'),
+                "top edge left open for {:?}: {:?}",
+                label,
+                top
+            );
+            assert_eq!(
+                str_width(&top),
+                str_width(CODE_FRAME_BOTTOM),
+                "top and bottom edges must line up for {:?}: {:?}",
+                label,
+                top
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_language_still_appears_in_the_frame() {
+        assert!(code_frame_top("rust").contains("rust"));
+    }
+
+    /// `COLORFGBG` is `fg;bg`, sometimes with a middle field. The background is
+    /// the last one, as an ANSI palette index.
+    #[test]
+    fn the_terminal_background_is_read_from_colorfgbg() {
+        assert_eq!(terminal_background_is_light(Some("15;0")), Some(false));
+        assert_eq!(terminal_background_is_light(Some("0;15")), Some(true));
+        assert_eq!(
+            terminal_background_is_light(Some("15;default;0")),
+            Some(false)
+        );
+        assert_eq!(
+            terminal_background_is_light(Some("0;default;7")),
+            Some(true)
+        );
+        // Nothing usable: no answer, so the caller keeps its default.
+        assert_eq!(terminal_background_is_light(None), None);
+        assert_eq!(terminal_background_is_light(Some("")), None);
+        assert_eq!(terminal_background_is_light(Some("15;default")), None);
+        assert_eq!(terminal_background_is_light(Some("0;99")), None);
+    }
+
+    #[test]
+    fn an_explicit_theme_always_wins_over_the_terminal() {
+        use crate::core::Theme;
+        // A light terminal, overridden to dark, and the other way round.
+        assert_eq!(
+            syntax_theme_name(Theme::Dark, Some("0;15")),
+            "base16-ocean.dark"
+        );
+        assert_eq!(
+            syntax_theme_name(Theme::Light, Some("15;0")),
+            "InspiredGitHub"
+        );
+    }
+
+    #[test]
+    fn auto_follows_the_terminal_and_falls_back_to_dark() {
+        use crate::core::Theme;
+        assert_eq!(
+            syntax_theme_name(Theme::Auto, Some("0;15")),
+            "InspiredGitHub"
+        );
+        assert_eq!(
+            syntax_theme_name(Theme::Auto, Some("15;0")),
+            "base16-ocean.dark"
+        );
+        // A terminal that says nothing must not cost a query, and dark is the
+        // safe assumption for a pager.
+        assert_eq!(syntax_theme_name(Theme::Auto, None), "base16-ocean.dark");
+    }
+
+    /// Both theme names must exist in syntect's defaults, or highlighting would
+    /// silently fall back to an empty theme.
+    #[test]
+    fn both_themes_exist_in_syntect_defaults() {
+        let themes = syntect::highlighting::ThemeSet::load_defaults();
+        for name in ["base16-ocean.dark", "InspiredGitHub"] {
+            assert!(
+                themes.themes.contains_key(name),
+                "syntect has no theme {:?}; available: {:?}",
+                name,
+                themes.themes.keys().collect::<Vec<_>>()
+            );
+        }
     }
 
     // --- regressions found while writing the AST renderer ---

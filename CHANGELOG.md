@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The terminal backend picks its syntax-highlighting palette from the terminal
+  instead of always assuming a dark one. `0.5.0` hard-coded a dark theme, which
+  renders as pale grey on a light background — unreadable. `auto` reads
+  `COLORFGBG` and falls back to dark; `--theme dark|light`, or `theme "light"`
+  in the config file, overrides it.
+
+  `COLORFGBG` is the only signal available without asking the terminal and
+  waiting for an answer, which is exactly the two-second stall #58 removed.
+  Terminals that do not set it — Terminal.app and Alacritty among them — give no
+  answer, which is why the explicit setting exists rather than being a nicety.
+
+### Fixed
+
+- The frame around a code block is closed again. Naming a language left the box
+  open on the right (`┌─ rust ─────────` with no corner) while an unnamed block
+  and the bottom edge were closed. Both edges now come from one helper and are
+  the same width, so they cannot drift apart. This dates back well before the
+  terminal rewrite.
+
 ## [0.5.0] - 2026-09-07
 
 One change, and a large one: the terminal backend no longer has a Markdown
