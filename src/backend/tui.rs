@@ -1140,429 +1140,598 @@ fn document_needs_picker(content: &str) -> bool {
 }
 
 /// Convert markdown content to a mix of styled text lines and image references.
-fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
-    let mut items = Vec::new();
-    let mut in_code_block = false;
-    let mut in_table = false;
-    let mut in_mermaid_block = false;
-    let mut mermaid_source = String::new();
+/// Syntax highlighting assets, built once. `SyntaxSet` parsing is the expensive
+/// part, so it is shared across every code block of every reload.
+fn syntax_assets() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::Theme) {
+    use std::sync::OnceLock;
+    static ASSETS: OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::Theme)> =
+        OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let syntaxes = syntect::parsing::SyntaxSet::load_defaults_newlines();
+        let mut themes = syntect::highlighting::ThemeSet::load_defaults();
+        // A dark theme: terminals that matter here are overwhelmingly dark, and
+        // the previous rendering was a flat green on the same assumption.
+        let theme = themes
+            .themes
+            .remove("base16-ocean.dark")
+            .or_else(|| themes.themes.remove("Solarized (dark)"))
+            .unwrap_or_default();
+        (syntaxes, theme)
+    })
+}
 
-    for line in content.lines() {
-        if line.starts_with("```") {
-            if in_code_block {
-                if in_mermaid_block {
-                    // End of mermaid block: emit a MermaidRef instead of code lines
-                    in_mermaid_block = false;
-                    in_code_block = false;
-                    items.push(ParsedLine::MermaidRef {
-                        source: mermaid_source.clone(),
-                    });
-                    mermaid_source.clear();
-                } else {
-                    in_code_block = false;
-                    items.push(ParsedLine::Text(Line::from(Span::styled(
-                        "└─────────────────────────────────────────┘",
-                        Style::default().fg(Color::DarkGray),
-                    ))));
-                    items.push(ParsedLine::Text(Line::from("")));
-                }
-            } else {
-                in_code_block = true;
-                let code_lang = line.trim_start_matches('`').trim().to_string();
-                if code_lang == "mermaid" {
-                    in_mermaid_block = true;
-                    mermaid_source.clear();
-                } else {
-                    let header = if code_lang.is_empty() {
-                        "┌─ code ──────────────────────────────────┐".to_string()
-                    } else {
-                        format!(
-                            "┌─ {} {}",
-                            code_lang,
-                            "─".repeat(38usize.saturating_sub(code_lang.len()))
-                        )
-                    };
-                    items.push(ParsedLine::Text(Line::from(Span::styled(
-                        header,
-                        Style::default().fg(Color::DarkGray),
-                    ))));
-                }
-            }
-            continue;
-        }
-
-        if in_code_block {
-            if in_mermaid_block {
-                // Accumulate mermaid source lines
-                if !mermaid_source.is_empty() {
-                    mermaid_source.push('\n');
-                }
-                mermaid_source.push_str(line);
-            } else {
-                items.push(ParsedLine::Text(Line::from(Span::styled(
-                    format!("│ {}", line),
+/// Colour one code block, one `Vec<Span>` per source line (#59).
+///
+/// Falls back to a single uncoloured span per line when the language is unknown
+/// or highlighting fails, so an exotic fence never costs more than colour.
+fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
+    let plain = |code: &str| -> Vec<Vec<Span<'static>>> {
+        code.lines()
+            .map(|l| {
+                vec![Span::styled(
+                    l.to_string(),
                     Style::default().fg(Color::Green),
-                ))));
+                )]
+            })
+            .collect()
+    };
+
+    let (syntaxes, theme) = syntax_assets();
+    let Some(syntax) = syntaxes
+        .find_syntax_by_token(lang)
+        .or_else(|| syntaxes.find_syntax_by_extension(lang))
+    else {
+        return plain(code);
+    };
+
+    let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+    let mut out = Vec::new();
+    for line in code.lines() {
+        // `load_defaults_newlines` expects the newline to be present.
+        let with_newline = format!("{}\n", line);
+        match highlighter.highlight_line(&with_newline, syntaxes) {
+            Ok(ranges) => out.push(
+                ranges
+                    .into_iter()
+                    .map(|(style, text)| {
+                        let c = style.foreground;
+                        Span::styled(
+                            text.trim_end_matches('\n').to_string(),
+                            Style::default().fg(Color::Rgb(c.r, c.g, c.b)),
+                        )
+                    })
+                    .filter(|s| !s.content.is_empty())
+                    .collect(),
+            ),
+            Err(_) => return plain(code),
+        }
+    }
+    out
+}
+
+/// How deep inside lists and block quotes a block sits.
+#[derive(Clone, Copy, Default)]
+struct BlockCtx {
+    indent: usize,
+    quote: usize,
+    /// Inside a tight list, paragraphs must not be separated by a blank line —
+    /// that is what "tight" means in CommonMark.
+    tight: bool,
+}
+
+impl BlockCtx {
+    fn indented(self, by: usize) -> Self {
+        Self {
+            indent: self.indent + by,
+            ..self
+        }
+    }
+    fn quoted(self) -> Self {
+        Self {
+            quote: self.quote + 1,
+            ..self
+        }
+    }
+    fn tight(self, tight: bool) -> Self {
+        Self { tight, ..self }
+    }
+    /// The blanks and quote bars every line of this block starts with.
+    fn prefix(self) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        if self.indent > 0 {
+            spans.push(Span::raw(" ".repeat(self.indent)));
+        }
+        for _ in 0..self.quote {
+            spans.push(Span::styled("▎ ", Style::default().fg(Color::DarkGray)));
+        }
+        spans
+    }
+}
+
+/// Renders the comrak AST to terminal lines (#59).
+///
+/// The terminal output is derived from the very same parse the table of
+/// contents and the other two backends use, so the three cannot drift apart on
+/// what a heading, a list or a table is. That is what makes h5/h6, syntax
+/// highlighting, aligned tables and footnotes fall out rather than being four
+/// separate special cases.
+struct MdRenderer {
+    out: Vec<ParsedLine>,
+    /// Footnote definitions, rendered together at the end of the document as
+    /// the HTML backends do, whatever their position in the source.
+    footnotes: Vec<(String, Vec<ParsedLine>)>,
+}
+
+type AstNode<'a> = comrak::arena_tree::Node<'a, std::cell::RefCell<comrak::nodes::Ast>>;
+
+impl MdRenderer {
+    fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            footnotes: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, ctx: BlockCtx, mut spans: Vec<Span<'static>>) {
+        let mut line = ctx.prefix();
+        line.append(&mut spans);
+        self.out.push(ParsedLine::Text(Line::from(line)));
+    }
+
+    fn blank(&mut self) {
+        // Never open on a blank line, and never repeat one.
+        if matches!(self.out.last(), None | Some(ParsedLine::Text(_)))
+            && self.plain_last().is_some_and(|t| t.trim().is_empty())
+        {
+            return;
+        }
+        if self.out.is_empty() {
+            return;
+        }
+        self.out.push(ParsedLine::Text(Line::from("")));
+    }
+
+    fn plain_last(&self) -> Option<String> {
+        match self.out.last() {
+            Some(ParsedLine::Text(l)) => Some(l.spans.iter().map(|s| s.content.as_ref()).collect()),
+            _ => None,
+        }
+    }
+
+    fn children<'a>(&mut self, node: &'a AstNode<'a>, ctx: BlockCtx) {
+        for child in node.children() {
+            self.block(child, ctx);
+        }
+    }
+
+    fn block<'a>(&mut self, node: &'a AstNode<'a>, ctx: BlockCtx) {
+        use comrak::nodes::{ListType, NodeValue};
+
+        let value = node.data.borrow().value.clone();
+        match value {
+            NodeValue::Document => self.children(node, ctx),
+
+            NodeValue::FrontMatter(_) => {}
+
+            NodeValue::Heading(h) => {
+                let text: String = inline_text(node);
+                let spans = inlines(node, heading_style(h.level));
+                if h.level <= 2 {
+                    self.blank();
+                }
+                self.push(ctx, spans);
+                if let Some(rule) = heading_rule(h.level, &text) {
+                    self.push(ctx, vec![rule]);
+                }
+                self.blank();
             }
-            continue;
-        }
 
-        // Headings
-        if let Some(title) = line.strip_prefix("# ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                title.to_string(),
-                Style::default().fg(Color::Cyan).bold().underlined(),
-            ))));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                "═".repeat(title.len().min(60)),
-                Style::default().fg(Color::Cyan),
-            ))));
-            items.push(ParsedLine::Text(Line::from("")));
-            continue;
-        }
-        if let Some(title) = line.strip_prefix("## ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                title.to_string(),
-                Style::default().fg(Color::Blue).bold(),
-            ))));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                "─".repeat(title.len().min(50)),
-                Style::default().fg(Color::Blue),
-            ))));
-            items.push(ParsedLine::Text(Line::from("")));
-            continue;
-        }
-        if let Some(title) = line.strip_prefix("### ") {
-            items.push(ParsedLine::Text(Line::from("")));
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                title.to_string(),
-                Style::default().fg(Color::Yellow).bold(),
-            ))));
-            items.push(ParsedLine::Text(Line::from("")));
-            continue;
-        }
-        if let Some(title) = line.strip_prefix("#### ") {
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                title.to_string(),
-                Style::default().fg(Color::Magenta).bold(),
-            ))));
-            continue;
-        }
+            NodeValue::Paragraph => {
+                // A paragraph that is nothing but an image is the one case the
+                // terminal can draw as pixels.
+                if let Some(image) = lone_image(node) {
+                    self.out.push(image);
+                    return;
+                }
+                self.push(ctx, inlines(node, Style::default()));
+                if !ctx.tight {
+                    self.blank();
+                }
+            }
 
-        // Horizontal rule
-        if line.starts_with("---") || line.starts_with("***") || line.starts_with("___") {
-            items.push(ParsedLine::Text(Line::from(Span::styled(
-                "─".repeat(60),
-                Style::default().fg(Color::DarkGray),
-            ))));
-            continue;
-        }
+            NodeValue::BlockQuote => {
+                self.children(node, ctx.quoted());
+                self.blank();
+            }
 
-        // Table rows
-        if line.contains('|') && line.trim().starts_with('|') {
-            if line.contains("---") && !in_table {
-                in_table = true;
-                items.push(ParsedLine::Text(Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ))));
+            NodeValue::CodeBlock(code) => {
+                let lang = code
+                    .info
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if lang == "mermaid" {
+                    self.out.push(ParsedLine::MermaidRef {
+                        source: code.literal.trim_end().to_string(),
+                    });
+                    return;
+                }
+                let gutter = Style::default().fg(Color::DarkGray);
+                let header = if lang.is_empty() {
+                    "┌─ code ──────────────────────────────────┐".to_string()
+                } else {
+                    format!(
+                        "┌─ {} {}",
+                        lang,
+                        "─".repeat(38usize.saturating_sub(lang.len()))
+                    )
+                };
+                self.push(ctx, vec![Span::styled(header, gutter)]);
+                for mut spans in highlight_code(code.literal.trim_end_matches('\n'), &lang) {
+                    let mut line = vec![Span::styled("│ ", gutter)];
+                    line.append(&mut spans);
+                    self.push(ctx, line);
+                }
+                self.push(
+                    ctx,
+                    vec![Span::styled(
+                        "└─────────────────────────────────────────┘",
+                        gutter,
+                    )],
+                );
+                self.blank();
+            }
+
+            NodeValue::List(list) => {
+                self.children(node, ctx.tight(list.tight));
+                // `ctx` here is still the *enclosing* context: a list nested
+                // inside a tight one must not add breathing room of its own.
+                if !ctx.tight {
+                    self.blank();
+                }
+            }
+
+            NodeValue::Item(list) => {
+                let marker = match list.list_type {
+                    ListType::Bullet => "• ".to_string(),
+                    ListType::Ordered => format!("{}. ", list.start),
+                };
+                self.list_item(node, ctx, marker);
+            }
+
+            NodeValue::TaskItem(task) => {
+                let marker = if task.symbol.is_some() {
+                    "☑ "
+                } else {
+                    "☐ "
+                };
+                self.list_item(node, ctx, marker.to_string());
+            }
+
+            NodeValue::ThematicBreak => {
+                self.push(
+                    ctx,
+                    vec![Span::styled(
+                        "─".repeat(60),
+                        Style::default().fg(Color::DarkGray),
+                    )],
+                );
+                self.blank();
+            }
+
+            NodeValue::Table(table) => self.table(node, ctx, &table.alignments),
+
+            NodeValue::FootnoteDefinition(def) => {
+                let mut sub = MdRenderer::new();
+                sub.children(node, BlockCtx::default());
+                self.footnotes.push((def.name.clone(), sub.out));
+            }
+
+            NodeValue::HtmlBlock(html) => {
+                // Raw HTML has no terminal rendering; show it as dim text rather
+                // than dropping content the author wrote.
+                for line in html.literal.lines() {
+                    self.push(
+                        ctx,
+                        vec![Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        )],
+                    );
+                }
+                self.blank();
+            }
+
+            // Anything else that can hold blocks is walked through.
+            _ => self.children(node, ctx),
+        }
+    }
+
+    fn list_item<'a>(&mut self, node: &'a AstNode<'a>, ctx: BlockCtx, marker: String) {
+        let before = self.out.len();
+        self.children(node, ctx.indented(marker.chars().count()));
+        // The marker replaces the indent of the item's first line, so a wrapped
+        // continuation lines up under the text (see `continuation_prefix`).
+        if let Some(ParsedLine::Text(line)) = self.out.get_mut(before) {
+            let indent = ctx.indent;
+            let mut spans = std::mem::take(&mut line.spans);
+            if !spans.is_empty() && spans[0].content.chars().all(|c| c == ' ') {
+                spans.remove(0);
+            }
+            let mut prefixed = Vec::new();
+            if indent > 0 {
+                prefixed.push(Span::raw(" ".repeat(indent)));
+            }
+            prefixed.push(Span::styled(marker, Style::default().fg(Color::Cyan)));
+            prefixed.append(&mut spans);
+            *line = Line::from(prefixed);
+        }
+    }
+
+    fn table<'a>(
+        &mut self,
+        node: &'a AstNode<'a>,
+        ctx: BlockCtx,
+        alignments: &[comrak::nodes::TableAlignment],
+    ) {
+        use comrak::nodes::NodeValue;
+
+        // First pass: render every cell, and measure the columns (#59).
+        let mut rows: Vec<(bool, Vec<Vec<Span<'static>>>)> = Vec::new();
+        for row in node.children() {
+            let NodeValue::TableRow(is_header) = row.data.borrow().value else {
                 continue;
-            }
-            in_table = true;
-            let cells: Vec<&str> = line
-                .split('|')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.trim())
-                .collect();
-            let spans: Vec<Span> = cells
-                .iter()
-                .enumerate()
-                .flat_map(|(i, cell)| {
-                    let mut v = vec![];
-                    if i > 0 {
-                        v.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
-                    }
-                    v.push(Span::styled(
-                        cell.to_string(),
-                        Style::default().fg(Color::White),
-                    ));
-                    v
+            };
+            let cells: Vec<Vec<Span<'static>>> = row
+                .children()
+                .map(|cell| {
+                    let style = if is_header {
+                        Style::default().bold()
+                    } else {
+                        Style::default()
+                    };
+                    inlines(cell, style)
                 })
                 .collect();
-            items.push(ParsedLine::Text(Line::from(spans)));
-            continue;
-        } else {
-            in_table = false;
+            rows.push((is_header, cells));
+        }
+        if rows.is_empty() {
+            return;
         }
 
-        // Blockquote
-        if let Some(quoted) = line.strip_prefix("> ") {
-            items.push(ParsedLine::Text(Line::from(vec![
-                Span::styled("▎ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    quoted.to_string(),
-                    Style::default().fg(Color::Gray).italic(),
-                ),
-            ])));
-            continue;
+        let columns = rows.iter().map(|(_, c)| c.len()).max().unwrap_or(0);
+        let mut widths = vec![0usize; columns];
+        for (_, cells) in &rows {
+            for (i, cell) in cells.iter().enumerate() {
+                let w: usize = cell.iter().map(|s| s.width()).sum();
+                widths[i] = widths[i].max(w);
+            }
         }
 
-        // Task list
-        if line.trim_start().starts_with("- [x] ") {
-            let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled("☑ ", Style::default().fg(Color::Green)),
-                Span::styled(
-                    line.trim_start()[6..].to_string(),
+        let sep = Style::default().fg(Color::DarkGray);
+        for (index, (is_header, cells)) in rows.iter().enumerate() {
+            let mut line: Vec<Span<'static>> = Vec::new();
+            for (col, width) in widths.iter().enumerate() {
+                if col > 0 {
+                    line.push(Span::styled(" │ ", sep));
+                }
+                let empty = Vec::new();
+                let cell = cells.get(col).unwrap_or(&empty);
+                let used: usize = cell.iter().map(|s| s.width()).sum();
+                let pad = width.saturating_sub(used);
+                let align = alignments
+                    .get(col)
+                    .copied()
+                    .unwrap_or(comrak::nodes::TableAlignment::None);
+                let (left, right) = match align {
+                    comrak::nodes::TableAlignment::Right => (pad, 0),
+                    comrak::nodes::TableAlignment::Center => (pad / 2, pad - pad / 2),
+                    _ => (0, pad),
+                };
+                if left > 0 {
+                    line.push(Span::raw(" ".repeat(left)));
+                }
+                line.extend(cell.iter().cloned());
+                if right > 0 {
+                    line.push(Span::raw(" ".repeat(right)));
+                }
+            }
+            self.push(ctx, line);
+
+            if *is_header || (index == 0 && rows.len() > 1) {
+                let rule: Vec<Span<'static>> = (0..columns)
+                    .map(|col| {
+                        let mut s = String::new();
+                        if col > 0 {
+                            s.push_str("─┼─");
+                        }
+                        s.push_str(&"─".repeat(widths[col]));
+                        Span::styled(s, sep)
+                    })
+                    .collect();
+                self.push(ctx, rule);
+            }
+        }
+        self.blank();
+    }
+
+    fn finish(mut self) -> Vec<ParsedLine> {
+        if !self.footnotes.is_empty() {
+            let notes = std::mem::take(&mut self.footnotes);
+            self.blank();
+            self.push(
+                BlockCtx::default(),
+                vec![Span::styled(
+                    "─".repeat(20),
                     Style::default().fg(Color::DarkGray),
-                ),
-            ])));
-            continue;
-        }
-        if line.trim_start().starts_with("- [ ] ") {
-            let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled("☐ ", Style::default().fg(Color::Yellow)),
-                Span::styled(line.trim_start()[6..].to_string(), Style::default()),
-            ])));
-            continue;
-        }
-
-        // Unordered list
-        if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
-            let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled("• ", Style::default().fg(Color::Cyan)),
-                Span::styled(line.trim_start()[2..].to_string(), Style::default()),
-            ])));
-            continue;
-        }
-
-        // Ordered list
-        if let Some(rest) = try_parse_ordered_list(line) {
-            let indent = line.len() - line.trim_start().len();
-            items.push(ParsedLine::Text(Line::from(vec![
-                Span::raw(" ".repeat(indent)),
-                Span::styled(rest.0.clone(), Style::default().fg(Color::Cyan)),
-                Span::styled(rest.1.clone(), Style::default()),
-            ])));
-            continue;
-        }
-
-        // Image: ![alt](url) on its own line
-        if line.trim_start().starts_with("![") {
-            if let Some((alt, url)) = extract_image_alt_and_url(line) {
-                items.push(ParsedLine::ImageRef { alt, url });
-                continue;
+                )],
+            );
+            for (name, body) in notes {
+                let mut body = body.into_iter();
+                if let Some(ParsedLine::Text(first)) = body.next() {
+                    let mut spans = vec![Span::styled(
+                        format!("[{}] ", name),
+                        Style::default().fg(Color::Yellow).bold(),
+                    )];
+                    spans.extend(first.spans);
+                    self.out.push(ParsedLine::Text(Line::from(spans)));
+                }
+                self.out.extend(body);
             }
         }
-
-        // Regular text with inline formatting
-        items.push(ParsedLine::Text(parse_inline_formatting(line)));
-    }
-
-    items
-}
-
-/// Extract alt text and URL from a markdown image line: ![alt](url)
-fn extract_image_alt_and_url(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim();
-    let start = trimmed.find("![")?;
-    let rest = &trimmed[start + 2..];
-    let bracket_end = rest.find("](")?;
-    let alt = rest[..bracket_end].to_string();
-    let after_bracket = &rest[bracket_end + 2..];
-    let paren_end = after_bracket.find(')')?;
-    let url = after_bracket[..paren_end].to_string();
-    Some((alt, url))
-}
-
-/// Try to parse an ordered list item, returns (number prefix, text)
-fn try_parse_ordered_list(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim_start();
-    let dot_pos = trimmed.find(". ")?;
-    let num_part = &trimmed[..dot_pos];
-    if num_part.chars().all(|c| c.is_ascii_digit()) && !num_part.is_empty() {
-        let text = trimmed[dot_pos + 2..].to_string();
-        Some((format!("{}. ", num_part), text))
-    } else {
-        None
+        // Never end on padding.
+        while matches!(self.plain_last(), Some(t) if t.trim().is_empty()) {
+            self.out.pop();
+        }
+        self.out
     }
 }
 
-/// Parse inline markdown formatting (bold, italic, code, strikethrough, links)
-fn parse_inline_formatting(line: &str) -> Line<'static> {
+fn heading_style(level: u8) -> Style {
+    let base = Style::default().bold();
+    match level {
+        1 => base.fg(Color::Cyan).underlined(),
+        2 => base.fg(Color::Blue),
+        3 => base.fg(Color::Yellow),
+        4 => base.fg(Color::Magenta),
+        5 => base.fg(Color::Green),
+        _ => base.fg(Color::Gray),
+    }
+}
+
+/// The rule drawn under a heading, for the two levels that get one.
+fn heading_rule(level: u8, text: &str) -> Option<Span<'static>> {
+    let width = str_width(text);
+    match level {
+        1 => Some(Span::styled(
+            "═".repeat(width.min(60)),
+            Style::default().fg(Color::Cyan),
+        )),
+        2 => Some(Span::styled(
+            "─".repeat(width.min(50)),
+            Style::default().fg(Color::Blue),
+        )),
+        _ => None,
+    }
+}
+
+/// The image of a paragraph that holds nothing else — the only shape the
+/// terminal can draw as pixels. Anything else stays text.
+fn lone_image<'a>(paragraph: &'a AstNode<'a>) -> Option<ParsedLine> {
+    use comrak::nodes::NodeValue;
+    let mut image = None;
+    for child in paragraph.children() {
+        match &child.data.borrow().value {
+            NodeValue::Image(link) => {
+                if image.is_some() {
+                    return None;
+                }
+                image = Some((inline_text(child), link.url.clone()));
+            }
+            NodeValue::Text(t) if t.trim().is_empty() => {}
+            NodeValue::SoftBreak => {}
+            _ => return None,
+        }
+    }
+    image.map(|(alt, url)| ParsedLine::ImageRef { alt, url })
+}
+
+/// The plain text of a node's inline content.
+fn inline_text<'a>(node: &'a AstNode<'a>) -> String {
+    use comrak::nodes::NodeValue;
+    let mut out = String::new();
+    for child in node.descendants() {
+        match &child.data.borrow().value {
+            NodeValue::Text(t) => out.push_str(t),
+            NodeValue::Code(c) => out.push_str(&c.literal),
+            NodeValue::SoftBreak | NodeValue::LineBreak => out.push(' '),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Render the inline children of `node` as styled spans.
+fn inlines<'a>(node: &'a AstNode<'a>, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    let mut chars = line.chars().peekable();
-    let mut current = String::new();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '`' => {
-                if !current.is_empty() {
-                    spans.push(Span::raw(current.clone()));
-                    current.clear();
-                }
-                let mut code = String::new();
-                for c in chars.by_ref() {
-                    if c == '`' {
-                        break;
-                    }
-                    code.push(c);
-                }
-                spans.push(Span::styled(
-                    code,
-                    Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30)),
-                ));
-            }
-            '*' if chars.peek() == Some(&'*') => {
-                chars.next();
-                if !current.is_empty() {
-                    spans.push(Span::raw(current.clone()));
-                    current.clear();
-                }
-                let mut bold = String::new();
-                while let Some(c) = chars.next() {
-                    if c == '*' && chars.peek() == Some(&'*') {
-                        chars.next();
-                        break;
-                    }
-                    bold.push(c);
-                }
-                spans.push(Span::styled(bold, Style::default().bold()));
-            }
-            '*' | '_' => {
-                if !current.is_empty() {
-                    spans.push(Span::raw(current.clone()));
-                    current.clear();
-                }
-                let mut italic = String::new();
-                for ch in chars.by_ref() {
-                    if ch == c {
-                        break;
-                    }
-                    italic.push(ch);
-                }
-                spans.push(Span::styled(italic, Style::default().italic()));
-            }
-            '~' if chars.peek() == Some(&'~') => {
-                chars.next();
-                if !current.is_empty() {
-                    spans.push(Span::raw(current.clone()));
-                    current.clear();
-                }
-                let mut strike = String::new();
-                while let Some(c) = chars.next() {
-                    if c == '~' && chars.peek() == Some(&'~') {
-                        chars.next();
-                        break;
-                    }
-                    strike.push(c);
-                }
-                spans.push(Span::styled(
-                    strike,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::CROSSED_OUT),
-                ));
-            }
-            '!' if chars.peek() == Some(&'[') => {
-                // Image: ![alt](url)
-                chars.next(); // consume '['
-                let mut alt = String::new();
-                let mut found_close = false;
-                for ch in chars.by_ref() {
-                    if ch == ']' {
-                        found_close = true;
-                        break;
-                    }
-                    alt.push(ch);
-                }
-                if found_close && chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut _url = String::new();
-                    for ch in chars.by_ref() {
-                        if ch == ')' {
-                            break;
-                        }
-                        _url.push(ch);
-                    }
-                    if !current.is_empty() {
-                        spans.push(Span::raw(current.clone()));
-                        current.clear();
-                    }
-                    let label = if alt.is_empty() {
-                        "image".to_string()
-                    } else {
-                        alt
-                    };
-                    spans.push(Span::styled(
-                        format!("[Image: {}]", label),
-                        Style::default().fg(Color::Magenta).italic(),
-                    ));
-                } else {
-                    current.push('!');
-                    current.push('[');
-                    current.push_str(&alt);
-                    if found_close {
-                        current.push(']');
-                    }
-                }
-            }
-            '[' => {
-                // Link: [text](url)
-                let mut text = String::new();
-                let mut found_close = false;
-                for ch in chars.by_ref() {
-                    if ch == ']' {
-                        found_close = true;
-                        break;
-                    }
-                    text.push(ch);
-                }
-                if found_close && chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut _url = String::new();
-                    for ch in chars.by_ref() {
-                        if ch == ')' {
-                            break;
-                        }
-                        _url.push(ch);
-                    }
-                    if !current.is_empty() {
-                        spans.push(Span::raw(current.clone()));
-                        current.clear();
-                    }
-                    spans.push(Span::styled(
-                        text,
-                        Style::default().fg(Color::Blue).underlined(),
-                    ));
-                } else {
-                    current.push('[');
-                    current.push_str(&text);
-                    if found_close {
-                        current.push(']');
-                    }
-                }
-            }
-            _ => current.push(c),
-        }
+    for child in node.children() {
+        inline_into(child, base, &mut spans);
     }
-
-    if !current.is_empty() {
-        spans.push(Span::raw(current));
-    }
-
     if spans.is_empty() {
-        Line::from("")
-    } else {
-        Line::from(spans)
+        spans.push(Span::styled(String::new(), base));
     }
+    spans
+}
+
+fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'static>>) {
+    use comrak::nodes::NodeValue;
+    let value = node.data.borrow().value.clone();
+    match value {
+        NodeValue::Text(text) => out.push(Span::styled(text.to_string(), style)),
+        NodeValue::Code(code) => out.push(Span::styled(
+            code.literal.clone(),
+            style.fg(Color::Green).bg(Color::Rgb(40, 40, 40)),
+        )),
+        NodeValue::Emph => descend(node, style.italic(), out),
+        NodeValue::Strong => descend(node, style.bold(), out),
+        NodeValue::Strikethrough => descend(node, style.crossed_out(), out),
+        NodeValue::Underline => descend(node, style.underlined(), out),
+        NodeValue::SoftBreak | NodeValue::LineBreak => out.push(Span::styled(" ", style)),
+        NodeValue::Link(_) => descend(node, style.fg(Color::Blue).underlined(), out),
+        NodeValue::Image(link) => {
+            // An image sharing a paragraph with text cannot be drawn as pixels,
+            // so it is named instead of dropped.
+            let alt = inline_text(node);
+            let label = if alt.is_empty() {
+                link.url.clone()
+            } else {
+                alt
+            };
+            out.push(Span::styled(
+                format!("[{}]", label),
+                style.fg(Color::Magenta).italic(),
+            ));
+        }
+        NodeValue::FootnoteReference(fr) => out.push(Span::styled(
+            format!("[{}]", fr.name),
+            style.fg(Color::Yellow),
+        )),
+        NodeValue::HtmlInline(html) => {
+            out.push(Span::styled(html.clone(), style.fg(Color::DarkGray)))
+        }
+        NodeValue::Escaped => descend(node, style, out),
+        _ => descend(node, style, out),
+    }
+}
+
+fn descend<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'static>>) {
+    for child in node.children() {
+        inline_into(child, style, out);
+    }
+}
+
+/// Parse `content` and render it to terminal lines.
+///
+/// Uses exactly the comrak options `core::toc` and `core::markdown` use, so the
+/// terminal, the table of contents and the two graphical backends agree on the
+/// structure of the document (#59).
+fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
+    use comrak::{parse_document, Arena, Options};
+
+    let arena = Arena::new();
+    let mut options = Options::default();
+    options.extension.strikethrough = true;
+    options.extension.table = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+    options.extension.front_matter_delimiter = Some("---".to_string());
+
+    let root = parse_document(&arena, content, &options);
+    let mut renderer = MdRenderer::new();
+    renderer.block(root, BlockCtx::default());
+    renderer.finish()
 }
 
 #[cfg(test)]
@@ -2000,5 +2169,214 @@ mod tests {
             .iter()
             .any(|e| matches!(e, ContentElement::TextLine(_)));
         assert!(has_text, "Mermaid fallback should produce text lines");
+    }
+}
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::*;
+
+    /// The plain text of every rendered line, in order.
+    fn rendered(md: &str) -> Vec<String> {
+        markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every distinct foreground colour used across the rendered lines.
+    fn colours(md: &str) -> std::collections::BTreeSet<String> {
+        markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => Some(line),
+                _ => None,
+            })
+            .flat_map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| format!("{:?}", s.style.fg))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    // --- regressions found while writing the AST renderer ---
+
+    /// CommonMark "tight" vs "loose": a list written without blank lines
+    /// between its items must not gain any, and one written with them must
+    /// keep them. Both directions broke at different points of the rewrite.
+    #[test]
+    fn a_tight_list_does_not_breathe_and_a_loose_one_does() {
+        let tight = rendered("- un\n- deux\n- trois\n");
+        let blanks = tight.iter().filter(|l| l.trim().is_empty()).count();
+        assert_eq!(
+            blanks, 0,
+            "a tight list must not gain blank lines: {:?}",
+            tight
+        );
+
+        let loose = rendered("- un\n\n- deux\n\n- trois\n");
+        let blanks = loose.iter().filter(|l| l.trim().is_empty()).count();
+        assert!(
+            blanks >= 2,
+            "a loose list must keep its spacing: {:?}",
+            loose
+        );
+    }
+
+    /// A list nested inside a tight list must not add spacing of its own.
+    #[test]
+    fn a_nested_list_inside_a_tight_list_stays_tight() {
+        let lines = rendered("- un\n- deux\n  - imbriqué\n- trois\n");
+        assert!(
+            !lines.iter().any(|l| l.trim().is_empty()),
+            "no blank line belongs inside a tight list: {:?}",
+            lines
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("  ") && l.contains("imbriqué")),
+            "the nested item must keep its indent: {:?}",
+            lines
+        );
+    }
+
+    /// `find_heading_row` scrolls the TOC by looking for the entry's text
+    /// inside a rendered line. If the renderer ever decorated headings in a way
+    /// that broke that `contains`, TOC navigation would silently stop working.
+    #[test]
+    fn every_toc_entry_can_still_be_found_in_the_rendered_lines() {
+        let md = "# Un\n\ntexte\n\n## Deux trois\n\ntexte\n\n##### Cinq\n\ntexte\n";
+        let lines = rendered(md);
+        for entry in crate::core::toc::extract_toc(md) {
+            assert!(
+                lines.iter().any(|l| l.contains(&entry.text)),
+                "TOC entry {:?} has no rendered line containing it: {:?}",
+                entry.text,
+                lines
+            );
+        }
+    }
+
+    /// Inline markup must not reach the screen as raw syntax.
+    #[test]
+    fn inline_markup_is_styled_not_printed() {
+        let lines = rendered("A **b** *c* ~~d~~ `e` [f](http://x) end\n");
+        let joined = lines.join(" ");
+        for raw in ["**", "~~", "`", "](", "http://x"] {
+            assert!(
+                !joined.contains(raw),
+                "raw {:?} reached the screen: {:?}",
+                raw,
+                joined
+            );
+        }
+        for word in ["b", "c", "d", "e", "f", "end"] {
+            assert!(
+                joined.contains(word),
+                "{:?} was dropped: {:?}",
+                word,
+                joined
+            );
+        }
+    }
+
+    /// Column alignment markers are honoured, not just the width.
+    #[test]
+    fn table_alignment_markers_are_honoured() {
+        let md = "| l | c | r |\n|:--|:-:|--:|\n| x | x | x |\n";
+        let body = rendered(md)
+            .into_iter()
+            .find(|l| l.matches('x').count() == 3)
+            .expect("body row");
+        let cells: Vec<&str> = body.split('│').collect();
+        assert_eq!(cells.len(), 3, "expected three cells: {:?}", body);
+        assert!(cells[0].starts_with('x'), "left column: {:?}", cells[0]);
+        assert!(
+            cells[2].trim_start().ends_with('x'),
+            "right column: {:?}",
+            cells[2]
+        );
+    }
+
+    // #59, symptom 1: headings deeper than #### are printed raw.
+    #[test]
+    fn h5_and_h6_are_rendered_as_headings_not_raw_text() {
+        for (md, title) in [("##### Deep\n", "Deep"), ("###### Deeper\n", "Deeper")] {
+            let lines = rendered(md);
+            assert!(
+                lines.iter().any(|l| l.trim() == title),
+                "expected a line holding just {:?}, got {:?}",
+                title,
+                lines
+            );
+            assert!(
+                !lines.iter().any(|l| l.contains('#')),
+                "the hashes must not reach the screen, got {:?}",
+                lines
+            );
+        }
+    }
+
+    // #59, symptom 2: code blocks have no syntax highlighting.
+    #[test]
+    fn a_code_block_is_syntax_highlighted() {
+        let md = "```rust\nfn main() { let x: u32 = 1; }\n```\n";
+        let used = colours(md);
+        assert!(
+            used.len() > 3,
+            "a highlighted Rust block should use more than a couple of colours, got {:?}",
+            used
+        );
+    }
+
+    // #59, symptom 3: table cells are not aligned on column width.
+    #[test]
+    fn table_cells_are_padded_to_the_column_width() {
+        let md = "| a | long header |\n|---|---|\n| 1 | 2 |\n";
+        let lines: Vec<String> = rendered(md)
+            .into_iter()
+            .filter(|l| l.contains('1') || l.contains("long header"))
+            .collect();
+        assert!(
+            lines.len() >= 2,
+            "expected header and body rows, got {:?}",
+            lines
+        );
+        // Deliberately not trimmed: the trailing padding *is* the alignment.
+        let widths: std::collections::BTreeSet<usize> =
+            lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(
+            widths.len(),
+            1,
+            "every row of a table must be the same width once padded, got {:?}",
+            lines
+        );
+    }
+
+    // #59, symptom 4: footnotes are not rendered — the raw `[^1]` and `[^1]:`
+    // markers reach the screen instead of being turned into a reference and a
+    // note section.
+    #[test]
+    fn footnotes_are_rendered() {
+        let md = "Some text[^1].\n\n[^1]: The note itself.\n";
+        let lines = rendered(md);
+        assert!(
+            lines.iter().any(|l| l.contains("The note itself")),
+            "the footnote body must appear, got {:?}",
+            lines
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("[^1]")),
+            "the raw footnote syntax must not reach the screen, got {:?}",
+            lines
+        );
     }
 }
