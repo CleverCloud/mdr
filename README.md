@@ -173,7 +173,10 @@ the theme follows `prefers-color-scheme`.
 ## Features
 
 - **Full GFM support** — tables, task lists, strikethrough, footnotes, autolinks
-- **Syntax highlighting** — code blocks with language detection (via syntect)
+- **One parser for every backend** — the terminal output is derived from the
+  same comrak parse as the HTML, so the three backends cannot disagree on the
+  structure of a document
+- **Syntax highlighting** — code blocks with language detection (via syntect), in the terminal too
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts, and more (via mermaid-rs-renderer)
 - **Table of Contents** — auto-generated sidebar from headings with click-to-navigate
 - **Live reload** — file watching with 300ms debounce, updates on save

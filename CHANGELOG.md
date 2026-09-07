@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The terminal backend renders from the comrak AST** instead of its own
+  line-based parser (#59). The parser recognised fifteen hard-coded prefixes,
+  which is why `##### Title` printed its hashes, code blocks were a flat green,
+  table cells were not aligned and footnotes never appeared: four symptoms of
+  one cause. Deriving the output from the same parse the table of contents and
+  the two graphical backends use removes the class of difference rather than
+  the four cases.
+
+  What that brings, beyond the four reported symptoms: `h5`/`h6`, real syntax
+  highlighting (syntect, already built as part of comrak and now used
+  directly), tables padded per column and honouring `:---`/`:---:`/`---:`,
+  footnotes collected at the end, inline emphasis, bold, strikethrough, inline
+  code and links styled rather than printed as raw markup, nested lists, task
+  items, ordered lists and nested block quotes.
+
+  Tight and loose lists are now distinguished as CommonMark defines them: a
+  list written without blank lines between its items no longer gains any.
+
 ## [0.4.0] - 2026-09-04
 
 Keyboard, images, safety and packaging. Every backend is now fully

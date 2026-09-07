@@ -43,6 +43,7 @@ tui-backend = [
   "image/jpeg",
   "image/gif",
   "image/webp",
+  "dep:syntect",
 ]
 
 [dependencies]
@@ -83,6 +84,14 @@ ratatui-image = { version = "11.0", default-features = false, features = [
   "crossterm",
 ], optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Already built as part of comrak's `syntect` feature; declared directly so the
+# terminal backend can colour code blocks itself (#59).
+syntect = { version = "5", default-features = false, features = [
+  "default-syntaxes",
+  "default-themes",
+  "regex-onig",
+  "parsing",
+], optional = true }
 ureq = { version = "3", optional = true }
 
 [dev-dependencies]

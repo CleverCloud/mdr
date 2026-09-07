@@ -3466,6 +3466,7 @@ dependencies = [
  "regex",
  "resvg 0.47.0",
  "serde_json",
+ "syntect",
  "tao",
  "tempfile",
  "tiny-skia 0.12.0",
