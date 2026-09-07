@@ -77,12 +77,27 @@ mod tests {
     }
 
     #[test]
+    fn load_parses_theme() {
+        let path = tmp_config("theme_light", "theme \"light\"\n");
+        assert_eq!(load(&path).unwrap().theme.as_deref(), Some("light"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unknown_theme_is_refused_rather_than_stored() {
+        let path = tmp_config("theme_bogus", "theme \"neon\"\n");
+        assert_eq!(load(&path).unwrap().theme, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn load_returns_defaults_for_missing_file() {
         let path = PathBuf::from("/nonexistent/mdr_no_such_config.kdl");
         let cfg = load(&path).unwrap();
         assert!(cfg.backend.is_none());
         assert!(cfg.verbose.is_none());
         assert!(cfg.offline.is_none());
+        assert!(cfg.theme.is_none());
     }
 
     #[test]
@@ -95,6 +110,7 @@ mod tests {
         kdl::KdlDocument::parse_v2(&content).expect("written config must be valid KDL v2");
         assert!(content.contains("backend webview"));
         assert!(content.contains("offline"));
+        assert!(content.contains("theme"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -112,6 +128,8 @@ pub struct Config {
     pub backend: Option<String>,
     pub verbose: Option<bool>,
     pub offline: Option<bool>,
+    /// Colour scheme to assume: `auto`, `dark` or `light`.
+    pub theme: Option<String>,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -125,6 +143,10 @@ backend webview
 
 // Uncomment to never access the network (remote images are not downloaded)
 // offline #true
+
+// Colour scheme the terminal backend assumes for syntax highlighting:
+// auto (read COLORFGBG, fall back to dark), dark, or light
+// theme \"auto\"
 ";
 
 /// Returns the default config file path: `~/.config/mdr/config.kdl`.
@@ -175,6 +197,18 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
                     Some(kdl::KdlValue::Bool(b)) => *b,
                     _ => true,
                 });
+            }
+            "theme" => {
+                if let Some(kdl::KdlValue::String(s)) = node.get(0) {
+                    if crate::core::Theme::parse(s).is_some() {
+                        cfg.theme = Some(s.clone());
+                    } else {
+                        eprintln!(
+                            "mdr: unknown theme '{}', expected 'auto', 'dark' or 'light'",
+                            s
+                        );
+                    }
+                }
             }
             "offline" => {
                 cfg.offline = Some(match node.get(0) {

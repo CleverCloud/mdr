@@ -20,7 +20,7 @@ pub mod slug;
 pub mod toc;
 pub mod watcher;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
@@ -42,6 +42,51 @@ pub fn set_offline(v: bool) {
 #[cfg(any(feature = "egui-backend", feature = "webview-backend"))]
 pub fn offline() -> bool {
     OFFLINE.load(Ordering::Relaxed)
+}
+
+/// Which colour scheme the rendering should assume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    /// Work it out from the environment, and fall back to dark.
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Theme::Auto),
+            "dark" => Some(Theme::Dark),
+            "light" => Some(Theme::Light),
+            _ => None,
+        }
+    }
+}
+
+static THEME: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_theme(theme: Theme) {
+    THEME.store(
+        match theme {
+            Theme::Auto => 0,
+            Theme::Dark => 1,
+            Theme::Light => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Read back by the terminal backend, which is the only one that has to pick a
+/// palette itself; the two graphical backends follow the system colour scheme.
+#[cfg(feature = "tui-backend")]
+pub fn theme() -> Theme {
+    match THEME.load(Ordering::Relaxed) {
+        1 => Theme::Dark,
+        2 => Theme::Light,
+        _ => Theme::Auto,
+    }
 }
 
 /// Log a message if verbose mode is enabled.

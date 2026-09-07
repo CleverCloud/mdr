@@ -29,6 +29,10 @@ struct Cli {
     #[arg(long)]
     offline: bool,
 
+    /// Colour scheme to assume for syntax highlighting in the terminal backend
+    #[arg(long, value_name = "THEME", value_parser = parse_theme)]
+    theme: Option<String>,
+
     /// Path to config file [default: ~/.config/mdr/config.kdl]
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
@@ -64,6 +68,16 @@ fn print_backends() {
         status(cfg!(feature = "tui-backend"))
     );
     eprintln!("  auto      Auto-detect best available (default)");
+}
+
+fn parse_theme(s: &str) -> Result<String, String> {
+    match core::Theme::parse(s) {
+        Some(_) => Ok(s.to_string()),
+        None => Err(format!(
+            "unknown theme '{}', expected 'auto', 'dark' or 'light'",
+            s
+        )),
+    }
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
@@ -294,6 +308,13 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 
     core::set_verbose(cli.verbose || cfg.verbose.unwrap_or(false));
     core::set_offline(cli.offline || cfg.offline.unwrap_or(false));
+    core::set_theme(
+        cli.theme
+            .as_deref()
+            .or(cfg.theme.as_deref())
+            .and_then(core::Theme::parse)
+            .unwrap_or_default(),
+    );
 
     let from_stdin = |tmp_file: &mut Option<PathBuf>| match read_stdin_to_tmpfile() {
         Ok(path) => {
@@ -386,6 +407,17 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_parses_and_validates_the_theme_flag() {
+        let cli = Cli::try_parse_from(["mdr", "--theme", "light", "f.md"]).unwrap();
+        assert_eq!(cli.theme.as_deref(), Some("light"));
+        assert!(Cli::try_parse_from(["mdr", "--theme", "neon", "f.md"]).is_err());
+        assert!(Cli::try_parse_from(["mdr", "f.md"])
+            .unwrap()
+            .theme
+            .is_none());
+    }
 
     #[test]
     fn cli_parses_offline_flag() {

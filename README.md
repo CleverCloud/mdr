@@ -110,6 +110,9 @@ mdr --backend tui README.md
 # Never touch the network (remote images are left unresolved)
 mdr --offline README.md
 
+# Force the palette used to highlight code in the terminal
+mdr --theme light README.md
+
 # Show help
 mdr --help
 ```
@@ -176,7 +179,11 @@ the theme follows `prefers-color-scheme`.
 - **One parser for every backend** — the terminal output is derived from the
   same comrak parse as the HTML, so the three backends cannot disagree on the
   structure of a document
-- **Syntax highlighting** — code blocks with language detection (via syntect), in the terminal too
+- **Syntax highlighting** — code blocks with language detection (via syntect), in
+  the terminal too. The palette follows the terminal background when it says what
+  it is (`COLORFGBG`), and falls back to a dark one; `--theme dark|light` or
+  `theme "light"` in the config file settles it when the terminal stays silent —
+  Terminal.app and Alacritty do.
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts, and more (via mermaid-rs-renderer)
 - **Table of Contents** — auto-generated sidebar from headings with click-to-navigate
 - **Live reload** — file watching with 300ms debounce, updates on save
