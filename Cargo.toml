@@ -102,6 +102,12 @@ libc = "0.2"
 
 [package.metadata.deb]
 section = "text"
+# cargo-deb always writes /usr/share/doc/mdr/copyright, but it only copies the
+# licence text in when a `license-file` names it: it does not pick up a LICENSE
+# sitting at the root of the crate. Without this the file holds the metadata
+# alone. "0" is the number of header lines to skip in LICENSE — it starts on the
+# licence itself.
+license-file = ["LICENSE", "0"]
 # `$auto` covers everything the binary links directly (GTK 3, WebKitGTK, libxdo,
 # glib…). libGL/libEGL are opened with dlopen() at runtime by x11-dl and
 # khronos-egl, so `ldd` cannot see them and they must be listed by hand.
@@ -128,6 +134,11 @@ assets = [
   { source = "assets/logo-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/mdr.png", mode = "0644" },
   { source = "assets/mdr.1", dest = "/usr/share/man/man1/mdr.1", mode = "0644", doc = true },
   { source = "README.md", dest = "/usr/share/doc/mdr/README.md", mode = "0644", doc = true },
+  # cargo-generate-rpm installs the assets listed here and nothing else, so the
+  # licence needs its own entry. It is deliberately not marked `doc = true`:
+  # the crate cannot emit RPM's %license marker, and %doc files are the ones
+  # `rpm --excludedocs` drops — which is exactly what a licence must never be.
+  { source = "LICENSE", dest = "/usr/share/licenses/mdr/LICENSE", mode = "0644" },
 ]
 # auto-req is left at its default ("auto"), which detects the shared libraries
 # the binary links against — that is where `libxdo.so.3()(64bit)`,

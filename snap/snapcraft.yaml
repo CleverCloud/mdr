@@ -7,6 +7,7 @@ description: |
   live reload, and multiple rendering backends (egui, webview, TUI).
 grade: stable
 confinement: strict
+license: MIT
 
 apps:
   mdr-markdown-renderer:
@@ -47,3 +48,8 @@ parts:
     override-pull: |
       craftctl default
       craftctl set version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+    # `license: MIT` above is only the SPDX expression in the snap metadata, and
+    # the rust plugin stages the binary alone, so the text is installed by hand.
+    override-build: |
+      craftctl default
+      install -Dm644 LICENSE "$CRAFT_PART_INSTALL/usr/share/licenses/mdr/LICENSE"

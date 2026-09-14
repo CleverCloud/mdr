@@ -60,17 +60,22 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      # LICENSE travels with the binary: the archives are what Homebrew, Scoop,
+      # Chocolatey and the AUR package all download, and the AUR `package()`
+      # installs it from ${srcdir}.
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
+          cp LICENSE target/${{ matrix.target }}/release/
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.archive }} ${{ matrix.binary }}
+          tar czf ../../../${{ matrix.archive }} ${{ matrix.binary }} LICENSE
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.archive }}"
+          Copy-Item LICENSE "target/${{ matrix.target }}/release/"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}", "target/${{ matrix.target }}/release/LICENSE" -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -327,6 +332,9 @@ jobs:
 
           package() {
             install -Dm755 "${srcdir}/mdr" "${pkgdir}/usr/bin/mdr"
+            # MIT is not in /usr/share/licenses/common, so Arch requires the
+            # text to be installed with the package.
+            install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
           }
           PKGEOF
 
