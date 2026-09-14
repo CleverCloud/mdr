@@ -39,7 +39,7 @@ struct Cli {
     #[arg(short, long, value_name = "BACKEND", value_parser = parse_backend)]
     set_default_backend: Option<String>,
 
-    /// Colour scheme the terminal backend highlights code with: auto, dark, light
+    /// Colour scheme to render with: auto, dark, light
     #[arg(short, long, value_name = "THEME", value_parser = parse_theme)]
     theme: Option<String>,
 

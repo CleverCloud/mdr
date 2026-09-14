@@ -494,6 +494,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                        KeyCode::Char('t') if is_theme_toggle(key.code, key.modifiers) => {
+                            // The terminal owns its background, so a theme here
+                            // is the colours code blocks are highlighted in.
+                            // They are baked into the spans when the document
+                            // is built, so the flip has to rebuild it.
+                            toggle_syntax_theme();
+                            rebuild_rendered(&mut app);
+                        }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.should_quit = true;
                         }
@@ -802,8 +810,7 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             app.search_matches.len()
         )
     } else {
-        " q: quit | Tab: switch focus | j/k: scroll | /: search | Space/PgDn: page down "
-            .to_string()
+        help_bar(usize::from(content_area.width.saturating_sub(2)))
     };
 
     // The bar is one row inside the content area's borders, so it needs both a
@@ -1263,7 +1270,56 @@ fn document_needs_picker(content: &str) -> bool {
     })
 }
 
-/// Convert markdown content to a mix of styled text lines and image references.
+/// Whether a key press is the bare `t` that flips the theme.
+///
+/// Bare means bare: `Ctrl+T` and `Alt+T` are other people's shortcuts, and the
+/// other two backends already refuse them. Shift is not tested because `T` is a
+/// different `KeyCode::Char` and never reaches here.
+fn is_theme_toggle(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Char('t')
+        && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+/// Shortcut hints for the bottom bar, most worth showing first.
+///
+/// The bar is drawn inside the content area, which the table of contents and
+/// the borders leave about 32 columns narrower than the terminal — so on a
+/// standard 80-column terminal there is room for four of these, not all six.
+const HELP_HINTS: &[&str] = &[
+    "q: quit",
+    "j/k: scroll",
+    "/: search",
+    "t: theme",
+    "Tab: focus",
+    "Space/PgDn: page",
+];
+
+/// As many hints as fit in `columns`, joined.
+///
+/// Whole hints are dropped rather than the line being cut: the bar used to be
+/// one fixed string clipped to the available width, which on an 80-column
+/// terminal ended mid-item and hid everything after it — the theme toggle
+/// included.
+fn help_bar(columns: usize) -> String {
+    let mut bar = String::new();
+    for hint in HELP_HINTS {
+        let separator = if bar.is_empty() { 0 } else { 3 };
+        // The finished bar is padded with one space at each end.
+        if str_width(&bar) + separator + str_width(hint) + 2 > columns {
+            break;
+        }
+        if !bar.is_empty() {
+            bar.push_str(" | ");
+        }
+        bar.push_str(hint);
+    }
+    if bar.is_empty() {
+        bar
+    } else {
+        format!(" {bar} ")
+    }
+}
+
 /// The bottom edge of a code block frame.
 const CODE_FRAME_BOTTOM: &str = "└─────────────────────────────────────────┘";
 
@@ -1302,58 +1358,138 @@ fn terminal_background_is_light(colorfgbg: Option<&str>) -> Option<bool> {
 /// An explicit setting always wins; `auto` asks the terminal and falls back to
 /// dark, which is what the overwhelming majority of terminals running a pager
 /// actually are.
-fn syntax_theme_name(setting: crate::core::Theme, colorfgbg: Option<&str>) -> &'static str {
-    let light = match setting {
+/// Whether code blocks should be highlighted for a light background.
+fn syntax_prefers_light(setting: crate::core::Theme, colorfgbg: Option<&str>) -> bool {
+    match setting {
         crate::core::Theme::Light => true,
         crate::core::Theme::Dark => false,
         crate::core::Theme::Auto => terminal_background_is_light(colorfgbg).unwrap_or(false),
-    };
-    if light {
-        "InspiredGitHub"
-    } else {
-        "base16-ocean.dark"
     }
+}
+
+const LIGHT_SYNTAX_THEME: &str = "InspiredGitHub";
+const DARK_SYNTAX_THEME: &str = "base16-ocean.dark";
+
+/// Which of the two syntax themes is in use right now.
+///
+/// Resolved once from `--theme` and the terminal background, then flipped by
+/// `t`. It is a global because [`highlight_code`] runs deep inside the document
+/// builder, which carries no application state — the same reason the assets
+/// below are one.
+fn syntax_is_light() -> &'static std::sync::atomic::AtomicBool {
+    use std::sync::OnceLock;
+    static CURRENT: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    CURRENT.get_or_init(|| {
+        std::sync::atomic::AtomicBool::new(syntax_prefers_light(
+            crate::core::theme(),
+            std::env::var("COLORFGBG").ok().as_deref(),
+        ))
+    })
+}
+
+/// Flip the syntax theme, and report the one now in use.
+///
+/// The terminal owns its own background, so this is the whole of what a theme
+/// means here: the colours code blocks are highlighted in. The caller has to
+/// rebuild the document, because the colours are baked into the spans when it
+/// is built.
+fn toggle_syntax_theme() -> bool {
+    flip(syntax_is_light())
+}
+
+/// Flip a flag and return its new value.
+///
+/// Takes the flag rather than reaching for the global one, so a test can
+/// exercise it without changing what every other test in the binary is
+/// highlighting with.
+fn flip(flag: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    let flipped = !flag.load(Ordering::Relaxed);
+    flag.store(flipped, Ordering::Relaxed);
+    flipped
 }
 
 /// Syntax highlighting assets, built once. `SyntaxSet` parsing is the expensive
 /// part, so it is shared across every code block of every reload.
-fn syntax_assets() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::Theme) {
+fn syntax_assets() -> &'static SyntaxAssets {
     use std::sync::OnceLock;
-    static ASSETS: OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::Theme)> =
-        OnceLock::new();
+    static ASSETS: OnceLock<SyntaxAssets> = OnceLock::new();
     ASSETS.get_or_init(|| {
         let syntaxes = syntect::parsing::SyntaxSet::load_defaults_newlines();
         let mut themes = syntect::highlighting::ThemeSet::load_defaults();
-        let wanted = syntax_theme_name(
-            crate::core::theme(),
-            std::env::var("COLORFGBG").ok().as_deref(),
-        );
-        let theme = themes
+        // Both are kept, not just the one wanted at startup: `t` switches
+        // between them, and reloading the set to do that would cost as much as
+        // the parse this cache exists to avoid.
+        let dark = themes.themes.remove(DARK_SYNTAX_THEME).unwrap_or_default();
+        let light = themes
             .themes
-            .remove(wanted)
-            .or_else(|| themes.themes.remove("base16-ocean.dark"))
-            .unwrap_or_default();
-        (syntaxes, theme)
+            .remove(LIGHT_SYNTAX_THEME)
+            .unwrap_or_else(|| dark.clone());
+        SyntaxAssets {
+            syntaxes,
+            light,
+            dark,
+        }
     })
+}
+
+struct SyntaxAssets {
+    syntaxes: syntect::parsing::SyntaxSet,
+    light: syntect::highlighting::Theme,
+    dark: syntect::highlighting::Theme,
+}
+
+impl SyntaxAssets {
+    /// The theme for the colour scheme currently in use.
+    fn theme(&self) -> &syntect::highlighting::Theme {
+        if syntax_is_light().load(std::sync::atomic::Ordering::Relaxed) {
+            &self.light
+        } else {
+            &self.dark
+        }
+    }
+}
+
+/// The background a code block paints behind itself.
+///
+/// A syntect theme picks its foregrounds for its own background, and the
+/// terminal's is whatever the reader set. Without this the light theme is dark
+/// text on a dark terminal — legible only by accident — and the dark theme has
+/// the mirror problem on a light terminal. Painting the theme's own background
+/// makes the block self-contained, which is also what `gui` and `web` do with
+/// their `code_bg`.
+fn syntax_background() -> Option<Color> {
+    let bg = syntax_assets().theme().settings.background?;
+    Some(Color::Rgb(bg.r, bg.g, bg.b))
+}
+
+/// The colour a code block draws text in when syntect has nothing to say about
+/// it — an unlabelled fence, an unknown language, a highlighting failure.
+fn syntax_foreground() -> Option<Color> {
+    let fg = syntax_assets().theme().settings.foreground?;
+    Some(Color::Rgb(fg.r, fg.g, fg.b))
 }
 
 /// Colour one code block, one `Vec<Span>` per source line (#59).
 ///
-/// Falls back to a single uncoloured span per line when the language is unknown
-/// or highlighting fails, so an exotic fence never costs more than colour.
+/// Falls back to a single span per line when the language is unknown or
+/// highlighting fails, so an exotic fence never costs more than colour. That
+/// fallback still takes the theme's own colours: a fence with no language is
+/// the ordinary case, not an exotic one, and leaving it on the terminal's
+/// colours would put unpainted text inside a painted block.
 fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
     let plain = |code: &str| -> Vec<Vec<Span<'static>>> {
+        let mut style = Style::default().fg(syntax_foreground().unwrap_or(Color::Green));
+        if let Some(bg) = syntax_background() {
+            style = style.bg(bg);
+        }
         code.lines()
-            .map(|l| {
-                vec![Span::styled(
-                    l.to_string(),
-                    Style::default().fg(Color::Green),
-                )]
-            })
+            .map(|l| vec![Span::styled(l.to_string(), style)])
             .collect()
     };
 
-    let (syntaxes, theme) = syntax_assets();
+    let assets = syntax_assets();
+    let (syntaxes, theme) = (&assets.syntaxes, assets.theme());
     let Some(syntax) = syntaxes
         .find_syntax_by_token(lang)
         .or_else(|| syntaxes.find_syntax_by_extension(lang))
@@ -1361,6 +1497,7 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
         return plain(code);
     };
 
+    let background = syntax_background();
     let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
     let mut out = Vec::new();
     for line in code.lines() {
@@ -1372,10 +1509,11 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
                     .into_iter()
                     .map(|(style, text)| {
                         let c = style.foreground;
-                        Span::styled(
-                            text.trim_end_matches('\n').to_string(),
-                            Style::default().fg(Color::Rgb(c.r, c.g, c.b)),
-                        )
+                        let mut span_style = Style::default().fg(Color::Rgb(c.r, c.g, c.b));
+                        if let Some(bg) = background {
+                            span_style = span_style.bg(bg);
+                        }
+                        Span::styled(text.trim_end_matches('\n').to_string(), span_style)
                     })
                     .filter(|s| !s.content.is_empty())
                     .collect(),
@@ -1534,12 +1672,29 @@ impl MdRenderer {
                     });
                     return;
                 }
-                let gutter = Style::default().fg(Color::DarkGray);
+                // The block paints the syntax theme's own background, so the
+                // frame and every line have to carry it too — otherwise the
+                // panel is a ragged strip of colour behind the text only.
+                let background = syntax_background();
+                let mut gutter = Style::default().fg(Color::DarkGray);
+                if let Some(bg) = background {
+                    gutter = gutter.bg(bg);
+                }
+                let width = str_width(CODE_FRAME_BOTTOM);
                 let label = if lang.is_empty() { "code" } else { &lang };
                 self.push(ctx, vec![Span::styled(code_frame_top(label), gutter)]);
                 for mut spans in highlight_code(code.literal.trim_end_matches('\n'), &lang) {
                     let mut line = vec![Span::styled("│ ", gutter)];
                     line.append(&mut spans);
+                    // Pad to the frame width so the background forms a
+                    // rectangle. A line longer than the frame is left alone:
+                    // truncating it would hide code.
+                    let drawn: usize = line.iter().map(|s| str_width(&s.content)).sum();
+                    if let Some(missing) = width.checked_sub(drawn)
+                        && missing > 0
+                    {
+                        line.push(Span::styled(" ".repeat(missing), gutter));
+                    }
                     self.push(ctx, line);
                 }
                 self.push(ctx, vec![Span::styled(CODE_FRAME_BOTTOM, gutter)]);
@@ -2527,30 +2682,54 @@ mod fidelity_tests {
     fn an_explicit_theme_always_wins_over_the_terminal() {
         use crate::core::Theme;
         // A light terminal, overridden to dark, and the other way round.
-        assert_eq!(
-            syntax_theme_name(Theme::Dark, Some("0;15")),
-            "base16-ocean.dark"
+        assert!(
+            !syntax_prefers_light(Theme::Dark, Some("0;15")),
+            "an explicit dark theme must not follow a light terminal"
         );
-        assert_eq!(
-            syntax_theme_name(Theme::Light, Some("15;0")),
-            "InspiredGitHub"
+        assert!(
+            syntax_prefers_light(Theme::Light, Some("15;0")),
+            "an explicit light theme must not follow a dark terminal"
         );
     }
 
     #[test]
     fn auto_follows_the_terminal_and_falls_back_to_dark() {
         use crate::core::Theme;
-        assert_eq!(
-            syntax_theme_name(Theme::Auto, Some("0;15")),
-            "InspiredGitHub"
-        );
-        assert_eq!(
-            syntax_theme_name(Theme::Auto, Some("15;0")),
-            "base16-ocean.dark"
-        );
+        assert!(syntax_prefers_light(Theme::Auto, Some("0;15")));
+        assert!(!syntax_prefers_light(Theme::Auto, Some("15;0")));
         // A terminal that says nothing must not cost a query, and dark is the
         // safe assumption for a pager.
-        assert_eq!(syntax_theme_name(Theme::Auto, None), "base16-ocean.dark");
+        assert!(!syntax_prefers_light(Theme::Auto, None));
+    }
+
+    #[test]
+    fn the_theme_toggle_flips_and_reports_the_one_in_use() {
+        // `t` has to change something in the terminal too, or the shortcut
+        // would be listed and do nothing. What it changes is the syntax
+        // highlighting: the terminal owns the rest of its colours.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for start in [true, false] {
+            let flag = AtomicBool::new(start);
+            assert_eq!(flip(&flag), !start, "each press must flip the theme");
+            assert_eq!(
+                flag.load(Ordering::Relaxed),
+                !start,
+                "the reported theme must be the one actually stored"
+            );
+            assert_eq!(flip(&flag), start, "a second press must come back");
+        }
+    }
+
+    #[test]
+    fn the_two_syntax_themes_are_both_kept_in_the_cache() {
+        // Only one used to be loaded, chosen at startup. Switching would have
+        // meant reloading the set, which is the parse this cache exists to
+        // avoid — so both are resolved once and picked between.
+        let assets = syntax_assets();
+        assert_ne!(
+            assets.light.name, assets.dark.name,
+            "the light and dark themes must be two different themes"
+        );
     }
 
     /// Both theme names must exist in syntect's defaults, or highlighting would
@@ -2558,7 +2737,7 @@ mod fidelity_tests {
     #[test]
     fn both_themes_exist_in_syntect_defaults() {
         let themes = syntect::highlighting::ThemeSet::load_defaults();
-        for name in ["base16-ocean.dark", "InspiredGitHub"] {
+        for name in [DARK_SYNTAX_THEME, LIGHT_SYNTAX_THEME] {
             assert!(
                 themes.themes.contains_key(name),
                 "syntect has no theme {:?}; available: {:?}",
@@ -2671,6 +2850,168 @@ mod fidelity_tests {
     }
 
     // #59, symptom 2: code blocks have no syntax highlighting.
+    #[test]
+    fn only_a_bare_t_flips_the_theme() {
+        // `gui` refuses a modifier on this binding, and the terminal has to
+        // agree: Ctrl+T and Alt+T belong to whoever else wants them.
+        assert!(is_theme_toggle(KeyCode::Char('t'), KeyModifiers::NONE));
+        for modifier in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            assert!(
+                !is_theme_toggle(KeyCode::Char('t'), modifier),
+                "{modifier:?}+t must not flip the theme"
+            );
+        }
+        assert!(!is_theme_toggle(KeyCode::Char('q'), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn an_unlabelled_fence_is_painted_like_a_highlighted_one() {
+        // The fallback used to be a bare green with no background, so the most
+        // ordinary block of all — a fence with no language — sat unpainted
+        // inside a painted frame.
+        for code in ["plain text\n", "some code\n"] {
+            for lang in ["", "wharrgarbl"] {
+                for line in highlight_code(code, lang) {
+                    for span in line {
+                        assert!(
+                            span.style.bg.is_some(),
+                            "a {lang:?} fence must be painted like any other"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_bar_offers_the_theme_toggle_on_a_standard_terminal() {
+        // 80 columns of terminal leave the bar about 48. A fixed string of all
+        // six hints is 78, so the toggle used to be clipped away exactly where
+        // most people would have looked for it.
+        let bar = help_bar(48);
+        assert!(
+            bar.contains("t: theme"),
+            "the theme toggle must survive a standard terminal: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_bar_drops_whole_hints_and_never_overflows() {
+        for columns in 0..100 {
+            let bar = help_bar(columns);
+            assert!(
+                str_width(&bar) <= columns,
+                "{columns} columns produced a bar of {}: {bar:?}",
+                str_width(&bar)
+            );
+            // Whole hints only: anything shown must be shown in full.
+            for hint in HELP_HINTS {
+                let shown = bar.contains(hint);
+                let partial = !shown
+                    && hint
+                        .split_once(':')
+                        .is_some_and(|(key, _)| bar.contains(&format!("{key}:")));
+                assert!(!partial, "{hint:?} is cut short in {bar:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_terminal_gets_every_hint() {
+        let bar = help_bar(200);
+        for hint in HELP_HINTS {
+            assert!(bar.contains(hint), "{hint:?} missing from {bar:?}");
+        }
+    }
+
+    #[test]
+    fn a_code_block_paints_a_rectangular_panel_at_the_frame_width() {
+        // A syntect theme picks its foregrounds for its own background. Without
+        // one painted behind them, `--theme light` is dark text on whatever the
+        // terminal happens to be — which on a dark terminal is barely legible.
+        //
+        // The rectangle is only claimed at the frame's own width, which is what
+        // this checks: the lines as built. A viewport narrower than the frame
+        // folds them like any other line, and a source line longer than the
+        // frame is deliberately left wider rather than truncated. What survives
+        // both is the painting, which is the part that matters — see the test
+        // below.
+        let md = "```rust\nfn main() {\n    let x: u32 = 42;\n}\n```\n";
+        let block: Vec<Line<'static>> = markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => Some(line),
+                _ => None,
+            })
+            .filter(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.starts_with('┌') || text.starts_with('│') || text.starts_with('└')
+            })
+            .collect();
+        assert!(
+            block.len() >= 5,
+            "expected a frame and three code lines, got {}",
+            block.len()
+        );
+
+        let expected = str_width(CODE_FRAME_BOTTOM);
+        for line in &block {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                str_width(&text),
+                expected,
+                "every line of the block must be the frame's width, got {text:?}"
+            );
+            for span in &line.spans {
+                assert!(
+                    span.style.bg.is_some(),
+                    "every span of the block must be painted, bare one in {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_stays_painted_once_the_lines_are_folded() {
+        // The panel is built at the frame's width, but it is drawn through
+        // `wrap_line`. Folding must not hand a line back to the terminal's own
+        // colours, or a narrow window would undo the legibility the painting is
+        // there for.
+        let md = "```rust\nfn main() { let a_rather_long_identifier = 42; }\n```\n";
+        let block: Vec<Line<'static>> = markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => Some(line),
+                _ => None,
+            })
+            .filter(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.starts_with('│')
+            })
+            .collect();
+        assert!(!block.is_empty(), "expected at least one code line");
+
+        for width in [20, 30, 43] {
+            for line in &block {
+                let folded = wrap_line(line, width);
+                assert!(folded.len() > 1 || line.width() <= width, "expected a fold");
+                for piece in folded {
+                    for span in piece.spans {
+                        assert!(
+                            span.content.trim().is_empty() || span.style.bg.is_some(),
+                            "a fold at {width} columns lost the painting: {:?}",
+                            span.content
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_code_block_is_syntax_highlighted() {
         let md = "```rust\nfn main() { let x: u32 = 1; }\n```\n";

@@ -156,6 +156,10 @@ body {
     flex: 1;
 }
 h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; font-weight: 600; line-height: 1.25; color: var(--strong); }
+/* The container has padding, so the first element's own top margin cannot
+   collapse into it and is added to it instead — 56px of nothing above the
+   first line of every document. */
+.content > :first-child { margin-top: 0; }
 h1, h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
 strong, b { color: var(--strong); }
 code {

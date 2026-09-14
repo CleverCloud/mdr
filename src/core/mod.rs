@@ -81,9 +81,12 @@ pub fn set_theme(theme: Theme) {
     );
 }
 
-/// Read back by the terminal backend, which is the only one that has to pick a
-/// palette itself; the two graphical backends follow the system colour scheme.
-#[cfg(feature = "tui-backend")]
+/// The colour scheme every backend renders with.
+///
+/// `Auto` means "ask the environment": the terminal backend reads `COLORFGBG`,
+/// the two graphical ones follow the system setting. `Dark` and `Light` settle
+/// it, which is the whole point of `--theme` — it used to reach the terminal
+/// backend only, so `--theme light` did nothing at all in `gui` and `web`.
 pub fn theme() -> Theme {
     match THEME.load(Ordering::Relaxed) {
         1 => Theme::Dark,

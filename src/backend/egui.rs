@@ -40,87 +40,245 @@ fn preference(preferences: &[&str], name: &str) -> Option<usize> {
         .position(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
-/// Load system fonts into egui: the platform's UI and monospace faces first, so
-/// the backend does not render in egui's bundled typeface while `web` renders in
-/// the system one; every other installed face stays behind them as a fallback
-/// for non-Latin scripts (CJK, etc.).
+/// Families kept only to cover scripts the chosen UI font does not.
+///
+/// egui's own embedded fonts already carry Latin and a monochrome emoji set, so
+/// this list exists for the rest — mostly CJK. It is deliberately short and
+/// deliberately excludes the colour emoji fonts: `Apple Color Emoji.ttc` alone
+/// is 183 MB on macOS, for glyphs egui can already draw.
+const FALLBACK_FONT_FAMILIES: &[&str] = &[
+    // macOS
+    "PingFang SC",
+    "Hiragino Sans",
+    "Hiragino Sans GB",
+    "Apple SD Gothic Neo",
+    // Windows
+    "Microsoft YaHei",
+    "Yu Gothic",
+    "Malgun Gothic",
+    // Linux
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK KR",
+];
+
+/// What the font loader is allowed to keep resident.
+///
+/// `epaint::FontData` holds its file as a `Cow<'static, [u8]>`, so every face
+/// keeps its own copy and nothing is shared between two faces of the same
+/// collection; `blob_from_font_data` then clones those bytes again when the
+/// fonts are built, so a loaded file is resident roughly twice. Loading every
+/// installed face — which is what this function used to do — retained 4.57 GB
+/// of font data on the machine this was measured on, from 890 faces across 473
+/// files. Another machine has another font collection: the shape of the problem
+/// carries over, the number does not.
+///
+/// These numbers are a product choice, not a measured RSS ceiling: they bound
+/// what mdr reads, not what egui then builds out of it.
+struct FontBudget {
+    /// Total bytes of system font files.
+    bytes: u64,
+    /// How many faces may be added, primaries included.
+    faces: usize,
+}
+
+const FONT_BUDGET: FontBudget = FontBudget {
+    bytes: 64 * 1024 * 1024,
+    faces: 8,
+};
+
+/// One face picked out of the system database, before its file is read.
+struct Candidate {
+    /// Position in the preference list; lower is better.
+    rank: usize,
+    family: String,
+    path: std::path::PathBuf,
+    /// Index of the face inside a `.ttc` collection.
+    index: u32,
+}
+
+/// Install the system fonts mdr draws with.
+///
+/// Selection happens on metadata alone and only the handful of files that come
+/// out of it are read. The previous version read *every* installed font file
+/// into memory — the whole file, once per face it contained — and pushed all of
+/// them into both fallback chains; on the machine this was measured on that is
+/// 890 faces and several gigabytes resident, on a document of any size.
 fn load_system_fonts(ctx: &egui::Context) {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
 
-    let mut fonts = egui::FontDefinitions::default();
-    let mut preferred_ui: Option<(usize, String)> = None;
-    let mut preferred_mono: Option<(usize, String)> = None;
+    // Ranked, not reduced to a single winner: the best face can turn out to be
+    // unreadable or larger than the budget, and the loader has to be able to
+    // reach for the next one. Only the first that fits is ever read.
+    let mut ui: Vec<Candidate> = Vec::new();
+    let mut mono: Vec<Candidate> = Vec::new();
+    let mut fallbacks: Vec<Candidate> = Vec::new();
 
-    let mut counter = 0usize;
+    // First pass: metadata only. Nothing is read from disk here.
     for face in db.faces() {
         let source = match &face.source {
             fontdb::Source::Binary(_) => continue,
-            fontdb::Source::File(path) => path,
-            fontdb::Source::SharedFile(path, _) => path,
+            fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path,
         };
 
-        let name = face
-            .families
-            .first()
-            .map_or_else(|| format!("font_{counter}"), |(name, _)| name.clone());
+        // Only upright regular faces are candidates: egui has no font weights —
+        // `RichText::strong()` resolves to a colour — so a bold or italic face
+        // would not be used as a weight, it would simply become the body font.
+        // Weight and style alone do not separate a condensed or expanded face
+        // from the plain one, and either would be a surprising body font.
+        if face.weight != fontdb::Weight::NORMAL
+            || face.style != fontdb::Style::Normal
+            || face.stretch != fontdb::Stretch::Normal
+        {
+            continue;
+        }
 
-        if let Ok(data) = std::fs::read(source) {
-            // The key has to identify the FACE, not the family: two files of the
-            // same family — a regular and a bold — both report index 0, so
-            // keying on family and index made the second overwrite the first,
-            // and the face finally drawn was whichever happened to load last.
-            // `counter` is per-face and therefore unique.
-            let key = format!("{name}#{counter}");
-            // `from_owned` always sets index 0. Inside a collection (.ttc) that
-            // is a different face from the one selected above, so the real index
-            // has to be put back.
-            let mut font_data = egui::FontData::from_owned(data);
-            font_data.index = face.index;
-            fonts.font_data.insert(key.clone(), font_data.into());
+        let Some((family, _)) = face.families.first() else {
+            continue;
+        };
+        let candidate = |rank: usize| Candidate {
+            rank,
+            family: family.clone(),
+            path: source.clone(),
+            index: face.index,
+        };
 
-            // Insert into proportional and monospace fallbacks
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .push(key.clone());
-            fonts
-                .families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push(key.clone());
-
-            // Only upright regular faces are candidates for the primary font;
-            // picking an italic or a bold as the body face looks like a bug.
-            // Weight and style alone do not separate a condensed or expanded
-            // face from the plain one, and either would be a surprising body
-            // font.
-            let upright_regular = face.weight == fontdb::Weight::NORMAL
-                && face.style == fontdb::Style::Normal
-                && face.stretch == fontdb::Stretch::Normal;
-            if upright_regular {
-                if let Some(rank) = preference(UI_FONT_FAMILIES, &name)
-                    && preferred_ui.as_ref().is_none_or(|(best, _)| rank < *best)
-                {
-                    preferred_ui = Some((rank, key.clone()));
-                }
-                if let Some(rank) = preference(MONO_FONT_FAMILIES, &name)
-                    && preferred_mono.as_ref().is_none_or(|(best, _)| rank < *best)
-                {
-                    preferred_mono = Some((rank, key));
+        // One face per family in each list: a collection lists the same family
+        // once per weight, and keeping them all is exactly the cost being
+        // avoided here.
+        let offer = |list: &mut Vec<Candidate>, preferences: &[&str]| {
+            if let Some(rank) = preference(preferences, family) {
+                match list.iter().position(|c| c.family == *family) {
+                    Some(i) if rank < list[i].rank => list[i] = candidate(rank),
+                    Some(_) => {}
+                    None => list.push(candidate(rank)),
                 }
             }
-        }
-        counter += 1;
+        };
+        offer(&mut ui, UI_FONT_FAMILIES);
+        offer(&mut mono, MONO_FONT_FAMILIES);
+        offer(&mut fallbacks, FALLBACK_FONT_FAMILIES);
     }
+
+    // The body and code fonts come first, so a tight budget spends itself on
+    // what the document is actually set in rather than on a fallback.
+    for list in [&mut ui, &mut mono, &mut fallbacks] {
+        list.sort_by_key(|c| c.rank);
+    }
+    let mut ordered: Vec<(&Candidate, Role)> = Vec::new();
+    ordered.extend(ui.iter().map(|c| (c, Role::Ui)));
+    ordered.extend(mono.iter().map(|c| (c, Role::Mono)));
+    ordered.extend(fallbacks.iter().map(|c| (c, Role::Fallback)));
+
+    ctx.set_fonts(build_font_definitions(&ordered, &FONT_BUDGET));
+}
+
+/// What a selected face is there for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Role {
+    /// The body font.
+    Ui,
+    /// The code font.
+    Mono,
+    /// Kept only to cover scripts the two above do not.
+    Fallback,
+}
+
+/// Read the selected faces, within budget, and build the font definitions.
+///
+/// Split out from the selection above so the budget can be exercised against
+/// files of known size: everything here works off `candidates`, in the order
+/// given, and stops reading when either limit is reached.
+fn build_font_definitions(
+    candidates: &[(&Candidate, Role)],
+    budget: &FontBudget,
+) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut spent = 0_u64;
+    let mut loaded: Vec<String> = Vec::new();
+    let mut ui_key = None;
+    let mut mono_key = None;
+
+    for (candidate, role) in candidates {
+        // A body and a code font, once each. The lists are ranked, so anything
+        // after the one that fit is a worse choice for the same job — but a
+        // fallback is not a choice between rivals, and every one that fits is
+        // kept.
+        let filled = match role {
+            Role::Ui => ui_key.is_some(),
+            Role::Mono => mono_key.is_some(),
+            Role::Fallback => false,
+        };
+        if filled {
+            continue;
+        }
+
+        // The file path and the index together are what actually name a face:
+        // two files of the same family both report index 0, so keying on the
+        // family alone made the second evict the first and the body font became
+        // whichever loaded last.
+        let key = format!("{}#{}", candidate.path.display(), candidate.index);
+
+        // The same face can serve two roles — a family listed as both the UI
+        // and the monospace preference — and then it must not be read, counted
+        // or queued twice. Checked before the budget, so sharing is free.
+        if !fonts.font_data.contains_key(&key) {
+            if loaded.len() >= budget.faces {
+                // Out of slots. Nothing later can fit either, but a face
+                // already loaded could still take on a second role, so the loop
+                // carries on rather than breaking.
+                continue;
+            }
+            // Read under an explicit bound rather than trusting `metadata` and
+            // calling `fs::read`: the size is taken from the open handle and
+            // the read is capped by the same number, so a file that grows in
+            // between cannot spend more than what was budgeted for it.
+            let Some(data) = read_within(&candidate.path, budget.bytes - spent) else {
+                // Over budget or unreadable: try the next candidate rather than
+                // giving up. If none fits, egui's embedded fonts remain.
+                continue;
+            };
+            spent += data.len() as u64;
+
+            // `from_owned` always sets index 0. Inside a collection (.ttc) that
+            // is a different face from the one selected, so the real index has
+            // to be put back.
+            let mut font_data = egui::FontData::from_owned(data);
+            font_data.index = candidate.index;
+            fonts.font_data.insert(key.clone(), font_data.into());
+
+            // A fallback has to sit in both chains to do its job; a primary is
+            // pushed to both as well and then moved to the front of its own
+            // below, which also leaves it available as a fallback for the other.
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(key.clone());
+            }
+            loaded.push(candidate.family.clone());
+        }
+
+        match role {
+            Role::Ui => ui_key = Some(key),
+            Role::Mono => mono_key = Some(key),
+            Role::Fallback => {}
+        }
+    }
+
+    crate::vlog!(
+        "fonts: {:.1} MB of a {:.0} MB budget for {} of at most {} system face(s): {}",
+        spent as f64 / 1_048_576.0,
+        budget.bytes as f64 / 1_048_576.0,
+        loaded.len(),
+        budget.faces,
+        loaded.join(", ")
+    );
 
     // Move the chosen faces to the front of their family, ahead of egui's own.
     for (family, chosen) in [
-        (egui::FontFamily::Proportional, preferred_ui),
-        (egui::FontFamily::Monospace, preferred_mono),
+        (egui::FontFamily::Proportional, ui_key),
+        (egui::FontFamily::Monospace, mono_key),
     ] {
-        if let Some((_, key)) = chosen
+        if let Some(key) = chosen
             && let Some(list) = fonts.families.get_mut(&family)
         {
             list.retain(|existing| existing != &key);
@@ -128,7 +286,29 @@ fn load_system_fonts(ctx: &egui::Context) {
         }
     }
 
-    ctx.set_fonts(fonts);
+    fonts
+}
+
+/// Read `path`, or nothing at all if it is larger than `limit`.
+///
+/// The size is taken from the open handle, so the file that is measured is the
+/// file that is read. What this guarantees is the budget: no more than `limit`
+/// bytes are ever accepted. It does not guarantee a complete file — one that
+/// shrinks between the two calls comes back short, and epaint rejects a
+/// truncated font when it parses it.
+fn read_within(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > limit {
+        return None;
+    }
+    // `len + 1` so a file that grew past the budget between the two calls comes
+    // back longer than it was allowed to be, and is dropped below.
+    let mut data = Vec::new();
+    file.take(len + 1).read_to_end(&mut data).ok()?;
+    (data.len() as u64 <= len).then_some(data)
 }
 
 /// Apply the shared palette and type scale.
@@ -136,6 +316,644 @@ fn load_system_fonts(ctx: &egui::Context) {
 /// Without this the backend runs on egui's defaults: a 13 pt body with an 18 pt
 /// heading, so `h1` through `h6` all land within five points of each other,
 /// while `web` renders the same document on a 16 px body and a 2 em `h1`.
+/// Render the small set of HTML blocks that Markdown documents actually use.
+///
+/// `web` hands raw HTML to a real engine. `gui` has no engine: `egui_commonmark`
+/// passes an HTML block through as text, so a README that centres its logo and
+/// title with `<p>` and `<h1>` showed its own markup at the top of the window.
+///
+/// The answer is not an HTML renderer. It is a short, explicit list of tags —
+/// headings, paragraphs, images, line breaks — rewritten as the Markdown that
+/// means the same thing, so they go on to travel the existing pipeline: image
+/// paths are resolved and SVGs rasterised exactly as for `![](…)`, and headings
+/// land in the table of contents. `align="center"` has no Markdown equivalent
+/// and is dropped; the content comes back, its layout does not.
+///
+/// Anything outside that list keeps its text and loses its tags, which is worse
+/// than a browser and better than printing angle brackets at the reader.
+///
+/// Only whole HTML blocks are touched, and they are located by parsing rather
+/// than by matching lines, so a `<p>` inside a fenced code block stays the code
+/// it was written as.
+fn render_simple_html(markdown: &str, base_dir: &std::path::Path) -> String {
+    use comrak::nodes::NodeValue;
+    use comrak::{Arena, Options, parse_document};
+
+    let arena = Arena::new();
+    let mut options = Options::default();
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+    options.extension.front_matter_delimiter = Some("---".to_owned());
+
+    let root = parse_document(&arena, markdown, &options);
+
+    // Line ranges are 1-based and inclusive, and collected before any edit so
+    // the positions stay those of the document that was parsed.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        if let NodeValue::HtmlBlock(block) = &data.value {
+            let converted = html_to_markdown(&block.literal, base_dir);
+            if !converted.trim().is_empty() {
+                replacements.push((
+                    data.sourcepos.start.line,
+                    data.sourcepos.end.line,
+                    converted,
+                ));
+            }
+        }
+    }
+    if replacements.is_empty() {
+        return markdown.to_string();
+    }
+    replacements.sort_by_key(|(start, _, _)| *start);
+
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut out = String::with_capacity(markdown.len());
+    let mut line_no = 1usize;
+    let mut next = replacements.into_iter().peekable();
+    while line_no <= lines.len() {
+        match next.peek() {
+            Some((start, end, _)) if *start == line_no => {
+                let (_, end, converted) = next.next().expect("peeked");
+                out.push_str(converted.trim_end());
+                out.push('\n');
+                line_no = end + 1;
+            }
+            _ => {
+                out.push_str(lines[line_no - 1]);
+                out.push('\n');
+                line_no += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Rewrite one HTML block as Markdown, for the tags listed in
+/// [`render_simple_html`].
+fn html_to_markdown(html: &str, base_dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    let mut text = String::new();
+    // The heading level currently open, so `</h2>` knows what it closes.
+    let mut heading: Option<usize> = None;
+
+    let flush = |out: &mut String, text: &mut String, heading: &mut Option<usize>| {
+        let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        text.clear();
+        if body.is_empty() {
+            return;
+        }
+        if let Some(level) = heading.take() {
+            out.push_str(&"#".repeat(level));
+            out.push(' ');
+        }
+        out.push_str(&body);
+        out.push_str("\n\n");
+    };
+
+    let bytes: Vec<char> = html.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != '<' {
+            text.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let Some(close) = bytes[i..].iter().position(|c| *c == '>') else {
+            // An unterminated `<` is text, not a tag.
+            text.push('<');
+            i += 1;
+            continue;
+        };
+        let tag: String = bytes[i + 1..i + close].iter().collect();
+        i += close + 1;
+
+        let name: String = tag
+            .trim_start_matches('/')
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let closing = tag.starts_with('/');
+
+        match name.as_str() {
+            "img" if !closing => {
+                flush(&mut out, &mut text, &mut heading);
+                if let Some(src) = attribute(&tag, "src") {
+                    let alt = attribute(&tag, "alt").unwrap_or_default();
+                    let width = attribute(&tag, "width").and_then(|w| w.trim().parse::<f32>().ok());
+                    // Markdown carries no width, so a declared one is honoured
+                    // by rasterising the drawing at that size. Only vector
+                    // images can be resized without loss, so that is the only
+                    // case handled: a bitmap keeps the size it was saved at,
+                    // which `web` would have scaled.
+                    let sized = width
+                        .filter(|w| *w > 0.0)
+                        .and_then(|w| {
+                            let path = base_dir.join(&src);
+                            let is_svg = path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+                            let within = crate::core::paths::is_within_image_root(&path, base_dir);
+                            (is_svg && within && path.exists())
+                                .then(|| rasterize_svg_at(&path, Some(w)).ok())
+                                .flatten()
+                        })
+                        .unwrap_or(src);
+                    // The destination is not escaped: it is a URL, and comrak
+                    // takes it literally inside the parentheses.
+                    out.push_str(&format!("![{}]({})\n\n", escape_markdown(&alt), sized));
+                }
+            }
+            "br" => text.push(' '),
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                flush(&mut out, &mut text, &mut heading);
+                if !closing {
+                    heading = name[1..].parse::<usize>().ok();
+                }
+            }
+            "p" | "div" => flush(&mut out, &mut text, &mut heading),
+            // An inline tag we do not handle: drop it, keep what it wrapped.
+            _ => {}
+        }
+    }
+    flush(&mut out, &mut text, &mut heading);
+    out
+}
+
+/// The value of `name` in a tag's attribute list, for quoted values only.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0usize;
+    loop {
+        let at = lower[from..].find(name)? + from;
+        let rest = &tag[at + name.len()..];
+        let trimmed = rest.trim_start();
+        // `alt` must not match the `alt` inside another attribute's name.
+        let preceded_by_space = at == 0 || tag[..at].ends_with(|c: char| c.is_whitespace());
+        if preceded_by_space && trimmed.starts_with('=') {
+            let value = trimmed[1..].trim_start();
+            let quote = value.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let end = value[1..].find(quote)? + 1;
+                return Some(decode_entities(&value[1..end]));
+            }
+            return None;
+        }
+        from = at + name.len();
+    }
+}
+
+/// The handful of entities a hand-written README actually contains.
+fn decode_entities(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Escape the characters that would turn HTML text into Markdown markup.
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(
+            c,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '!'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A GitHub-style table, rendered here rather than by the viewer.
+///
+/// `egui_commonmark` draws a table as a `Frame::group` around a striped `Grid`
+/// (`parsers/pulldown.rs`): no cell borders, no padding, and a header row drawn
+/// exactly like any other. The stylesheet gives `web` `border: 1px solid` and
+/// `padding: 6px 13px` on every cell, and a header that stands out — so the
+/// only way to bring the two together is to draw it.
+struct MarkdownTable {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+/// Split one row of a pipe table into its cells.
+///
+/// The leading and trailing pipes are optional in GFM, and an escaped `\|` is a
+/// literal character inside a cell rather than a separator.
+fn table_cells(line: &str) -> Vec<String> {
+    let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for c in trimmed.chars() {
+        match c {
+            '\\' if !escaped => {
+                escaped = true;
+                current.push('\\');
+            }
+            '|' if !escaped => {
+                cells.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => {
+                escaped = false;
+                current.push(c);
+            }
+        }
+    }
+    cells.push(current.trim().to_string());
+    cells
+}
+
+/// Whether a line is a table's delimiter row — the `|---|:--:|` under the head.
+fn is_delimiter_row(line: &str) -> bool {
+    let cells = table_cells(line);
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let body = cell.trim_start_matches(':').trim_end_matches(':');
+            !body.is_empty() && body.chars().all(|c| c == '-')
+        })
+}
+
+impl MarkdownTable {
+    /// Parse a pipe table, or return `None` if these lines are not one.
+    fn parse(block: &str) -> Option<Self> {
+        let mut lines = block.lines().filter(|l| !l.trim().is_empty());
+        let header = table_cells(lines.next()?);
+        if !is_delimiter_row(lines.next()?) {
+            return None;
+        }
+        let rows: Vec<Vec<String>> = lines.map(table_cells).collect();
+        Some(Self { header, rows })
+    }
+
+    /// How many columns the widest row has: a short row is padded rather than
+    /// dropped, so a malformed table still renders.
+    fn columns(&self) -> usize {
+        std::iter::once(self.header.len())
+            .chain(self.rows.iter().map(Vec::len))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// The inline Markdown a table cell can contain, laid out as one run of text.
+///
+/// Only code spans and emphasis: a cell is a phrase, and this is what a cell in
+/// a real document actually holds. Anything else keeps its characters.
+fn cell_layout(
+    text: &str,
+    header: bool,
+    palette: &crate::core::style::Palette,
+) -> egui::text::LayoutJob {
+    use crate::core::style::{BASE_FONT_SIZE, CODE_FONT_SCALE};
+    use egui::{FontFamily, FontId, TextFormat};
+    let colour = |c: crate::core::style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
+
+    let body = FontId::new(BASE_FONT_SIZE, FontFamily::Proportional);
+    let mono = FontId::new(BASE_FONT_SIZE * CODE_FONT_SCALE, FontFamily::Monospace);
+    let plain = colour(if header { palette.strong } else { palette.fg });
+    let strong = colour(palette.strong);
+
+    let mut job = egui::text::LayoutJob::default();
+    let chars: Vec<char> = text.chars().collect();
+    let mut run = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let mut i = 0usize;
+
+    let flush = |job: &mut egui::text::LayoutJob, run: &mut String, bold: bool, italic: bool| {
+        if run.is_empty() {
+            return;
+        }
+        job.append(
+            run,
+            0.0,
+            TextFormat {
+                font_id: body.clone(),
+                color: if bold { strong } else { plain },
+                italics: italic,
+                ..Default::default()
+            },
+        );
+        run.clear();
+    };
+
+    while i < chars.len() {
+        match chars[i] {
+            '`' => {
+                // A code span first: the emphasis markers inside one are
+                // characters, not markup.
+                let rest: String = chars[i + 1..].iter().collect();
+                match rest.find('`') {
+                    Some(close) => {
+                        flush(&mut job, &mut run, bold, italic);
+                        job.append(
+                            &rest[..close],
+                            0.0,
+                            TextFormat {
+                                font_id: mono.clone(),
+                                color: plain,
+                                background: colour(palette.inline_code_bg),
+                                ..Default::default()
+                            },
+                        );
+                        i += 1 + rest[..close].chars().count() + 1;
+                    }
+                    // An unpaired backtick is a character.
+                    None => {
+                        run.push('`');
+                        i += 1;
+                    }
+                }
+            }
+            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
+                flush(&mut job, &mut run, bold, italic);
+                bold = !bold;
+                i += 2;
+            }
+            '*' | '_' => {
+                flush(&mut job, &mut run, bold, italic);
+                italic = !italic;
+                i += 1;
+            }
+            '[' => {
+                // `[text](url)` keeps its text, in the link colour. It is not
+                // clickable: a cell is laid out as one run of text, and the
+                // destination is not lost, only unlinked.
+                let rest: String = chars[i..].iter().collect();
+                match link_text(&rest) {
+                    Some((label, consumed)) => {
+                        flush(&mut job, &mut run, bold, italic);
+                        job.append(
+                            &label,
+                            0.0,
+                            TextFormat {
+                                font_id: body.clone(),
+                                color: colour(palette.link),
+                                ..Default::default()
+                            },
+                        );
+                        i += consumed;
+                    }
+                    None => {
+                        run.push('[');
+                        i += 1;
+                    }
+                }
+            }
+            c => {
+                run.push(c);
+                i += 1;
+            }
+        }
+    }
+    flush(&mut job, &mut run, bold, italic);
+    job
+}
+
+/// The label of a `[text](url)` at the start of `s`, and how many characters it
+/// takes up. `None` when this is not a link.
+fn link_text(s: &str) -> Option<(String, usize)> {
+    let close = s.find("](")?;
+    let end = s[close..].find(')')? + close;
+    let label = &s[1..close];
+    if label.contains('[') || label.contains('\n') {
+        return None;
+    }
+    Some((label.to_string(), s[..=end].chars().count()))
+}
+
+/// How wide a cell wants to be, padding included.
+fn cell_width(ui: &egui::Ui, text: &str, palette: &crate::core::style::Palette) -> f32 {
+    let job = cell_layout(text, false, palette);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    galley.size().x + 2.0 * CELL_PADDING_X
+}
+
+/// The stylesheet's `padding: 6px 13px`, in points.
+const CELL_PADDING_X: f32 = 13.0;
+const CELL_PADDING_Y: f32 = 6.0;
+
+/// Draw a whole table: bordered, padded cells on a fixed column grid.
+///
+/// `egui::Grid` sizes a cell to its content rather than to its column, so the
+/// boxes came out ragged. The widths are measured here instead and every cell
+/// in a column is given the same one, which is what makes it read as a table.
+fn show_table(ui: &mut egui::Ui, table: &MarkdownTable) {
+    let palette = if ui.visuals().dark_mode {
+        &crate::core::style::DARK
+    } else {
+        &crate::core::style::LIGHT
+    };
+    let colour = |c: crate::core::style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
+    let columns = table.columns();
+    if columns == 0 {
+        return;
+    }
+
+    fn cell(row: &[String], column: usize) -> &str {
+        row.get(column).map_or("", String::as_str)
+    }
+    let mut widths: Vec<f32> = (0..columns)
+        .map(|column| {
+            std::iter::once(cell(&table.header, column))
+                .chain(table.rows.iter().map(|row| cell(row, column)))
+                .map(|text| cell_width(ui, text, palette))
+                .fold(0.0_f32, f32::max)
+        })
+        .collect();
+
+    // A table wider than the column is scaled to fit rather than clipped: the
+    // text inside a cell then wraps, as it does in `web`.
+    let total: f32 = widths.iter().sum();
+    let available = ui.available_width();
+    if total > available && total > 0.0 {
+        let ratio = available / total;
+        for width in &mut widths {
+            *width *= ratio;
+        }
+    }
+
+    let stroke = egui::Stroke::new(1.0, colour(palette.border));
+    let row_ui = |ui: &mut egui::Ui, row: &[String], header: bool| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (column, width) in widths.iter().enumerate() {
+                let mut frame = egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(
+                        CELL_PADDING_X as i8,
+                        CELL_PADDING_Y as i8,
+                    ))
+                    .stroke(stroke);
+                if header {
+                    // egui has no font weights, so a header is set apart by its
+                    // background rather than by being bold.
+                    frame = frame.fill(colour(palette.code_bg));
+                }
+                frame.show(ui, |ui| {
+                    ui.set_width(width - 2.0 * CELL_PADDING_X);
+                    ui.add(egui::Label::new(cell_layout(
+                        cell(row, column),
+                        header,
+                        palette,
+                    )));
+                });
+            }
+        });
+    };
+
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        row_ui(ui, &table.header, true);
+        for row in &table.rows {
+            row_ui(ui, row, false);
+        }
+    });
+}
+
+/// Split a section into the runs the viewer renders and the tables mdr draws.
+///
+/// Located by parsing rather than by matching lines, so a pipe character inside
+/// a fenced code block is never mistaken for a table.
+fn split_tables(section: &str) -> Vec<Segment<'_>> {
+    use comrak::nodes::NodeValue;
+    use comrak::{Arena, Options, parse_document};
+
+    let arena = Arena::new();
+    let mut options = Options::default();
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+
+    let root = parse_document(&arena, section, &options);
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for node in root.children() {
+        let data = node.data.borrow();
+        if matches!(data.value, NodeValue::Table(_)) {
+            ranges.push((data.sourcepos.start.line, data.sourcepos.end.line));
+        }
+    }
+    if ranges.is_empty() {
+        return vec![Segment::Markdown(section)];
+    }
+
+    // Line offsets, so each run can be handed back as a slice of the original
+    // rather than a copy.
+    let mut starts = Vec::with_capacity(section.lines().count() + 1);
+    let mut at = 0usize;
+    for line in section.split_inclusive('\n') {
+        starts.push(at);
+        at += line.len();
+    }
+    starts.push(section.len());
+
+    let line_start = |line: usize| starts.get(line - 1).copied().unwrap_or(section.len());
+    let line_end = |line: usize| starts.get(line).copied().unwrap_or(section.len());
+
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    for (start, end) in ranges {
+        let from = line_start(start);
+        let to = line_end(end);
+        if from > cursor && !section[cursor..from].trim().is_empty() {
+            segments.push(Segment::Markdown(&section[cursor..from]));
+        }
+        segments.push(Segment::Table(&section[from..to]));
+        cursor = to;
+    }
+    if cursor < section.len() && !section[cursor..].trim().is_empty() {
+        segments.push(Segment::Markdown(&section[cursor..]));
+    }
+    segments
+}
+
+/// A run of a section, and who draws it.
+enum Segment<'a> {
+    Markdown(&'a str),
+    Table(&'a str),
+}
+
+/// The widest the document column is drawn, in points.
+///
+/// The same 900 the stylesheet gives `web`.
+const CONTENT_WIDTH: f32 = 900.0;
+
+/// A viewer configured the same way everywhere it is used.
+///
+/// The syntax themes are the pair the terminal backend uses, so a code block
+/// comes out in the same colours in `gui` and `tui`. With
+/// `better_syntax_highlighting` the crate takes the block's background from the
+/// syntect theme rather than from `Visuals::extreme_bg_color`, so naming the
+/// theme is how that background is chosen.
+fn viewer<'a>() -> CommonMarkViewer<'a> {
+    CommonMarkViewer::new()
+        .syntax_theme_dark("base16-ocean.dark")
+        .syntax_theme_light("InspiredGitHub")
+        // A logo declared at 180 px in the source has no width here, so an
+        // image is capped rather than allowed to fill the window.
+        .max_image_width(Some(720))
+}
+
+/// Split a section into the heading that opens it and the rest, when `web`
+/// would draw a rule under that heading.
+///
+/// Only `h1` and `h2` get one, matching the stylesheet. A section that does not
+/// open with one — the preamble, or a deeper heading — comes back as `None` and
+/// is rendered in one piece.
+fn underlined_heading(section: &str) -> Option<(&str, &str)> {
+    let (first, rest) = section.split_once('\n')?;
+    let trimmed = first.trim_start();
+    if !(trimmed.starts_with("# ") || trimmed.starts_with("## ")) {
+        return None;
+    }
+    Some((first, rest))
+}
+
+/// Flip the colour scheme the window is currently drawn in.
+///
+/// Reads the *resolved* theme rather than the preference, so one press flips
+/// whatever the reader is looking at — whether it came from the desktop or from
+/// `--theme`. This is the same contract as the `web` backend's toggle.
+fn toggle_theme(ctx: &egui::Context) {
+    ctx.set_theme(match ctx.theme() {
+        egui::Theme::Dark => egui::ThemePreference::Light,
+        egui::Theme::Light => egui::ThemePreference::Dark,
+    });
+}
+
+/// Tell egui which of the two palettes to draw with.
+///
+/// Installing both and never choosing is what made `--theme light` a no-op
+/// here: eframe stays on `ThemePreference::System`, so the OS had the last word
+/// whatever the flag said.
+///
+/// `Auto` sets `System` rather than leaving the preference alone, and that is
+/// deliberate. The preference lives in egui's `Options`, which the `persistence`
+/// feature restores from disk at startup — so "leave it alone" would mean
+/// "inherit whatever a past run stored". Writing `System` clears it. This is
+/// safe to do here because eframe reloads that memory *before* it calls the app
+/// creator, which is where this runs; and it runs once per document rather than
+/// once per frame, so it never fights the caller.
+fn apply_theme_preference(ctx: &egui::Context, setting: crate::core::Theme) {
+    ctx.set_theme(match setting {
+        crate::core::Theme::Dark => egui::ThemePreference::Dark,
+        crate::core::Theme::Light => egui::ThemePreference::Light,
+        crate::core::Theme::Auto => egui::ThemePreference::System,
+    });
+}
+
 fn apply_style(ctx: &egui::Context) {
     use crate::core::style::{self, BASE_FONT_SIZE, CODE_FONT_SCALE};
     use egui::{FontFamily, FontId, TextStyle};
@@ -168,6 +986,8 @@ fn apply_style(ctx: &egui::Context) {
         ]
         .into();
     });
+
+    apply_theme_preference(ctx, crate::core::theme());
 
     // Both palettes are installed, so following the OS costs nothing at runtime.
     for (theme, palette) in [
@@ -207,6 +1027,9 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|e| format!("# Error\nCould not read `{}`: {}", file_path.display(), e));
 
     let markdown = preprocess_mermaid_for_egui(&raw_markdown);
+    // Before the image paths are resolved, so an `<img>` is rewritten into the
+    // `![](…)` the resolver understands and takes the same route as any other.
+    let markdown = render_simple_html(&markdown, &base_dir);
     let markdown = resolve_local_image_paths(&markdown, &base_dir);
     // The TOC and the sections are both derived from the *rendered* markdown,
     // so a preprocessing step can never shift one against the other (#57).
@@ -251,6 +1074,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 current_match: 0,
                 toc_visible: true,
                 focus_search: false,
+                at_first_frame: true,
             }))
         }),
     )
@@ -330,6 +1154,7 @@ fn split_by_headings(markdown: &str) -> (bool, Vec<String>) {
 enum Action {
     Quit,
     ToggleToc,
+    ToggleTheme,
     OpenSearch,
     CloseSearch,
     ScrollUp,
@@ -407,6 +1232,7 @@ fn key_action(key: egui::Key, modifiers: egui::Modifiers, search_open: bool) -> 
     // `webview.rs`).
     match key {
         Key::Q => Some(Action::Quit),
+        Key::T => Some(Action::ToggleTheme),
         Key::ArrowDown | Key::J => Some(Action::ScrollDown),
         Key::ArrowUp | Key::K => Some(Action::ScrollUp),
         Key::PageDown | Key::Space => Some(Action::PageDown),
@@ -453,6 +1279,14 @@ struct MdrApp {
     /// Set when Cmd/Ctrl+F opens the search, so the field takes focus on the
     /// next frame it is shown.
     focus_search: bool,
+    /// Cleared after the first frame, which starts the document at the top.
+    ///
+    /// eframe's `persistence` feature restores egui's memory, and a scroll
+    /// area's offset is part of it — so a window opened on any document came
+    /// up wherever the *previous* run had left the last one. On this README
+    /// that was 3630 points down, past the title and the logo, which read as
+    /// the top of the document simply being missing.
+    at_first_frame: bool,
 }
 
 impl eframe::App for MdrApp {
@@ -467,6 +1301,7 @@ impl eframe::App for MdrApp {
             while self.watcher_rx.try_recv().is_ok() {}
             if let Ok(content) = std::fs::read_to_string(&self.file_path) {
                 self.markdown = preprocess_mermaid_for_egui(&content);
+                self.markdown = render_simple_html(&self.markdown, &self.base_dir);
                 self.markdown = resolve_local_image_paths(&self.markdown, &self.base_dir);
                 self.toc_entries = toc::extract_toc(&self.markdown);
                 let (has_preamble, sections) = split_by_headings(&self.markdown);
@@ -490,6 +1325,7 @@ impl eframe::App for MdrApp {
             match action {
                 Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 Action::ToggleToc => self.toc_visible = !self.toc_visible,
+                Action::ToggleTheme => toggle_theme(&ctx),
                 Action::OpenSearch => {
                     self.search_active = true;
                     self.focus_search = true;
@@ -612,11 +1448,9 @@ impl eframe::App for MdrApp {
                     } else {
                         &style::LIGHT
                     };
-                    let muted = egui::Color32::from_rgb(
-                        palette.muted[0],
-                        palette.muted[1],
-                        palette.muted[2],
-                    );
+                    let colour = |c: style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
+                    let muted = colour(palette.muted);
+                    let fg = colour(palette.fg);
 
                     // A small uppercase label, like the `web` sidebar — not a
                     // document heading. `ui.heading` resolves to the h1 size and
@@ -636,21 +1470,27 @@ impl eframe::App for MdrApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            // Entries wider than the panel are ellipsised rather
-                            // than forcing it wider than the size the reader
-                            // dragged it to.
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                            // A long entry wraps, as it does in the `web`
+                            // sidebar. Truncating it to an ellipsis hid exactly
+                            // the words that tell two sibling sections apart.
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                             for (i, entry) in self.toc_entries.iter().enumerate() {
                                 let indent = ((f32::from(entry.level) - 1.0) * 12.0).max(0.0);
-                                ui.horizontal(|ui| {
+                                ui.horizontal_top(|ui| {
                                     ui.add_space(indent);
-                                    // Graded by depth, on the same scale as the
-                                    // body rather than on hard-coded points.
+                                    // Depth shows in the size and the indent, and
+                                    // never in the colour: `RichText::strong()`
+                                    // sets a colour of its own, which overrode the
+                                    // link colour — so the top two levels came out
+                                    // as plain white text and the third as a blue
+                                    // link, in one list. Every entry is given the
+                                    // same colour explicitly, and the deepest ones
+                                    // are muted the way the `web` sidebar mutes
+                                    // them.
                                     let text = egui::RichText::new(&entry.text);
                                     let text = match entry.level {
-                                        1 => text.strong(),
-                                        2 => text.size(BASE_FONT_SIZE * 0.875).strong(),
-                                        3 => text.size(BASE_FONT_SIZE * 0.875),
+                                        1 => text.color(fg),
+                                        2 | 3 => text.size(BASE_FONT_SIZE * 0.875).color(fg),
                                         _ => text.size(BASE_FONT_SIZE * 0.8125).color(muted),
                                     };
                                     if ui.link(text).clicked() {
@@ -659,6 +1499,7 @@ impl eframe::App for MdrApp {
                                         *scroll_target = Some(section_idx);
                                     }
                                 });
+                                ui.add_space(2.0);
                             }
                         });
                 });
@@ -670,14 +1511,22 @@ impl eframe::App for MdrApp {
         egui::CentralPanel::default().show(root_ui, |ui| {
             let mut area = egui::ScrollArea::vertical();
             // Home / End jump straight to an offset; the scroll area clamps it.
-            if let Some(offset) = scroll_to_offset {
+            // The first frame does the same, to undo a restored offset.
+            if let Some(offset) = scroll_to_offset.or_else(|| self.at_first_frame.then_some(0.0)) {
                 area = area.vertical_scroll_offset(offset);
             }
+            self.at_first_frame = false;
             area.show(ui, |ui| {
                 if scroll_delta != 0.0 {
                     // Negative y moves the content up, i.e. scrolls down.
                     ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
                 }
+                // A column, not the whole window. The stylesheet caps `web` at
+                // 900 px for the reason every book has margins: a line that
+                // runs the width of a wide monitor is hard to come back from at
+                // the end of it. Without this a code block was stretched to the
+                // window and prose ran edge to edge.
+                ui.set_max_width(CONTENT_WIDTH.min(ui.available_width()));
                 for (i, section) in self.sections.iter().enumerate() {
                     // Place an invisible anchor widget before the section
                     let response = ui.allocate_response(egui::vec2(0.0, 0.0), egui::Sense::hover());
@@ -690,7 +1539,38 @@ impl eframe::App for MdrApp {
                     // Render the section
                     let anchor_id = ui.id().with(format!("section_{i}"));
                     ui.push_id(anchor_id, |ui| {
-                        CommonMarkViewer::new().show(ui, &mut self.caches[i], section);
+                        // `web` draws a rule under `h1` and `h2`
+                        // (`border-bottom` in the stylesheet). The viewer has no
+                        // hook for it, but a section always opens with its own
+                        // heading — so the heading is rendered on its own, the
+                        // rule is drawn, and the body follows.
+                        let cache = &mut self.caches[i];
+                        let body = match underlined_heading(section) {
+                            Some((heading, body)) => {
+                                viewer().show(ui, cache, heading);
+                                ui.add_space(2.0);
+                                ui.separator();
+                                ui.add_space(2.0);
+                                body
+                            }
+                            None => section,
+                        };
+                        for segment in split_tables(body) {
+                            match segment {
+                                Segment::Markdown(text) => {
+                                    viewer().show(ui, cache, text);
+                                }
+                                Segment::Table(text) => {
+                                    if let Some(table) = MarkdownTable::parse(text) {
+                                        show_table(ui, &table);
+                                    } else {
+                                        // Not a table after all: the viewer
+                                        // renders it rather than nothing.
+                                        viewer().show(ui, cache, text);
+                                    }
+                                }
+                            }
+                        }
                     });
                 }
             });
@@ -825,6 +1705,21 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
 fn rasterize_svg_to_png_data_uri(
     path: &std::path::Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    rasterize_svg_at(path, None)
+}
+
+/// Rasterise an SVG, optionally to an exact width in points.
+///
+/// Without a width the drawing is rendered at twice its own size, which is
+/// sharp on a high-density display. With one it is rendered at exactly that
+/// width instead: the viewer sizes an image from its pixels, and there is no
+/// way to tell it that a bitmap is meant to be drawn at half its resolution —
+/// so a doubled logo would simply be a logo twice the size the document asked
+/// for.
+fn rasterize_svg_at(
+    path: &std::path::Path,
+    target_width: Option<f32>,
+) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
     use std::sync::{Arc, OnceLock};
 
@@ -863,7 +1758,7 @@ fn rasterize_svg_to_png_data_uri(
     }
 
     // Scale 2x for retina, but cap at MAX_DIM
-    let ideal_scale = 2.0_f32;
+    let ideal_scale = target_width.map_or(2.0_f32, |w| w / svg_w);
     let max_scale_w = MAX_DIM / svg_w;
     let max_scale_h = MAX_DIM / svg_h;
     let scale = ideal_scale.min(max_scale_w).min(max_scale_h);
@@ -890,6 +1785,494 @@ mod tests {
 
     /// `apply_style` needs a context, not a window, so the palette and the type
     /// scale can be checked without opening anything.
+    #[test]
+    fn a_table_row_splits_on_unescaped_pipes_only() {
+        assert_eq!(table_cells("| a | b | c |"), ["a", "b", "c"]);
+        // The outer pipes are optional in GFM.
+        assert_eq!(table_cells("a | b"), ["a", "b"]);
+        // An escaped pipe is a character inside a cell, not a separator.
+        assert_eq!(table_cells(r"| a \| b | c |"), [r"a \| b", "c"]);
+    }
+
+    #[test]
+    fn a_delimiter_row_is_told_from_a_content_row() {
+        assert!(is_delimiter_row("|---|---|"));
+        assert!(is_delimiter_row("| :--- | ---: | :---: |"));
+        assert!(!is_delimiter_row("| a | b |"));
+        assert!(!is_delimiter_row("| - a | b |"));
+    }
+
+    #[test]
+    fn a_block_without_a_delimiter_row_is_not_a_table() {
+        assert!(MarkdownTable::parse("| a | b |\n| c | d |\n").is_none());
+        assert!(MarkdownTable::parse("| a | b |\n|---|---|\n| c | d |\n").is_some());
+    }
+
+    #[test]
+    fn a_short_row_is_padded_rather_than_dropped() {
+        // A malformed table still has to render: the reader can see it is
+        // malformed, which a missing table would not tell them.
+        let table = MarkdownTable::parse("| a | b | c |\n|---|---|---|\n| d |\n").unwrap();
+        assert_eq!(table.columns(), 3);
+        assert_eq!(table.rows.len(), 1);
+    }
+
+    #[test]
+    fn a_pipe_inside_a_code_block_is_not_a_table() {
+        // The reason tables are located by parsing rather than by matching
+        // lines.
+        let section = "Text\n\n```sh\n| a | b |\n|---|---|\n```\n";
+        let segments = split_tables(section);
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], Segment::Markdown(_)));
+    }
+
+    #[test]
+    fn a_table_is_split_out_of_the_prose_around_it() {
+        let section = "Before\n\n| a | b |\n|---|---|\n| c | d |\n\nAfter\n";
+        let segments = split_tables(section);
+        let kinds: Vec<&str> = segments
+            .iter()
+            .map(|s| match s {
+                Segment::Markdown(_) => "markdown",
+                Segment::Table(_) => "table",
+            })
+            .collect();
+        assert_eq!(kinds, ["markdown", "table", "markdown"]);
+        let Segment::Table(text) = &segments[1] else {
+            panic!("expected a table");
+        };
+        assert!(MarkdownTable::parse(text).is_some(), "got {text:?}");
+    }
+
+    #[test]
+    fn a_code_span_in_a_cell_keeps_its_own_font() {
+        // Rendering a cell as plain text would print the backticks at the
+        // reader, which is what the first attempt did.
+        let job = cell_layout("`gui` (default)", false, &crate::core::style::DARK);
+        let fonts: Vec<egui::FontFamily> = job
+            .sections
+            .iter()
+            .map(|s| s.format.font_id.family.clone())
+            .collect();
+        assert!(
+            fonts.contains(&egui::FontFamily::Monospace),
+            "the code span should be monospace: {fonts:?}"
+        );
+        assert!(
+            fonts.contains(&egui::FontFamily::Proportional),
+            "the rest should not be: {fonts:?}"
+        );
+        assert!(
+            !job.text.contains('`'),
+            "backticks should be gone: {:?}",
+            job.text
+        );
+    }
+
+    #[test]
+    fn emphasis_and_links_in_a_cell_lose_their_markers() {
+        // The README's own table has `**`gui`** (default)`, which came out with
+        // its asterisks showing.
+        let job = cell_layout("**`gui`** (default)", false, &crate::core::style::DARK);
+        assert_eq!(job.text, "gui (default)");
+
+        let job = cell_layout(
+            "[the docs](https://example.com)",
+            false,
+            &crate::core::style::DARK,
+        );
+        assert_eq!(job.text, "the docs");
+        let link = egui::Color32::from_rgb(
+            crate::core::style::DARK.link[0],
+            crate::core::style::DARK.link[1],
+            crate::core::style::DARK.link[2],
+        );
+        assert!(
+            job.sections.iter().any(|s| s.format.color == link),
+            "a link should be coloured as one"
+        );
+    }
+
+    #[test]
+    fn emphasis_markers_inside_a_code_span_are_characters() {
+        let job = cell_layout("`a * b`", false, &crate::core::style::DARK);
+        assert_eq!(job.text, "a * b");
+    }
+
+    #[test]
+    fn an_unpaired_backtick_stays_a_character() {
+        let job = cell_layout("a ` b", false, &crate::core::style::DARK);
+        assert_eq!(job.text, "a ` b");
+    }
+
+    fn html(markdown: &str) -> String {
+        render_simple_html(markdown, std::path::Path::new("/nonexistent"))
+    }
+
+    #[test]
+    fn an_html_heading_becomes_a_markdown_heading() {
+        // A README that centres its title with `<h1>` showed that markup at the
+        // top of the window, because the viewer passes an HTML block through as
+        // text.
+        let out = html("<h1 align=\"center\">mdr — Markdown Reader</h1>\n");
+        assert_eq!(out.trim(), "# mdr — Markdown Reader");
+    }
+
+    #[test]
+    fn an_html_image_becomes_a_markdown_image() {
+        let out =
+            html("<p align=\"center\">\n  <img src=\"assets/logo.svg\" alt=\"mdr logo\"/>\n</p>\n");
+        assert_eq!(out.trim(), "![mdr logo](assets/logo.svg)");
+    }
+
+    #[test]
+    fn an_html_paragraph_keeps_its_text() {
+        let out = html("<p align=\"center\">\n  A fast Markdown viewer.\n</p>\n");
+        assert_eq!(out.trim(), "A fast Markdown viewer.");
+    }
+
+    #[test]
+    fn html_inside_a_code_block_is_left_alone() {
+        // The whole reason blocks are located by parsing rather than by
+        // matching lines: this is code, and it has to stay the code it was
+        // written as.
+        let source = "Before\n\n```html\n<h1 align=\"center\">Not a heading</h1>\n```\n\nAfter\n";
+        assert_eq!(html(source).trim(), source.trim());
+    }
+
+    #[test]
+    fn an_unhandled_tag_keeps_what_it_wrapped() {
+        // Worse than a browser, better than showing angle brackets to a reader.
+        let out = html("<div><span class=\"x\">kept</span></div>\n");
+        assert_eq!(out.trim(), "kept");
+    }
+
+    #[test]
+    fn markdown_characters_in_html_text_stay_literal() {
+        // Alt text is HTML, so its `*` and `[` are characters, not markup —
+        // escaping them is what stops an image alt from inventing a link.
+        let out = html("<p><img src=\"a.png\" alt=\"a [b] *c*\"/></p>\n");
+        assert_eq!(out.trim(), r"![a \[b\] \*c\*](a.png)");
+    }
+
+    #[test]
+    fn html_entities_are_decoded_once() {
+        let out = html("<p><img src=\"a.png\" alt=\"Tom &amp; Jerry\"/></p>\n");
+        assert!(out.contains("Tom & Jerry"), "got {out}");
+    }
+
+    #[test]
+    fn a_document_without_html_is_returned_unchanged() {
+        let source = "# Title\n\nSome *text* and `code`.\n";
+        assert_eq!(html(source), source);
+    }
+
+    /// A fixture font file. The bytes are never parsed — `FontData` only holds
+    /// them, and nothing here builds the atlas — so what matters is the size.
+    fn fixture(dir: &std::path::Path, name: &str, bytes: usize, index: u32) -> Candidate {
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0_u8; bytes]).unwrap();
+        Candidate {
+            rank: 0,
+            family: name.to_string(),
+            path,
+            index,
+        }
+    }
+
+    #[test]
+    fn the_font_budget_stops_reading_once_the_byte_ceiling_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = fixture(dir.path(), "small", 1_000, 0);
+        let huge = fixture(dir.path(), "huge", 10_000, 0);
+        let budget = FontBudget {
+            bytes: 5_000,
+            faces: 8,
+        };
+
+        let fonts = build_font_definitions(&[(&small, Role::Ui), (&huge, Role::Fallback)], &budget);
+
+        let keys: Vec<&String> = fonts.font_data.keys().collect();
+        assert!(
+            keys.iter().any(|k| k.contains("small")),
+            "the face that fits must be loaded: {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.contains("huge")),
+            "a face over the remaining budget must be skipped: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_face_over_budget_does_not_block_the_ones_behind_it() {
+        // The order is by preference, so a single large font early in the list
+        // must not cost every fallback behind it.
+        let dir = tempfile::tempdir().unwrap();
+        let huge = fixture(dir.path(), "huge", 10_000, 0);
+        let small = fixture(dir.path(), "small", 1_000, 0);
+        let budget = FontBudget {
+            bytes: 5_000,
+            faces: 8,
+        };
+
+        let fonts = build_font_definitions(
+            &[(&huge, Role::Fallback), (&small, Role::Fallback)],
+            &budget,
+        );
+
+        assert!(
+            fonts.font_data.keys().any(|k| k.contains("small")),
+            "the loader should carry on past a face it cannot afford"
+        );
+    }
+
+    #[test]
+    fn the_font_budget_caps_how_many_faces_are_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let faces: Vec<Candidate> = (0..5)
+            .map(|i| fixture(dir.path(), &format!("face{i}"), 10, 0))
+            .collect();
+        let budget = FontBudget {
+            bytes: 1_000_000,
+            faces: 2,
+        };
+
+        let candidates: Vec<(&Candidate, Role)> =
+            faces.iter().map(|c| (c, Role::Fallback)).collect();
+        let fonts = build_font_definitions(&candidates, &budget);
+
+        let added = fonts
+            .font_data
+            .keys()
+            .filter(|k| k.contains("face"))
+            .count();
+        assert_eq!(added, 2, "the face count is a ceiling, not a suggestion");
+    }
+
+    #[test]
+    fn nothing_is_read_when_the_budget_admits_nothing() {
+        // Belt and braces on the selection order: a zero budget must leave
+        // egui's embedded fonts in place rather than produce an empty page.
+        let dir = tempfile::tempdir().unwrap();
+        let face = fixture(dir.path(), "face", 10, 0);
+        let budget = FontBudget { bytes: 0, faces: 0 };
+
+        let fonts = build_font_definitions(&[(&face, Role::Ui)], &budget);
+
+        assert!(
+            !fonts.font_data.keys().any(|k| k.contains("face")),
+            "no system face should have been read"
+        );
+        assert!(
+            !fonts.font_data.is_empty(),
+            "egui's own fonts must survive, or there is nothing left to draw with"
+        );
+    }
+
+    #[test]
+    fn a_face_inside_a_collection_keeps_its_index() {
+        // `FontData::from_owned` always says index 0. For a `.ttc` that is a
+        // different face than the one selected, so the index has to be put back
+        // or the wrong face is drawn.
+        let dir = tempfile::tempdir().unwrap();
+        let face = fixture(dir.path(), "collection.ttc", 100, 3);
+        let budget = FontBudget {
+            bytes: 1_000,
+            faces: 8,
+        };
+
+        let fonts = build_font_definitions(&[(&face, Role::Ui)], &budget);
+
+        let (_, data) = fonts
+            .font_data
+            .iter()
+            .find(|(k, _)| k.contains("collection"))
+            .expect("the face should have been loaded");
+        assert_eq!(
+            data.index, 3,
+            "the face index inside the collection is lost"
+        );
+    }
+
+    #[test]
+    fn two_faces_of_one_family_do_not_overwrite_each_other() {
+        // The defect this keying replaced: two files of the same family both
+        // report index 0, so a family-only key made the second evict the first
+        // and the body font became whichever loaded last.
+        let dir = tempfile::tempdir().unwrap();
+        let mut regular = fixture(dir.path(), "Regular.ttf", 10, 0);
+        let mut bold = fixture(dir.path(), "Bold.ttf", 10, 0);
+        regular.family = "Shared".to_string();
+        bold.family = "Shared".to_string();
+        let budget = FontBudget {
+            bytes: 1_000,
+            faces: 8,
+        };
+
+        let fonts =
+            build_font_definitions(&[(&regular, Role::Ui), (&bold, Role::Fallback)], &budget);
+
+        assert_eq!(
+            fonts.font_data.len(),
+            egui::FontDefinitions::default().font_data.len() + 2,
+            "both faces of the family must survive"
+        );
+    }
+
+    #[test]
+    fn the_chosen_faces_lead_their_family_and_fall_back_on_egui() {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = fixture(dir.path(), "ui", 10, 0);
+        let mono = fixture(dir.path(), "mono", 10, 0);
+        let budget = FontBudget {
+            bytes: 1_000,
+            faces: 8,
+        };
+
+        let fonts = build_font_definitions(&[(&ui, Role::Ui), (&mono, Role::Mono)], &budget);
+
+        let defaults = egui::FontDefinitions::default();
+        for (family, leader) in [
+            (egui::FontFamily::Proportional, "ui"),
+            (egui::FontFamily::Monospace, "mono"),
+        ] {
+            let chain = &fonts.families[&family];
+            assert!(
+                chain[0].contains(leader),
+                "the {leader} font must lead the {family:?} chain: {chain:?}"
+            );
+            // Naming the embedded keys rather than counting: two system faces
+            // would satisfy a length check on their own, and the point here is
+            // that egui's own fonts are still reachable behind them.
+            let embedded = &defaults.families[&family];
+            let kept: Vec<&String> = chain.iter().filter(|k| embedded.contains(k)).collect();
+            assert_eq!(
+                kept,
+                embedded.iter().collect::<Vec<_>>(),
+                "egui's embedded fallbacks must all survive, in order: {chain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_primary_that_does_not_fit_falls_through_to_the_next_choice() {
+        // The lists are ranked, so the best face is tried first — but it can be
+        // unreadable or larger than the budget, and then the second has to get
+        // its turn. Reducing each role to a single candidate before reading
+        // would have made that impossible.
+        let dir = tempfile::tempdir().unwrap();
+        let first = fixture(dir.path(), "first-choice", 10_000, 0);
+        let second = fixture(dir.path(), "second-choice", 100, 0);
+        let budget = FontBudget {
+            bytes: 5_000,
+            faces: 8,
+        };
+
+        let fonts = build_font_definitions(&[(&first, Role::Ui), (&second, Role::Ui)], &budget);
+
+        let leader = &fonts.families[&egui::FontFamily::Proportional][0];
+        assert!(
+            leader.contains("second-choice"),
+            "the next choice should have taken the role: {leader}"
+        );
+    }
+
+    #[test]
+    fn one_face_serving_two_roles_is_read_once() {
+        // A family can sit in both preference lists. Reading it twice would
+        // spend the budget twice and queue it twice in each chain, for a single
+        // entry that the second insert would simply overwrite.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = fixture(dir.path(), "shared", 100, 0);
+        let budget = FontBudget {
+            bytes: 1_000,
+            faces: 1,
+        };
+
+        let fonts = build_font_definitions(&[(&shared, Role::Ui), (&shared, Role::Mono)], &budget);
+
+        let proportional = &fonts.families[&egui::FontFamily::Proportional];
+        let monospace = &fonts.families[&egui::FontFamily::Monospace];
+        assert!(
+            proportional[0].contains("shared") && monospace[0].contains("shared"),
+            "the one face should lead both chains: {proportional:?} / {monospace:?}"
+        );
+        assert_eq!(
+            proportional.iter().filter(|k| k.contains("shared")).count(),
+            1,
+            "it should appear once in the chain, not once per role: {proportional:?}"
+        );
+        // A budget of one face proves it was not counted twice: a second charge
+        // would have left the monospace role unfilled.
+        assert_eq!(
+            fonts
+                .font_data
+                .keys()
+                .filter(|k| k.contains("shared"))
+                .count(),
+            1
+        );
+    }
+
+    /// Tell the context what the desktop's colour scheme is.
+    ///
+    /// `Options::begin_pass` is the same call eframe's integration makes at the
+    /// start of a pass, and it is the only thing that writes `system_theme`.
+    /// Going through it sets the real field rather than a stand-in, without
+    /// running a pass — `end_pass` wants a texture allocator, which a unit test
+    /// has no business standing up.
+    fn set_system_theme(ctx: &egui::Context, theme: egui::Theme) {
+        let input = egui::RawInput {
+            system_theme: Some(theme),
+            ..Default::default()
+        };
+        ctx.options_mut(|o| o.begin_pass(&input));
+    }
+
+    #[test]
+    fn a_forced_theme_outranks_the_system_one() {
+        // The defect behind this: both palettes were installed and neither was
+        // ever selected, so eframe stayed on `ThemePreference::System` and
+        // `--theme light` changed nothing at all in this backend.
+        for (setting, expected) in [
+            (crate::core::Theme::Light, egui::Theme::Light),
+            (crate::core::Theme::Dark, egui::Theme::Dark),
+        ] {
+            for system in [egui::Theme::Dark, egui::Theme::Light] {
+                let ctx = egui::Context::default();
+                apply_theme_preference(&ctx, setting);
+                set_system_theme(&ctx, system);
+                assert_eq!(
+                    ctx.theme(),
+                    expected,
+                    "{setting:?} must hold whatever the desktop says ({system:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auto_hands_the_choice_back_to_the_system() {
+        // `Auto` writes `System` rather than leaving the preference alone: it
+        // lives in the egui memory the `persistence` feature restores, so
+        // leaving it alone would mean silently inheriting a past run's choice.
+        for system in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            // A preference as a previous run could have left it behind.
+            ctx.set_theme(egui::ThemePreference::Dark);
+
+            apply_theme_preference(&ctx, crate::core::Theme::Auto);
+            set_system_theme(&ctx, system);
+
+            assert_eq!(
+                ctx.theme(),
+                system,
+                "a stored preference must not outlive a run that asked for auto"
+            );
+        }
+    }
+
     #[test]
     fn the_style_carries_the_shared_palette_into_both_themes() {
         use crate::core::style;
@@ -1170,6 +2553,34 @@ mod tests {
             key_action(egui::Key::Escape, egui::Modifiers::NONE, false),
             Some(Action::Quit)
         );
+    }
+
+    #[test]
+    fn t_toggles_the_theme_but_not_while_typing() {
+        // A bare key, so it has to stay typable in the search field — the same
+        // rule as `j`, `k` and `q`.
+        assert_eq!(
+            key_action(egui::Key::T, egui::Modifiers::NONE, false),
+            Some(Action::ToggleTheme)
+        );
+        assert_eq!(key_action(egui::Key::T, egui::Modifiers::NONE, true), None);
+    }
+
+    #[test]
+    fn the_toggle_flips_whatever_the_window_is_showing() {
+        // Including a theme the reader forced on the command line: one press
+        // should change what is on screen, not quietly go back to the desktop.
+        for forced in [crate::core::Theme::Light, crate::core::Theme::Dark] {
+            let ctx = egui::Context::default();
+            apply_theme_preference(&ctx, forced);
+            let before = ctx.theme();
+
+            toggle_theme(&ctx);
+            assert_ne!(ctx.theme(), before, "{forced:?} should have flipped");
+
+            toggle_theme(&ctx);
+            assert_eq!(ctx.theme(), before, "a second press should come back");
+        }
     }
 
     #[test]

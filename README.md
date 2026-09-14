@@ -140,6 +140,7 @@ local `.md` file opens that file in mdr.
 | `Ctrl/Cmd+F` | Search in the document |
 | `Esc` | Close the search (quits when no search is open) |
 | `F10` | Show or hide the table of contents |
+| `t` | Switch between the light and dark theme |
 | `j` / `↓`, `k` / `↑` | Scroll down / up |
 | `Space` / `PgDn`, `PgUp` | Page down / up |
 | `g` / `Home`, `G` / `End` | Go to top / bottom |
@@ -161,12 +162,15 @@ Press `?` in the `web` backend for this list.
 | `g` / `Home`, `G` / `End` | Go to top / bottom |
 | `Ctrl/Cmd` + `+` / `-` / `0` | Zoom in / out / reset |
 | `Ctrl/Cmd+B` | Show or hide the table of contents |
-| `Ctrl/Cmd+D` | Switch between the light and dark theme |
+| `t` | Switch between the light and dark theme |
 | `Ctrl/Cmd+P` | Print or export to PDF |
 | `?` | Show or hide the shortcut list |
 
-`Ctrl/Cmd+D` overrides the system colour scheme for the current window; without it
-the theme follows `prefers-color-scheme`.
+`t` flips the colour scheme of the current window, whether it came from
+`prefers-color-scheme` or from `--theme`. It is a bare key on purpose: `Ctrl/Cmd+D`
+is a split-pane shortcut in most terminals. Mermaid diagrams are the exception:
+one rendered to SVG carries its own colours from the start, and one drawn in the
+page is not recoloured once it is on screen.
 
 ### TUI keybindings
 
@@ -184,6 +188,11 @@ the theme follows `prefers-color-scheme`.
 | `/` or `Ctrl+F` | Open search |
 | `n` | Next search match |
 | `N` | Previous search match |
+| `t` | Switch between the light and dark theme |
+
+The terminal owns its own background, so `t` here switches the colours code
+blocks are highlighted in. Each block paints the theme's own background, so both
+themes stay legible whatever the terminal is set to.
 
 ## Features
 
@@ -195,11 +204,16 @@ the theme follows `prefers-color-scheme`.
   the terminal too. The palette follows the terminal background when it says what
   it is (`COLORFGBG`), and falls back to a dark one; `--theme dark|light` or
   `theme "light"` in the config file settles it when the terminal stays silent —
-  Terminal.app and Alacritty do.
+  Terminal.app and Alacritty do. The same setting picks the palette in `gui` and
+  `web`.
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts, and more (via mermaid-rs-renderer)
 - **Table of Contents** — auto-generated sidebar from headings with click-to-navigate
 - **Live reload** — file watching with 300ms debounce, updates on save
-- **Dark/Light theme** — follows OS theme, overridable with `Ctrl/Cmd+D` (`web` backend)
+- **Dark/Light theme** — follows the OS by default; `--theme dark|light` (or
+  `theme` in the config file) settles it. In `gui` and `web` it picks the whole
+  palette; in `tui` the terminal owns its own colours, so it selects the syntax
+  highlighting of code blocks and nothing more. The `web` backend also flips the
+  scheme live with `Ctrl/Cmd+D`
 - **YAML front matter** — recognised as metadata, so it is neither rendered nor listed in the TOC
 - **Unique heading anchors** — repeated headings get `setup`, `setup-1`, … as GitHub does
 

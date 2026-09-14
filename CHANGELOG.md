@@ -5,25 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-14
+
+The crate moves to Rust edition 2024, the configuration file finds itself, the
+two graphical backends share the document palette and base font sizes, and the
+backends are renamed.
 
 ### Changed
 
-- **Breaking: the backends are named `gui`, `tui` and `web`.** `egui` and
-  `webview` said which library draws the window, which is not what someone
-  choosing a backend is picking between: a native window, a terminal, or the
-  system webview. `mdr --backend web`, `backend gui` in `config.kdl`.
+- **Rust edition 2024**, with 1.95 as the minimum supported version — the
+  highest any dependency asks for, checked by building and testing on a pinned
+  1.95 toolchain rather than by reading manifests.
 
-  A config file written before this release is **corrected in place** the first
-  time it is read: `backend egui` becomes `backend gui`, comments and every
-  other setting are preserved, and the run says so once. Nothing to edit by
-  hand, and the migration removes itself — a file only needs fixing once. On
-  the command line there is no such mapping: `--backend egui` is simply not a
-  backend any more, and the error lists the names that are.
+- **Dependencies brought up to date**: comrak 0.55, the egui stack at 0.36, wry
+  0.57 and tao 0.37, resvg and usvg 0.48, mermaid-rs-renderer 0.3, base64 0.23.
+  comrak's `syntect-onig` feature is now selected explicitly: from 0.53 comrak
+  stopped enabling a regex engine on its own, which would have broken a
+  webview-only build.
 
-  The Cargo features keep the crate names (`egui-backend`, `webview-backend`,
-  `tui-backend`), so documented build commands and packaging recipes are
-  unaffected.
+- **A selected set of clippy lints is enforced in `Cargo.toml`.** They were all
+  fixed across the crate first, so the list is a floor the CI holds rather than
+  a wish. `clippy::pedantic` is deliberately not switched on in bulk: the CI
+  lints on a floating stable toolchain, and a lint added upstream would break
+  unrelated pull requests.
 
 - **The config file is written on first run, and its location is resolved
   rather than hard-coded.** In order, on every platform: an existing
@@ -48,7 +52,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config, including correcting an old backend name in it — but does not create
   one, so no `.config/` is left behind in the directory it was started from.
 
+- **The backends are named `gui`, `tui` and `web`.** `egui` and
+  `webview` said which library draws the window, which is not what someone
+  choosing a backend is picking between: a native window, a terminal, or the
+  system webview. `mdr --backend web`, `backend gui` in `config.kdl`.
+
+  A config file written before this release is **corrected in place** the first
+  time it is read: `backend egui` becomes `backend gui`, comments and every
+  other setting are preserved, and the run says so once. A file mdr cannot
+  write — read-only, or a symlink — is left as it is, with a warning, and the
+  run carries on. On the command line there is no such mapping: `--backend egui` is simply not a
+  backend any more, and the error lists the names that are.
+
+  The Cargo features keep the crate names (`egui-backend`, `webview-backend`,
+  `tui-backend`), so documented build commands still work.
+
 ### Added
+
+- **A `LICENSE` file.** MIT was declared in `Cargo.toml`, in the README, in the
+  Homebrew formula, in the Scoop manifest and in the Chocolatey `licenseUrl` —
+  which pointed at a 404 — but the text was nowhere in the repository, so
+  GitHub reported no licence at all. It now also travels with the software:
+  in the `.deb` and `.rpm`, in the release archives (which is where Homebrew
+  and the AUR package pick it up), and in the Nix build.
 
 - `-s, --set-default-backend <BACKEND>` writes the backend into the config
   file and exits. Only that value is replaced — comments and every other
@@ -100,6 +126,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--theme dark|light` only ever reached the terminal backend.** It was
+  accepted everywhere and applied nowhere else: `gui` and `web` followed the
+  desktop's colour scheme whatever the flag said, so `--theme light` on a dark
+  desktop rendered dark. Both now honour it, and `auto` still asks the
+  environment. The `web` backend's `Ctrl/Cmd+D` continues to flip whatever the
+  window is currently showing.
+
+  Mermaid diagrams follow the setting when the page loads. One already on
+  screen is not recoloured by the toggle, and a diagram rendered natively to
+  SVG carries its own colours either way.
+
+- **The theme toggle is now `t`, and works in all three backends.** It was
+  `Ctrl/Cmd+D` in `web` only — a combination most terminals bind to splitting a
+  pane, and one the other two backends had no equivalent for. `t` is a bare key,
+  so nothing can preempt it.
+
+  The terminal's bottom bar offers it too. That bar was one fixed string clipped
+  to the width it was given, which on an 80-column terminal cut it mid-item and
+  hid everything past the search hint; it now drops whole hints instead, keeping
+  the most useful ones.
+
+- **A light syntax theme was barely legible in the terminal.** syntect picks its
+  foregrounds for its own background, and the terminal's is whatever the reader
+  set, so `--theme light` drew dark text straight onto a dark terminal. Code
+  blocks now paint the theme's background and pad to the frame width, which
+  makes the block self-contained — the same thing `gui` and `web` do with their
+  code background.
+
+- **The `gui` backend read every installed font into memory.** It loaded the
+  whole of each font file, once per face that file contained, and pushed all of
+  them into both fallback chains — 890 faces across 473 files on the
+  development machine, 4.57 GB of font data retained before egui had built
+  anything out of it, on a document of any size. Faces are now chosen from the
+  font database's metadata and only the handful selected is read: the body font,
+  the code font, and a short list of fallbacks for scripts those two do not
+  cover, under a budget of 64 MB and eight faces. The same document now holds
+  three system faces and 13 MB.
+
+  `mdr --verbose` reports what was loaded and what it cost.
+
+- **A document opened wherever the last one had been left.** eframe's
+  `persistence` feature restores egui's memory, and a scroll area's offset is
+  part of it, so the `gui` window came up scrolled — on this repository's README
+  that is 3630 points down, past the logo and the title, which reads as the top
+  of the document simply being absent. Every document now opens at its top.
+
+- **`gui` came closer to `web`.** A rule under `h1` and `h2`, as the stylesheet
+  draws; code blocks highlighted with the same syntax themes as the terminal;
+  one colour for every table-of-contents entry, graded by size and indent rather
+  than by colour — `RichText::strong()` sets a colour of its own, so the top two
+  levels rendered as plain text and the third as a blue link, in one list — and
+  long entries wrap instead of being cut to an ellipsis.
+
+- **`gui` printed raw HTML at the reader.** `web` hands HTML to a real engine;
+  `gui` has none, and `egui_commonmark` passes an HTML block through as text, so
+  a README that centres its logo and title with `<p>` and `<h1>` showed its own
+  markup. A short, explicit set of tags — headings, paragraphs, images, line
+  breaks — is now rewritten as the Markdown that means the same thing, so it
+  travels the pipeline that was already there: image paths are resolved, SVGs
+  rasterised, headings listed in the table of contents. A declared `width` is
+  honoured for vector images. Anything outside that set keeps its text and loses
+  its tags. This is not an HTML engine: `align="center"` has no Markdown
+  equivalent and is dropped, so the content comes back but its layout does not.
+
+- **Tables in `gui` were not laid out as tables.** The viewer draws one as a
+  striped grid inside a frame: no cell borders, no padding, and a header row
+  drawn exactly like any other, with each box sized to its own content rather
+  than to its column. They are now measured and drawn here — bordered, padded
+  cells on a fixed column grid, with the header set apart by its background, and
+  inline code, emphasis and links kept inside a cell.
+
+- **The document column is capped at 900 points in `gui`**, the width the
+  stylesheet gives `web`. Prose used to run the full width of the window and a
+  code block was stretched to it.
+
+- **`web` code blocks have a copy button**, which `gui` has always had. It
+  survives a live reload, and falls back to a selection where the asynchronous
+  clipboard is unavailable.
+
+- **Every document in `web` opened with an empty band above it.** The content
+  box has padding, so the first element's own top margin could not collapse into
+  it and was added to it instead.
+
+- **A `.webp` file was accepted on its container alone.** `RIFF` also begins a
+  WAV and an AVI; the check for the `WEBP` signature that follows it sat inside
+  a branch reached only when the file did *not* start with `RIFF`, so it never
+  ran.
+
+- **A terminal reporting no rows made the terminal backend panic**, on the
+  subtraction that places the bottom bar. `script -q /dev/null mdr --backend
+  tui` is one way to get there.
+
+- **A failure between entering raw mode and the cleanup left the shell raw**,
+  and on the alternate screen. The restore now happens on every way out,
+  including a panic.
+
 - **`cat doc.md | mdr --backend tui` is usable again.** The document was drawn
   and the first key press then killed it with "Failed to initialize input
   reader", leaving the terminal on the alternate screen.
@@ -125,6 +247,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all, and `--backend` left out `auto` — the one the generated config file
   selects. A test ties both lists to what the parsers take, so they cannot
   drift apart again.
+
+### Tests
+
+- The file watcher — live reload, used by all three backends — had no tests at
+  all. It now has four, driven through real edits and through the write-then-
+  rename an editor performs, with a neighbouring file that must stay ignored.
+- The terminal backend is driven through a real pseudo-terminal, which is the
+  only way to cover starting it, pressing a key and leaving cleanly; that is
+  what catches the piped-document defect above.
+- `--set-default-backend`, the config resolution and the WebP check are covered
+  through the command line, not only through their functions.
 
 ### Removed
 

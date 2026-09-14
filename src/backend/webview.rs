@@ -224,7 +224,7 @@ fn document_swap_script(markdown: &str, base_dir: &Path) -> String {
     let body = sanitize_document_html(&resolve_local_images(&parse_markdown(markdown), base_dir));
     let toc_html = build_toc_html(&toc::extract_toc(markdown));
     format!(
-        "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {}; if (window.hljs) hljs.highlightAll();",
+        "document.querySelector('.content').innerHTML = {}; document.querySelector('.sidebar ul').innerHTML = {}; if (window.hljs) hljs.highlightAll(); if (window.addCopyButtons) window.addCopyButtons();",
         serde_json::to_string(&body).unwrap_or_default(),
         serde_json::to_string(&toc_html).unwrap_or_default(),
     )
@@ -558,6 +558,19 @@ fn rasterize_svg_to_png_data_uri(
 }
 
 fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
+    build_html_with_theme(body, toc_entries, crate::core::theme())
+}
+
+/// The page itself, with the colour scheme passed in rather than read from the
+/// process.
+///
+/// Split from [`build_html`] so a test can ask for a scheme instead of setting
+/// the global one, which the whole suite shares.
+fn build_html_with_theme(
+    body: &str,
+    toc_entries: &[toc::TocEntry],
+    theme: crate::core::Theme,
+) -> String {
     // Everything coming from the document is filtered here, before mdr's own
     // template is wrapped around it (#62). mdr's scripts are added afterwards
     // and are never sanitised.
@@ -567,7 +580,7 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     let mermaid_script = if body.contains(r#"class="mermaid""#) {
         format!(
             r"<script>{MERMAID_JS}</script>
-<script>mermaid.initialize({{ startOnLoad: true, theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'default' }});</script>"
+<script>mermaid.initialize({{ startOnLoad: true, theme: (document.documentElement.getAttribute('data-theme') || ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')) === 'dark' ? 'dark' : 'default' }});</script>"
         )
     } else {
         String::new()
@@ -579,6 +592,16 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
         )
     } else {
         String::new()
+    };
+
+    // `--theme dark|light` is the same switch Ctrl/Cmd+D flips, set before the
+    // page is first drawn. `auto` leaves the attribute off so the
+    // `prefers-color-scheme` rules below decide, which is what a reader who
+    // never passed the flag gets.
+    let theme_attr = match theme {
+        crate::core::Theme::Dark => r#" data-theme="dark""#,
+        crate::core::Theme::Light => r#" data-theme="light""#,
+        crate::core::Theme::Auto => "",
     };
 
     // Explicit per-theme rules mirroring the prefers-color-scheme blocks, so
@@ -607,7 +630,7 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     // keeps document scripts out of the page.
     format!(
         r#"<!DOCTYPE html>
-<html>
+<html{theme_attr}>
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none';">
@@ -624,6 +647,19 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
 }}
 .expandable:hover .expand-btn {{ opacity: 1; }}
 .expand-btn:hover {{ background: rgba(0,0,0,0.80); }}
+/* `gui` puts a copy button on every code block; this is the same affordance. */
+.code-wrap {{ position: relative; }}
+.copy-btn {{
+    position: absolute; top: 8px; right: 8px;
+    padding: 4px 8px;
+    font: inherit; font-size: 12px; line-height: 1.4;
+    color: var(--fg); background: var(--inline-code-bg);
+    border: 1px solid var(--border); border-radius: 4px;
+    cursor: pointer; opacity: 0.5; transition: opacity 0.15s;
+    z-index: 10;
+}}
+.code-wrap:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
+.copy-btn:hover {{ border-color: var(--fg); }}
 #expand-overlay {{
     display: none; position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
@@ -714,7 +750,19 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
         if (!query) {{ updateInfo(); return; }}
         var walker = document.createTreeWalker(
             document.querySelector('.content'),
-            NodeFilter.SHOW_TEXT, null, false
+            NodeFilter.SHOW_TEXT,
+            {{
+                acceptNode: function(node) {{
+                    // The copy button sits inside `.content` so that it can be
+                    // positioned over its code block, but its label is mdr's
+                    // own interface — searching for "Copy" should not find one
+                    // match per code block, nor put a highlight on a control.
+                    return node.parentNode && node.parentNode.closest('.copy-btn')
+                        ? NodeFilter.FILTER_REJECT
+                        : NodeFilter.FILTER_ACCEPT;
+                }}
+            }},
+            false
         );
         var textNodes = [];
         while (walker.nextNode()) textNodes.push(walker.currentNode);
@@ -809,6 +857,64 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
         btn.innerHTML = ICON;
         w.appendChild(btn);
     }}
+
+    // Every code block gets a copy button, as the `gui` backend has.
+    function addCopyButtons() {{
+        var blocks = document.querySelectorAll('.content pre');
+        for (var i = 0; i < blocks.length; i++) {{
+            var pre = blocks[i];
+            if (pre.parentNode && pre.parentNode.className === 'code-wrap') continue;
+            var w = document.createElement('div');
+            w.className = 'code-wrap';
+            pre.parentNode.insertBefore(w, pre);
+            w.appendChild(pre);
+            var btn = document.createElement('button');
+            btn.className = 'copy-btn';
+            btn.type = 'button';
+            btn.textContent = 'Copy';
+            w.appendChild(btn);
+        }}
+    }}
+    addCopyButtons();
+    // The document is replaced on reload, so the buttons are put back then too.
+    window.addCopyButtons = addCopyButtons;
+
+    document.addEventListener('click', function(e) {{
+        var copy = e.target.closest('.copy-btn');
+        if (!copy) return;
+        e.stopPropagation(); e.preventDefault();
+        var pre = copy.closest('.code-wrap').querySelector('pre');
+        if (!pre) return;
+        var text = pre.innerText;
+        var say = function(word) {{
+            copy.textContent = word;
+            setTimeout(function() {{ copy.textContent = 'Copy'; }}, 1200);
+        }};
+        var done = function() {{ say('Copied'); }};
+        var failed = function() {{ say('Failed'); }};
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(text).then(done, failed);
+            return;
+        }}
+        // Older WebKitGTK has no async clipboard: fall back to a selection.
+        var area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'absolute';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.select();
+        try {{
+            // `execCommand` reports a refusal by returning false rather than by
+            // throwing, so saying "Copied" on anything but true would be a lie.
+            if (document.execCommand('copy')) {{ done(); }} else {{ failed(); }}
+        }} catch (err) {{
+            failed();
+        }} finally {{
+            // Even after an exception: otherwise the textarea stays in the page.
+            document.body.removeChild(area);
+        }}
+    }});
 
     // Delegated listeners — avoids per-element addEventListener issues in WebKitGTK
     document.addEventListener('click', function(e) {{
@@ -1128,11 +1234,15 @@ const SHORTCUTS: &[Shortcut] = &[
         fires_while_typing: true,
     },
     Shortcut {
-        bindings: &["mod+d"],
+        // A bare key, not `mod+d`: Ghostty, iTerm2 and Terminal.app all bind
+        // Cmd+D and Cmd+Shift+D to splitting a pane, and a reader coming from
+        // one reaches for that combination expecting a split. `t` is free in
+        // all three backends, which is why it was picked.
+        bindings: &["t"],
         action: "toggleTheme",
-        label: "Ctrl/Cmd + D",
+        label: "t",
         description: "Switch between the light and dark theme",
-        fires_while_typing: true,
+        fires_while_typing: false,
     },
     Shortcut {
         bindings: &["mod+p"],
@@ -1997,6 +2107,18 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_toggle_stays_on_a_bare_key() {
+        // It was `Ctrl/Cmd+D`, which the common terminals bind to splitting a
+        // pane. Keeping the three backends on one bare key is the decision this
+        // pins, so putting a modifier back should fail here.
+        let toggle = SHORTCUTS
+            .iter()
+            .find(|sc| sc.action == "toggleTheme")
+            .expect("the theme toggle should be in the shortcut table");
+        assert_eq!(toggle.bindings, &["t"]);
+    }
+
+    #[test]
     fn bare_letter_shortcuts_do_not_fire_while_typing_in_the_search_field() {
         // Bare keys like j/k/g/n would otherwise be swallowed as navigation
         // the moment the user types them into the search input.
@@ -2095,6 +2217,216 @@ mod tests {
     }
 
     // --- theme toggle ---
+
+    /// The opening `<html ...>` tag of a page, and nothing else.
+    ///
+    /// Searching the whole document for `data-theme` would pass on any page:
+    /// the stylesheet carries `html[data-theme="dark"]` selectors whatever the
+    /// setting. Only the tag says which scheme the page opens in.
+    fn html_tag(page: &str) -> &str {
+        let start = page
+            .find("<html")
+            .expect("a page should have an <html> tag");
+        let end = page[start..].find('>').expect("unterminated <html> tag") + start;
+        &page[start..=end]
+    }
+
+    #[test]
+    fn a_code_block_gets_a_copy_button() {
+        // `gui` has had one on every code block; `web` had none.
+        let page = build_html_with_theme(
+            "<pre><code>cargo build</code></pre>",
+            &[],
+            crate::core::Theme::Auto,
+        );
+        assert!(
+            page.contains("addCopyButtons"),
+            "the buttons should be built"
+        );
+        assert!(page.contains(".copy-btn"), "the button needs its style");
+        assert!(
+            page.contains("clipboard") && page.contains("execCommand"),
+            "a webview without the async clipboard still needs a way to copy"
+        );
+    }
+
+    #[test]
+    fn the_copy_button_label_is_not_searchable_text() {
+        // The button is inside `.content` so it can sit over its code block,
+        // and the search walker took every text node under `.content` — so
+        // searching for "Copy" found one match per code block and could put a
+        // highlight on a control.
+        let page = build_html_with_theme(
+            "<pre><code>cargo build</code></pre>",
+            &[],
+            crate::core::Theme::Auto,
+        );
+        let walker = page
+            .split_once("createTreeWalker")
+            .expect("the search walker should be on the page")
+            .1;
+        let call = &walker[..walker.find(");").unwrap_or(walker.len())];
+        assert!(
+            !call.contains("NodeFilter.SHOW_TEXT, null"),
+            "an unfiltered walker indexes the button label: {call}"
+        );
+        assert!(
+            call.contains("closest('.copy-btn')") && call.contains("FILTER_REJECT"),
+            "nodes under the copy button must be rejected: {call}"
+        );
+    }
+
+    #[test]
+    fn the_copy_button_only_claims_success_when_it_copied() {
+        // Checking that the words are on the page says nothing about what
+        // happens: the first version called `done()` inside a `try` and so
+        // said "Copied" whenever `execCommand` returned false, which is how it
+        // reports a refusal.
+        let page = build_html_with_theme(
+            "<pre><code>cargo build</code></pre>",
+            &[],
+            crate::core::Theme::Auto,
+        );
+        let script = page
+            .split_once("var copy = e.target.closest('.copy-btn')")
+            .expect("the copy handler should be on the page")
+            .1;
+        let handler = &script[..script.find("\n    }});").unwrap_or(script.len())];
+
+        // Each of the three ways this can end reaches its own outcome.
+        assert!(
+            handler.contains("if (document.execCommand('copy')) { done(); } else { failed(); }"),
+            "a refusal must not be reported as a success: {handler}"
+        );
+        assert!(
+            handler.contains("catch (err) {\n            failed();"),
+            "an exception must say so too: {handler}"
+        );
+        assert!(
+            handler.contains("writeText(text).then(done, failed)"),
+            "a rejected promise must reach the same failure: {handler}"
+        );
+        // And the textarea goes, however the attempt ended.
+        assert!(
+            handler.contains("finally {\n            // Even after an exception")
+                && handler.contains("removeChild(area)"),
+            "the textarea must be removed even after an exception: {handler}"
+        );
+    }
+
+    #[test]
+    fn a_reload_puts_the_copy_buttons_back() {
+        // The swap replaces `.content`, which throws the buttons away with it.
+        let dir = tempfile::tempdir().unwrap();
+        let js = document_swap_script("```sh\ncargo build\n```\n", dir.path());
+        assert!(
+            js.contains("addCopyButtons"),
+            "live reload should restore them: {js}"
+        );
+    }
+
+    #[test]
+    fn a_forced_theme_reaches_the_page_itself() {
+        // `--theme light` used to stop at the terminal backend: the flag was
+        // accepted, and the window still followed the system scheme.
+        for (setting, expected) in [
+            (crate::core::Theme::Dark, "dark"),
+            (crate::core::Theme::Light, "light"),
+        ] {
+            let page = build_html_with_theme("<p>hi</p>", &[], setting);
+            assert_eq!(
+                html_tag(&page),
+                format!(r#"<html data-theme="{expected}">"#),
+                "{setting:?} should open the page in that scheme"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_leaves_the_page_to_the_system_scheme() {
+        // No attribute, so the `prefers-color-scheme` rules decide — which is
+        // what a reader who passed no flag gets, and what Ctrl/Cmd+D then
+        // toggles away from.
+        let page = build_html_with_theme("<p>hi</p>", &[], crate::core::Theme::Auto);
+        assert_eq!(html_tag(&page), "<html>");
+    }
+
+    #[test]
+    fn a_forced_theme_also_settles_the_code_colours() {
+        // The page palette and the syntax highlighting are two stylesheets. A
+        // forced scheme has to reach both, or code blocks keep the system's.
+        let page = build_html_with_theme(
+            "<pre><code>fn main() {}</code></pre>",
+            &[],
+            crate::core::Theme::Light,
+        );
+        assert_eq!(html_tag(&page), r#"<html data-theme="light">"#);
+        // Not `contains("hljs")`, and not the generic `html[data-theme=...]`
+        // either: the first only says the library is on the page and the second
+        // comes from the document stylesheet. What has to be there is a
+        // highlighting rule scoped to the theme — drop
+        // `theme_override_css(HIGHLIGHT_CSS)` and only this assertion notices.
+        let scoped_highlighting = page
+            .lines()
+            .flat_map(|line| line.split('}'))
+            .any(|rule| rule.contains(r#"html[data-theme="light"]"#) && rule.contains(".hljs"));
+        assert!(
+            scoped_highlighting,
+            "no .hljs rule is scoped to the light theme, so code keeps the system colours"
+        );
+    }
+
+    #[test]
+    fn a_mermaid_page_initialises_on_the_page_theme_not_the_system_one() {
+        // Mermaid used to read `prefers-color-scheme` directly, so with
+        // `--theme light` on a dark desktop the page came out light and the
+        // diagrams dark. It now reads the attribute first and only falls back
+        // to the media query when there is none.
+        //
+        // This covers initialisation only. A diagram already drawn is not
+        // recoloured by Ctrl/Cmd+D, and neither is a native SVG produced by
+        // `core::mermaid`, which carries its own colours.
+        let page = build_html_with_theme(
+            r#"<div class="mermaid">graph TD; A-->B;</div>"#,
+            &[],
+            crate::core::Theme::Light,
+        );
+        // The bundled library mentions `mermaid.initialize` itself, so it is the
+        // last occurrence — mdr's own call, emitted after the bundle — that is
+        // the one under test.
+        let init = page
+            .rfind("mermaid.initialize")
+            .map(|i| &page[i..(i + 300).min(page.len())])
+            .expect("a mermaid page should initialise it");
+        assert!(
+            init.contains("data-theme"),
+            "mermaid should read the page theme first, got: {init}"
+        );
+        assert!(
+            init.find("data-theme") < init.find("matchMedia"),
+            "the page theme has to be consulted before the system one: {init}"
+        );
+    }
+
+    #[test]
+    fn the_real_stylesheet_yields_an_override_for_both_themes() {
+        // The tests around this one feed it hand-written CSS. This one feeds it
+        // what the page actually gets, so a change to how the stylesheet is
+        // generated cannot silently stop the toggle from finding a theme.
+        let out = theme_override_css(&crate::core::markdown::github_css());
+        for theme in ["dark", "light"] {
+            let marker = format!("[data-theme=\"{theme}\"]");
+            assert!(
+                out.contains(&marker),
+                "no rules scoped to the {theme} theme in:\n{out}"
+            );
+            let scoped: Vec<&str> = out.lines().filter(|l| l.contains(&marker)).collect();
+            assert!(
+                scoped.iter().any(|l| l.contains("--bg")),
+                "the {theme} override should carry the palette, got: {scoped:?}"
+            );
+        }
+    }
 
     #[test]
     fn theme_override_css_scopes_dark_rules_under_a_data_attribute() {

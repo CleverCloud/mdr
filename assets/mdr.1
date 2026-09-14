@@ -55,12 +55,32 @@ are kept. mdr refuses to write a backend this binary was not built with, since
 the result would fail on the next start.
 .TP
 .BR \-t ", " \-\-theme " " \fITHEME\fR
-Colour scheme the terminal backend assumes for syntax highlighting:
+Colour scheme to render with:
 .BR auto ", " dark " or " light .
 .B auto
-reads
+asks the environment: the
+.B tui
+backend reads
 .B COLORFGBG
-and falls back to dark. Can also be set in the config file with
+and falls back to dark, while
+.B gui
+and
+.B web
+follow the desktop setting.
+.B dark
+and
+.B light
+settle it: in
+.B gui
+and
+.B web
+they pick the whole palette, while in
+.B tui
+the terminal owns its own colours and the setting selects the syntax
+highlighting of code blocks only. Every backend also flips between the two at
+runtime with
+.BR t .
+Can also be set in the config file with
 .BR "theme \(dqlight\(dq" .
 .TP
 .BR \-v ", " \-\-verbose
@@ -119,7 +139,7 @@ Boolean, enables verbose logging by default.
 Boolean, never access the network.
 .TP
 .B theme
-Colour scheme the terminal backend assumes for syntax highlighting:
+Colour scheme to render with:
 .BR auto ", " dark " or " light .
 .PP
 Booleans use the KDL syntax
