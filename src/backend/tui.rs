@@ -299,10 +299,15 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         return Err("tui backend requires a terminal (stdout is not a TTY)".into());
     }
 
-    // Setup terminal
+    // Setup terminal. Everything past this point runs with the terminal in raw
+    // mode and on the alternate screen, so the restore has to happen on every
+    // way out — including an early `?` and a panic, which a plain cleanup at the
+    // end of the function misses. A failure to read an event used to leave the
+    // user's shell raw and stuck on the alternate screen.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _restore = TerminalRestore;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -487,15 +492,27 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
+    // The terminal is restored by `_restore` going out of scope, here and on
+    // every early return above it.
     Ok(())
+}
+
+/// Puts the terminal back the way it was found, whatever happens on the way out.
+struct TerminalRestore;
+
+impl Drop for TerminalRestore {
+    fn drop(&mut self) {
+        // Nothing useful can be done about a failure here: the process is on its
+        // way out, and the message would land on a terminal that may still be
+        // raw. Each step is attempted regardless of the previous one's outcome.
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+    }
 }
 
 struct TuiApp {
@@ -709,25 +726,33 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             .to_string()
     };
 
-    let help_area = Rect {
-        x: content_area.x + 1,
-        y: content_area.y + content_area.height - 1,
-        width: content_area
-            .width
-            .saturating_sub(2)
-            .min(bar_text.len() as u16),
-        height: 1,
-    };
+    // The bar sits on the last row of the content area, so an area with no rows
+    // has nowhere to put it: `y + height - 1` used to underflow and panic on a
+    // terminal reporting a height of zero.
+    if content_area.height > 0 {
+        // `Rect::width` is a column count, so measure the bar in columns rather
+        // than in `str::len` bytes, which overstate anything outside ASCII. The
+        // `min` below already kept the bar inside the panel either way, so this
+        // corrects what the number means, not a visible overrun.
+        let available = content_area.width.saturating_sub(2);
+        let wanted = u16::try_from(Line::from(bar_text.as_str()).width()).unwrap_or(u16::MAX);
+        let help_area = Rect {
+            x: content_area.x + 1,
+            y: content_area.bottom() - 1,
+            width: available.min(wanted),
+            height: 1,
+        };
 
-    let bar_style = if app.search_mode {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::Rgb(40, 40, 40))
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let help_widget = Paragraph::new(bar_text).style(bar_style);
-    f.render_widget(help_widget, help_area);
+        let bar_style = if app.search_mode {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Rgb(40, 40, 40))
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let help_widget = Paragraph::new(bar_text).style(bar_style);
+        f.render_widget(help_widget, help_area);
+    }
 }
 
 /// Render content elements into the given area, handling scroll offset.
@@ -1768,6 +1793,42 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an app with just enough state to draw a frame.
+    fn app_for_drawing(content: &str) -> TuiApp {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        TuiApp {
+            content: content.to_string(),
+            rendered: build_content_elements(content, &PathBuf::from("t.md"), &None),
+            toc_entries: crate::core::toc::extract_toc(content),
+            file_path: PathBuf::from("t.md"),
+            watcher_rx: rx,
+            picker: None,
+            picker_queried: true,
+            content_width: 0,
+            scroll_offset: 0,
+            toc_selected: 0,
+            focus_toc: false,
+            should_quit: false,
+            search_mode: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_idx: 0,
+        }
+    }
+
+    #[test]
+    fn drawing_into_a_terminal_with_no_rows_does_not_panic() {
+        // A pty that reports 0x0 — `script -q /dev/null mdr --backend tui f.md`
+        // on macOS is one — used to underflow the bottom bar's row and abort.
+        let mut app = app_for_drawing("# Title\n\nText.\n");
+        for (w, h) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 2)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+        }
+    }
+
     use std::io::Write;
 
     #[test]

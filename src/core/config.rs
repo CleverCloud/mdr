@@ -33,6 +33,31 @@ mod tests {
     }
 
     #[test]
+    fn backend_names_are_the_documented_ones() {
+        for name in BACKENDS {
+            assert!(is_valid_backend(name), "{name} should be accepted");
+        }
+        for name in ["", "gui", "web", "nonsense", "EGUI"] {
+            assert!(!is_valid_backend(name), "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn an_unknown_backend_is_dropped_rather_than_stored() {
+        // It used to reach the dispatch table and hit `unreachable!()`, aborting
+        // the process over a stale line in a file the user was not editing.
+        let path = tmp_config("backend_bogus", "backend \"nonsense\"\nverbose #true\n");
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.backend, None, "the unusable name must not be kept");
+        assert_eq!(
+            cfg.verbose,
+            Some(true),
+            "the rest of the file must survive an unusable backend"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn load_parses_verbose_bool() {
         let path = tmp_config("verbose_true", "verbose #true\n");
         let cfg = load(&path).unwrap();
@@ -122,6 +147,18 @@ mod tests {
     }
 }
 
+/// Backend names accepted on the command line and in the config file.
+///
+/// One list for both, so a name can never be valid in one place and unknown in
+/// the other. It deliberately does not depend on the compiled features: a known
+/// but absent backend keeps the explicit "not compiled" error.
+pub const BACKENDS: &[&str] = &["auto", "egui", "webview", "tui"];
+
+/// Whether `name` is one of [`BACKENDS`].
+pub fn is_valid_backend(name: &str) -> bool {
+    BACKENDS.contains(&name)
+}
+
 /// Resolved configuration from a KDL v2 config file.
 #[derive(Default, Debug)]
 pub struct Config {
@@ -187,7 +224,20 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
         match node.name().value() {
             "backend" => {
                 if let Some(kdl::KdlValue::String(s)) = node.get(0) {
-                    cfg.backend = Some(s.clone());
+                    // A name this binary does not know used to travel all the
+                    // way to the dispatch table and hit `unreachable!()`. The
+                    // file is not what the user is editing right now, so an
+                    // unusable value is reported and dropped rather than fatal:
+                    // mdr falls back to auto-detection, the same as no entry.
+                    if is_valid_backend(s) {
+                        cfg.backend = Some(s.clone());
+                    } else {
+                        eprintln!(
+                            "mdr: unknown backend '{s}' in {}, ignoring it (expected one of: {})",
+                            path.display(),
+                            BACKENDS.join(", ")
+                        );
+                    }
                 }
             }
             "verbose" => {

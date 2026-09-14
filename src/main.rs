@@ -80,11 +80,13 @@ fn parse_theme(s: &str) -> Result<String, String> {
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
-    match s {
-        "auto" | "egui" | "webview" | "tui" => Ok(s.to_string()),
-        _ => Err(format!(
-            "unknown backend '{s}', expected 'auto', 'egui', 'webview', or 'tui'"
-        )),
+    if core::config::is_valid_backend(s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "unknown backend '{s}', expected one of: {}",
+            core::config::BACKENDS.join(", ")
+        ))
     }
 }
 
@@ -392,7 +394,15 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
             return 1;
         }
 
-        _ => unreachable!(),
+        // Both sources of a backend name are validated against
+        // `core::config::BACKENDS`, so this is unreachable in practice — but a
+        // belt-and-braces arm beats aborting the process if that ever slips.
+        // `return 1` rather than `process::exit`, so `main` still removes the
+        // temporary file a piped document was written to.
+        other => {
+            eprintln!("Error: unknown backend '{other}'");
+            return 1;
+        }
     };
 
     if let Err(e) = result {
