@@ -24,8 +24,7 @@ fn load_system_fonts(ctx: &egui::Context) {
         let name = face
             .families
             .first()
-            .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| format!("font_{}", counter));
+            .map_or_else(|| format!("font_{counter}"), |(name, _)| name.clone());
 
         if let Ok(data) = std::fs::read(source) {
             let key = format!("{}_{}", name, face.index);
@@ -53,14 +52,12 @@ fn load_system_fonts(ctx: &egui::Context) {
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_file = std::fs::canonicalize(&file_path).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&file_path))
-            .unwrap_or_else(|_| file_path.clone())
+        std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(&file_path))
     });
-    let base_dir = canonical_file
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let base_dir = canonical_file.parent().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::Path::to_path_buf,
+    );
     let raw_markdown = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| format!("# Error\nCould not read `{}`: {}", file_path.display(), e));
 
@@ -87,7 +84,6 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let file_path_clone = file_path.clone();
     eframe::run_native(
         "mdr",
         options,
@@ -98,7 +94,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 sections,
                 has_preamble,
                 caches: Vec::new(),
-                file_path: file_path_clone,
+                file_path,
                 base_dir,
                 watcher_rx,
                 toc_entries,
@@ -124,7 +120,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 /// fence does not either.
 fn heading_start_lines(markdown: &str) -> Vec<usize> {
     use comrak::nodes::NodeValue;
-    use comrak::{parse_document, Arena, Options};
+    use comrak::{Arena, Options, parse_document};
 
     let arena = Arena::new();
     let mut options = Options::default();
@@ -148,7 +144,7 @@ fn heading_start_lines(markdown: &str) -> Vec<usize> {
 }
 
 /// Split markdown into sections at heading boundaries.
-/// Returns (has_preamble, sections) where has_preamble is true if there's
+/// Returns (`has_preamble`, sections) where `has_preamble` is true if there's
 /// content before the first heading (which means headings start at index 1).
 ///
 /// The boundaries come from [`heading_start_lines`], i.e. from the same
@@ -200,7 +196,7 @@ enum Action {
 
 /// How far one arrow / `j` / `k` press scrolls, in points.
 const SCROLL_STEP: f32 = 64.0;
-/// How far one PageUp / PageDown / space press scrolls, in points.
+/// How far one `PageUp` / `PageDown` / space press scrolls, in points.
 const PAGE_STEP: f32 = 600.0;
 /// Larger than any realistic document, and clamped by the scroll area, so it
 /// lands exactly on the bottom.
@@ -369,7 +365,7 @@ impl eframe::App for MdrApp {
 
         // Search bar panel
         if self.search_active {
-            egui::Panel::top("search_bar").show_inside(root_ui, |ui| {
+            egui::Panel::top("search_bar").show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Search:");
                     let response = ui.text_edit_singleline(&mut self.search_query);
@@ -397,7 +393,7 @@ impl eframe::App for MdrApp {
 
                     let match_text = if self.search_section_matches.is_empty() {
                         if self.search_query.is_empty() {
-                            "".to_string()
+                            String::new()
                         } else {
                             "No matches".to_string()
                         }
@@ -460,12 +456,12 @@ impl eframe::App for MdrApp {
             egui::Panel::left("toc_panel")
                 .default_size(220.0)
                 .resizable(true)
-                .show_inside(root_ui, |ui| {
+                .show(root_ui, |ui| {
                     ui.heading("Table of Contents");
                     ui.separator();
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for (i, entry) in self.toc_entries.iter().enumerate() {
-                            let indent = ((entry.level as f32 - 1.0) * 12.0).max(0.0);
+                            let indent = ((f32::from(entry.level) - 1.0) * 12.0).max(0.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(indent);
                                 let text = match entry.level {
@@ -488,7 +484,7 @@ impl eframe::App for MdrApp {
         // Main content - render each section with scroll anchors
         let scroll_to = self.scroll_to_section.take();
 
-        egui::CentralPanel::default().show_inside(root_ui, |ui| {
+        egui::CentralPanel::default().show(root_ui, |ui| {
             let mut area = egui::ScrollArea::vertical();
             // Home / End jump straight to an offset; the scroll area clamps it.
             if let Some(offset) = scroll_to_offset {
@@ -509,7 +505,7 @@ impl eframe::App for MdrApp {
                     }
 
                     // Render the section
-                    let anchor_id = ui.id().with(format!("section_{}", i));
+                    let anchor_id = ui.id().with(format!("section_{i}"));
                     ui.push_id(anchor_id, |ui| {
                         CommonMarkViewer::new().show(ui, &mut self.caches[i], section);
                     });
@@ -527,7 +523,7 @@ impl eframe::App for MdrApp {
 /// - `file://` URLs break when paths contain spaces;
 /// - data URIs are self-contained and always work.
 ///
-/// SVG files are rasterized to PNG first to avoid egui_commonmark parsing issues.
+/// SVG files are rasterized to PNG first to avoid `egui_commonmark` parsing issues.
 fn resolve_local_image_paths(markdown: &str, base_dir: &std::path::Path) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -558,11 +554,11 @@ fn rewrite_image(
 ) -> String {
     // #60: remote images are downloaded and inlined as `data:` URIs, which
     // egui_commonmark renders through its own data-URL loader
-    // (`egui_commonmark_backend-0.23/src/data_url_loader.rs`, pulled in by the
+    // (`egui_commonmark_backend/src/data_url_loader.rs`, pulled in by the
     // `embedded_image` feature).
     if crate::core::net::is_remote_url(src) {
         return match fetch_remote(src) {
-            Some(data_uri) => format!("![{}]({})", alt, data_uri),
+            Some(data_uri) => format!("![{alt}]({data_uri})"),
             None => original.to_string(),
         };
     }
@@ -591,23 +587,22 @@ fn rewrite_image(
     let is_svg = abs_path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("svg"))
-        .unwrap_or(false);
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
     if is_svg {
         // Try rasterizing SVG to PNG (handles complex SVGs better)
         if let Ok(data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
-            return format!("![{}]({})", alt, data_uri);
+            return format!("![{alt}]({data_uri})");
         }
         // Fallback: embed SVG directly as data URI for egui_commonmark's SVG feature
         if let Ok(data_uri) = file_to_data_uri(&abs_path) {
-            return format!("![{}]({})", alt, data_uri);
+            return format!("![{alt}]({data_uri})");
         }
         // SVG completely failed — skip it
         return original.to_string();
     }
     // All non-SVG images: embed as base64 data URI
     match file_to_data_uri(&abs_path) {
-        Ok(data_uri) => format!("![{}]({})", alt, data_uri),
+        Ok(data_uri) => format!("![{alt}]({data_uri})"),
         Err(_) => original.to_string(),
     }
 }
@@ -639,7 +634,7 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
     };
     let data = std::fs::read(path)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    Ok(format!("data:{};base64,{}", mime, b64))
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
@@ -703,7 +698,7 @@ fn rasterize_svg_to_png_data_uri(
 
     let png_data = pixmap.encode_png()?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-    Ok(format!("data:image/png;base64,{}", b64))
+    Ok(format!("data:image/png;base64,{b64}"))
 }
 
 #[cfg(test)]
@@ -819,9 +814,9 @@ mod tests {
         let toc = toc::extract_toc(md);
         let (has_preamble, sections) = split_by_headings(md);
 
-        assert_eq!(toc.len(), 3, "{:?}", toc);
+        assert_eq!(toc.len(), 3, "{toc:?}");
         assert!(has_preamble);
-        assert_eq!(sections.len(), toc.len() + 1, "sections: {:?}", sections);
+        assert_eq!(sections.len(), toc.len() + 1, "sections: {sections:?}");
         for (i, entry) in toc.iter().enumerate() {
             let section = &sections[i + 1];
             assert!(
@@ -853,7 +848,7 @@ mod tests {
 
         assert_eq!(toc.len(), 1);
         assert!(has_preamble);
-        assert_eq!(sections.len(), 2, "sections: {:?}", sections);
+        assert_eq!(sections.len(), 2, "sections: {sections:?}");
         assert!(sections[0].contains("title: hello"));
         assert!(sections[1].starts_with("# Title"));
     }
@@ -984,7 +979,7 @@ mod tests {
             egui::Key::Home,
             egui::Key::End,
         ] {
-            assert_eq!(key_action(key, none, true), None, "{:?} fired", key);
+            assert_eq!(key_action(key, none, true), None, "{key:?} fired");
         }
         assert_eq!(key_action(egui::Key::G, egui::Modifiers::SHIFT, true), None);
     }
@@ -1030,8 +1025,7 @@ mod tests {
         );
         assert!(
             out.starts_with("![logo](data:image/png;base64,"),
-            "got {}",
-            out
+            "got {out}"
         );
     }
 
@@ -1092,7 +1086,7 @@ mod tests {
         let tmp = project();
         let docs = tmp.path().join("proj/docs");
         for src in ["data:image/png;base64,YWI=", "file:///tmp/a.png"] {
-            let original = format!("![x]({})", src);
+            let original = format!("![x]({src})");
             assert_eq!(
                 rewrite_image("x", src, &original, &docs, &never_fetch),
                 original

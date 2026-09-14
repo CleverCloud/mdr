@@ -57,9 +57,9 @@ pub enum Theme {
 impl Theme {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "auto" => Some(Theme::Auto),
-            "dark" => Some(Theme::Dark),
-            "light" => Some(Theme::Light),
+            "auto" => Some(Self::Auto),
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
             _ => None,
         }
     }

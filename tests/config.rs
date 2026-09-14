@@ -52,8 +52,7 @@ fn init_errors_if_config_already_exists() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("already exists"),
-        "stderr should mention file already exists, got: {}",
-        stderr
+        "stderr should mention file already exists, got: {stderr}"
     );
 
     let _ = std::fs::remove_file(&path);
@@ -77,8 +76,7 @@ fn explicit_missing_config_errors() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found"),
-        "should report config file not found, got: {}",
-        stderr
+        "should report config file not found, got: {stderr}"
     );
 
     let _ = std::fs::remove_file(&md);

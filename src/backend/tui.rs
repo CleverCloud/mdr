@@ -7,7 +7,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -56,7 +56,7 @@ impl WrappedText {
 }
 
 /// Represents a single line element in the rendered content.
-/// Lines can be either text (rendered as ratatui Lines) or images (rendered as StatefulImage).
+/// Lines can be either text (rendered as ratatui Lines) or images (rendered as `StatefulImage`).
 enum ContentElement {
     TextLine(WrappedText),
     /// An image element that spans a number of rows in the terminal.
@@ -77,10 +77,8 @@ impl ContentElement {
     /// Returns the number of terminal rows this element occupies.
     fn row_height(&self) -> u16 {
         match self {
-            ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) => {
-                text.height() as u16
-            }
-            ContentElement::Image { height, .. } => *height,
+            Self::TextLine(text) | Self::ImagePlaceholder(text) => text.height() as u16,
+            Self::Image { height, .. } => *height,
         }
     }
 }
@@ -133,7 +131,7 @@ fn continuation_prefix(line: &Line<'_>) -> Span<'static> {
     if rest.starts_with(GUTTER) {
         // Keep the gutter, and its colour, on every folded row.
         let style = line.spans.first().map(|s| s.style).unwrap_or_default();
-        return Span::styled(format!("{}{}", indent, GUTTER), style);
+        return Span::styled(format!("{indent}{GUTTER}"), style);
     }
 
     const MARKERS: &[&str] = &["• ", "☑ ", "☐ ", "▎ ", "- ", "* "];
@@ -255,8 +253,7 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
                 let idx = remaining
                     .char_indices()
                     .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len());
+                    .map_or(remaining.len(), |(i, _)| i);
                 remaining.split_at(idx)
             } else {
                 (head, tail)
@@ -558,10 +555,10 @@ fn compute_search_matches(elements: &[ContentElement], query: &str) -> Vec<usize
     let query_lower = query.to_lowercase();
     let mut row_offset: usize = 0;
     for element in elements {
-        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
-            if text.text().to_lowercase().contains(&query_lower) {
-                matches.push(row_offset);
-            }
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element
+            && text.text().to_lowercase().contains(&query_lower)
+        {
+            matches.push(row_offset);
         }
         row_offset += element.row_height() as usize;
     }
@@ -853,10 +850,10 @@ fn find_heading_row(
     let mut row_offset: usize = 0;
 
     for element in elements {
-        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
-            if text.text().contains(search_text) {
-                return Some(row_offset);
-            }
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element
+            && text.text().contains(search_text)
+        {
+            return Some(row_offset);
         }
         row_offset += element.row_height() as usize;
     }
@@ -872,9 +869,7 @@ fn build_content_elements(
 ) -> Vec<ContentElement> {
     let text_lines = markdown_to_lines_with_images(content);
     let canonical_file = std::fs::canonicalize(file_path).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(file_path))
-            .unwrap_or_else(|_| file_path.clone())
+        std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(file_path))
     });
     let base_dir = canonical_file
         .parent()
@@ -892,12 +887,12 @@ fn build_content_elements(
                     Ok(svg) => {
                         match rasterize_svg(&svg) {
                             Ok(dyn_img) => {
-                                if let Some(ref picker) = picker {
+                                if let Some(picker) = picker {
                                     let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
-                                    let aspect = img_h as f64 / img_w as f64;
+                                    let aspect = f64::from(img_h) / f64::from(img_w);
                                     let target_cols = 100u16;
                                     let target_rows =
-                                        ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                                        (f64::from(target_cols) * aspect / 2.0).ceil() as u16;
                                     let height = target_rows.clamp(4, 40);
 
                                     let protocol = Box::new(picker.new_resize_protocol(dyn_img));
@@ -922,15 +917,15 @@ fn build_content_elements(
                 }
             }
             ParsedLine::ImageRef { alt, url } => {
-                if let Some(ref picker) = picker {
+                if let Some(picker) = picker {
                     match load_image(&url, base_dir) {
                         Ok(dyn_img) => {
                             // Calculate image height in rows. Use a reasonable default:
                             // Fill terminal width for readable images.
                             let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
-                            let aspect = img_h as f64 / img_w as f64;
+                            let aspect = f64::from(img_h) / f64::from(img_w);
                             let target_cols = 100u16;
-                            let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                            let target_rows = (f64::from(target_cols) * aspect / 2.0).ceil() as u16;
                             let height = target_rows.clamp(4, 40);
 
                             let protocol = Box::new(picker.new_resize_protocol(dyn_img));
@@ -948,7 +943,7 @@ fn build_content_elements(
                             };
                             elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
                                 Line::from(Span::styled(
-                                    format!("[Image: {}]", label),
+                                    format!("[Image: {label}]"),
                                     Style::default().fg(Color::Magenta).italic(),
                                 )),
                             )));
@@ -963,7 +958,7 @@ fn build_content_elements(
                     };
                     elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
                         Line::from(Span::styled(
-                            format!("[Image: {}]", label),
+                            format!("[Image: {label}]"),
                             Style::default().fg(Color::Magenta).italic(),
                         )),
                     )));
@@ -985,7 +980,7 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
     ))));
     for line in source.lines() {
         elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
-            Span::styled(format!("│ {}", line), Style::default().fg(Color::Green)),
+            Span::styled(format!("│ {line}"), Style::default().fg(Color::Green)),
         ))));
     }
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
@@ -1020,7 +1015,7 @@ fn load_image(
             return Err("path traversal blocked: image path escapes the project directory".into());
         }
         crate::core::image_validation::validate_image_file(&path)
-            .map_err(|e| format!("invalid image file: {}", e))?;
+            .map_err(|e| format!("invalid image file: {e}"))?;
         // SVG files need rasterization
         if path.extension().and_then(|e| e.to_str()) == Some("svg") {
             let svg_data = std::fs::read_to_string(&path)?;
@@ -1057,7 +1052,7 @@ fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn st
     Ok(img)
 }
 
-/// Rasterize an SVG string to a DynamicImage using resvg/usvg.
+/// Rasterize an SVG string to a `DynamicImage` using resvg/usvg.
 fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
     use std::sync::{Arc, OnceLock};
 
@@ -1114,7 +1109,7 @@ enum ParsedLine {
         alt: String,
         url: String,
     },
-    /// A mermaid diagram source extracted from a ```mermaid code block.
+    /// A mermaid diagram source extracted from a fenced `mermaid` code block.
     MermaidRef {
         source: String,
     },
@@ -1144,7 +1139,7 @@ const CODE_FRAME_BOTTOM: &str = "└──────────────�
 /// A named language used to leave the box open on the right.
 fn code_frame_top(label: &str) -> String {
     let inner = str_width(CODE_FRAME_BOTTOM).saturating_sub(2);
-    let opening = format!("─ {} ", label);
+    let opening = format!("─ {label} ");
     let fill = inner.saturating_sub(str_width(&opening));
     format!("┌{}{}┐", opening, "─".repeat(fill))
 }
@@ -1238,7 +1233,7 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
     let mut out = Vec::new();
     for line in code.lines() {
         // `load_defaults_newlines` expects the newline to be present.
-        let with_newline = format!("{}\n", line);
+        let with_newline = format!("{line}\n");
         match highlighter.highlight_line(&with_newline, syntaxes) {
             Ok(ranges) => out.push(
                 ranges
@@ -1265,7 +1260,7 @@ struct BlockCtx {
     indent: usize,
     quote: usize,
     /// Inside a tight list, paragraphs must not be separated by a blank line —
-    /// that is what "tight" means in CommonMark.
+    /// that is what "tight" means in `CommonMark`.
     tight: bool,
 }
 
@@ -1459,9 +1454,9 @@ impl MdRenderer {
             NodeValue::Table(table) => self.table(node, ctx, &table.alignments),
 
             NodeValue::FootnoteDefinition(def) => {
-                let mut sub = MdRenderer::new();
+                let mut sub = Self::new();
                 sub.children(node, BlockCtx::default());
-                self.footnotes.push((def.name.clone(), sub.out));
+                self.footnotes.push((def.name, sub.out));
             }
 
             NodeValue::HtmlBlock(html) => {
@@ -1540,7 +1535,7 @@ impl MdRenderer {
         let mut widths = vec![0usize; columns];
         for (_, cells) in &rows {
             for (i, cell) in cells.iter().enumerate() {
-                let w: usize = cell.iter().map(|s| s.width()).sum();
+                let w: usize = cell.iter().map(ratatui::prelude::Span::width).sum();
                 widths[i] = widths[i].max(w);
             }
         }
@@ -1554,7 +1549,7 @@ impl MdRenderer {
                 }
                 let empty = Vec::new();
                 let cell = cells.get(col).unwrap_or(&empty);
-                let used: usize = cell.iter().map(|s| s.width()).sum();
+                let used: usize = cell.iter().map(ratatui::prelude::Span::width).sum();
                 let pad = width.saturating_sub(used);
                 let align = alignments
                     .get(col)
@@ -1607,7 +1602,7 @@ impl MdRenderer {
                 let mut body = body.into_iter();
                 if let Some(ParsedLine::Text(first)) = body.next() {
                     let mut spans = vec![Span::styled(
-                        format!("[{}] ", name),
+                        format!("[{name}] "),
                         Style::default().fg(Color::Yellow).bold(),
                     )];
                     spans.extend(first.spans);
@@ -1706,7 +1701,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
     match value {
         NodeValue::Text(text) => out.push(Span::styled(text.to_string(), style)),
         NodeValue::Code(code) => out.push(Span::styled(
-            code.literal.clone(),
+            code.literal,
             style.fg(Color::Green).bg(Color::Rgb(40, 40, 40)),
         )),
         NodeValue::Emph => descend(node, style.italic(), out),
@@ -1725,7 +1720,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
                 alt
             };
             out.push(Span::styled(
-                format!("[{}]", label),
+                format!("[{label}]"),
                 style.fg(Color::Magenta).italic(),
             ));
         }
@@ -1734,7 +1729,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
             style.fg(Color::Yellow),
         )),
         NodeValue::HtmlInline(html) => {
-            out.push(Span::styled(html.clone(), style.fg(Color::DarkGray)))
+            out.push(Span::styled(html, style.fg(Color::DarkGray)));
         }
         NodeValue::Escaped => descend(node, style, out),
         _ => descend(node, style, out),
@@ -1753,7 +1748,7 @@ fn descend<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'static>>
 /// terminal, the table of contents and the two graphical backends agree on the
 /// structure of the document (#59).
 fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
-    use comrak::{parse_document, Arena, Options};
+    use comrak::{Arena, Options, parse_document};
 
     let arena = Arena::new();
     let mut options = Options::default();
@@ -1844,7 +1839,7 @@ mod tests {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
         let b64 =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg.as_bytes());
-        let data_uri = format!("data:image/svg+xml;base64,{}", b64);
+        let data_uri = format!("data:image/svg+xml;base64,{b64}");
 
         let result = load_image(&data_uri, std::path::Path::new("."));
         assert!(
@@ -1880,8 +1875,7 @@ mod tests {
             .expect("Should have a MermaidRef");
         assert!(
             mermaid_source.contains("graph LR"),
-            "MermaidRef should contain the mermaid source, got: {}",
-            mermaid_source
+            "MermaidRef should contain the mermaid source, got: {mermaid_source}"
         );
         assert!(
             mermaid_source.contains("A-->B"),
@@ -2011,13 +2005,11 @@ mod tests {
         let line = Line::from("alpha beta gamma");
         for width in 0..6 {
             let out = wrap_line(&line, width);
-            assert!(!out.is_empty(), "width {} produced no line at all", width);
+            assert!(!out.is_empty(), "width {width} produced no line at all");
             let joined: String = out.iter().map(|l| plain_text(l)).collect();
             assert!(
                 joined.replace(' ', "").contains("alphabetagamma"),
-                "width {} lost text: {:?}",
-                width,
-                joined
+                "width {width} lost text: {joined:?}"
             );
         }
     }
@@ -2034,13 +2026,11 @@ mod tests {
         let second = plain_text(&out[1]);
         assert!(
             second.starts_with("    "),
-            "continuation must line up under the item text, got {:?}",
-            second
+            "continuation must line up under the item text, got {second:?}"
         );
         assert!(
             !second.contains('\u{2022}'),
-            "the bullet must not be repeated: {:?}",
-            second
+            "the bullet must not be repeated: {second:?}"
         );
     }
 
@@ -2069,9 +2059,7 @@ mod tests {
         let wrapped = total_content_rows(&elements);
         assert!(
             wrapped > unwrapped,
-            "wrapping must be reflected in the scroll height ({} -> {})",
-            unwrapped,
-            wrapped
+            "wrapping must be reflected in the scroll height ({unwrapped} -> {wrapped})"
         );
     }
 
@@ -2089,18 +2077,17 @@ mod tests {
         // above it, otherwise jumping to a match scrolls to the wrong place.
         let mut expected = 0usize;
         for element in &elements {
-            if let ContentElement::TextLine(text) = element {
-                if text.text().contains("needle") {
-                    break;
-                }
+            if let ContentElement::TextLine(text) = element
+                && text.text().contains("needle")
+            {
+                break;
             }
             expected += element.row_height() as usize;
         }
         assert_eq!(matches[0], expected);
         assert!(
             expected >= 4,
-            "the wrapped paragraph should push the match down, got {}",
-            expected
+            "the wrapped paragraph should push the match down, got {expected}"
         );
     }
 
@@ -2256,19 +2243,15 @@ mod fidelity_tests {
             "a-very-long-language-name-indeed",
         ] {
             let top = code_frame_top(label);
-            assert!(top.starts_with('┌'), "{:?}", top);
+            assert!(top.starts_with('┌'), "{top:?}");
             assert!(
                 top.ends_with('┐'),
-                "top edge left open for {:?}: {:?}",
-                label,
-                top
+                "top edge left open for {label:?}: {top:?}"
             );
             assert_eq!(
                 str_width(&top),
                 str_width(CODE_FRAME_BOTTOM),
-                "top and bottom edges must line up for {:?}: {:?}",
-                label,
-                top
+                "top and bottom edges must line up for {label:?}: {top:?}"
             );
         }
     }
@@ -2346,7 +2329,7 @@ mod fidelity_tests {
 
     // --- regressions found while writing the AST renderer ---
 
-    /// CommonMark "tight" vs "loose": a list written without blank lines
+    /// `CommonMark` "tight" vs "loose": a list written without blank lines
     /// between its items must not gain any, and one written with them must
     /// keep them. Both directions broke at different points of the rewrite.
     #[test]
@@ -2355,17 +2338,12 @@ mod fidelity_tests {
         let blanks = tight.iter().filter(|l| l.trim().is_empty()).count();
         assert_eq!(
             blanks, 0,
-            "a tight list must not gain blank lines: {:?}",
-            tight
+            "a tight list must not gain blank lines: {tight:?}"
         );
 
         let loose = rendered("- un\n\n- deux\n\n- trois\n");
         let blanks = loose.iter().filter(|l| l.trim().is_empty()).count();
-        assert!(
-            blanks >= 2,
-            "a loose list must keep its spacing: {:?}",
-            loose
-        );
+        assert!(blanks >= 2, "a loose list must keep its spacing: {loose:?}");
     }
 
     /// A list nested inside a tight list must not add spacing of its own.
@@ -2374,15 +2352,13 @@ mod fidelity_tests {
         let lines = rendered("- un\n- deux\n  - imbriqué\n- trois\n");
         assert!(
             !lines.iter().any(|l| l.trim().is_empty()),
-            "no blank line belongs inside a tight list: {:?}",
-            lines
+            "no blank line belongs inside a tight list: {lines:?}"
         );
         assert!(
             lines
                 .iter()
                 .any(|l| l.starts_with("  ") && l.contains("imbriqué")),
-            "the nested item must keep its indent: {:?}",
-            lines
+            "the nested item must keep its indent: {lines:?}"
         );
     }
 
@@ -2411,18 +2387,11 @@ mod fidelity_tests {
         for raw in ["**", "~~", "`", "](", "http://x"] {
             assert!(
                 !joined.contains(raw),
-                "raw {:?} reached the screen: {:?}",
-                raw,
-                joined
+                "raw {raw:?} reached the screen: {joined:?}"
             );
         }
         for word in ["b", "c", "d", "e", "f", "end"] {
-            assert!(
-                joined.contains(word),
-                "{:?} was dropped: {:?}",
-                word,
-                joined
-            );
+            assert!(joined.contains(word), "{word:?} was dropped: {joined:?}");
         }
     }
 
@@ -2435,7 +2404,7 @@ mod fidelity_tests {
             .find(|l| l.matches('x').count() == 3)
             .expect("body row");
         let cells: Vec<&str> = body.split('│').collect();
-        assert_eq!(cells.len(), 3, "expected three cells: {:?}", body);
+        assert_eq!(cells.len(), 3, "expected three cells: {body:?}");
         assert!(cells[0].starts_with('x'), "left column: {:?}", cells[0]);
         assert!(
             cells[2].trim_start().ends_with('x'),
@@ -2451,14 +2420,11 @@ mod fidelity_tests {
             let lines = rendered(md);
             assert!(
                 lines.iter().any(|l| l.trim() == title),
-                "expected a line holding just {:?}, got {:?}",
-                title,
-                lines
+                "expected a line holding just {title:?}, got {lines:?}"
             );
             assert!(
                 !lines.iter().any(|l| l.contains('#')),
-                "the hashes must not reach the screen, got {:?}",
-                lines
+                "the hashes must not reach the screen, got {lines:?}"
             );
         }
     }
@@ -2470,8 +2436,7 @@ mod fidelity_tests {
         let used = colours(md);
         assert!(
             used.len() > 3,
-            "a highlighted Rust block should use more than a couple of colours, got {:?}",
-            used
+            "a highlighted Rust block should use more than a couple of colours, got {used:?}"
         );
     }
 
@@ -2485,8 +2450,7 @@ mod fidelity_tests {
             .collect();
         assert!(
             lines.len() >= 2,
-            "expected header and body rows, got {:?}",
-            lines
+            "expected header and body rows, got {lines:?}"
         );
         // Deliberately not trimmed: the trailing padding *is* the alignment.
         let widths: std::collections::BTreeSet<usize> =
@@ -2494,8 +2458,7 @@ mod fidelity_tests {
         assert_eq!(
             widths.len(),
             1,
-            "every row of a table must be the same width once padded, got {:?}",
-            lines
+            "every row of a table must be the same width once padded, got {lines:?}"
         );
     }
 
@@ -2508,13 +2471,11 @@ mod fidelity_tests {
         let lines = rendered(md);
         assert!(
             lines.iter().any(|l| l.contains("The note itself")),
-            "the footnote body must appear, got {:?}",
-            lines
+            "the footnote body must appear, got {lines:?}"
         );
         assert!(
             !lines.iter().any(|l| l.contains("[^1]")),
-            "the raw footnote syntax must not reach the screen, got {:?}",
-            lines
+            "the raw footnote syntax must not reach the screen, got {lines:?}"
         );
     }
 }

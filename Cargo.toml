@@ -1,7 +1,7 @@
 [package]
 name = "mdr"
 version = "0.5.1"
-edition = "2021"
+edition = "2024"
 rust-version = "1.95"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 license = "MIT"
@@ -49,32 +49,37 @@ tui-backend = [
 [dependencies]
 # Core
 clap = { version = "4", features = ["derive"] }
-comrak = { version = "0.52", default-features = false, features = ["syntect"] }
+# `syntect-onig` rather than `syntect`: from 0.53 comrak stopped enabling a regex
+# engine for syntect on its own, and a webview-only build (where the terminal
+# backend's own syntect dependency is absent) would no longer link.
+comrak = { version = "0.55", default-features = false, features = [
+  "syntect-onig",
+] }
 notify = "8"
 notify-debouncer-mini = "0.7"
-mermaid-rs-renderer = { version = "0.2", default-features = false }
+mermaid-rs-renderer = { version = "0.3", default-features = false }
 regex = "1"
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 kdl = "6"
 
 # egui backend
-eframe = { version = "0.34", features = ["persistence"], optional = true }
-egui_commonmark = { version = "0.23", features = [
+eframe = { version = "0.36", features = ["persistence"], optional = true }
+egui_commonmark = { version = "0.25", features = [
   "better_syntax_highlighting",
   "load-images",
   "svg",
   "embedded_image",
 ], optional = true }
-resvg = { version = "0.47", optional = true }
-usvg = { version = "0.47", optional = true }
+resvg = { version = "0.48", optional = true }
+usvg = { version = "0.48", optional = true }
 tiny-skia = { version = "0.12", optional = true }
-fontdb = { version = "0.23", optional = true }
+fontdb = { version = "0.24", optional = true }
 
 # webview backend
-wry = { version = "0.55", optional = true }
-tao = { version = "0.35", optional = true }
-muda = { version = "0.19", optional = true }
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", optional = true }
+muda = { version = "0.20", optional = true }
 
 # tui backend
 ratatui = { version = "0.30", optional = true }
@@ -99,6 +104,36 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Selected lints above clippy's default set, enforced by the CI through
+# `-D warnings`. Every one was fixed across the crate before being listed, so
+# this is a floor rather than a wish.
+#
+# They are named one by one instead of switching on `clippy::pedantic`: the CI
+# lints on a floating stable toolchain, and naming them keeps a future release
+# from enabling new pedantic lints on unrelated pull requests. It is not a
+# guarantee of stability — existing lints and clippy's own default set still
+# move with stable.
+#
+# The rest of `pedantic` was reviewed and deliberately left off, mostly numeric
+# conversions in the renderers and suggestions that read worse than the code
+# they replace. Where ownership or readability warrants it, prefer a narrow
+# `#[allow]` with a reason over dropping a lint from this list.
+[lints.clippy]
+assigning_clones = "warn"
+cast_lossless = "warn"
+doc_markdown = "warn"
+manual_string_new = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+needless_raw_string_hashes = "warn"
+or_fun_call = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
+use_self = "warn"
 
 [package.metadata.deb]
 section = "text"

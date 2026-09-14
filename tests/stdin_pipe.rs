@@ -59,8 +59,7 @@ fn stdin_dash_argument_does_not_error_file_not_found() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("file '-' not found"),
-        "mdr should read from stdin when '-' is passed, got stderr: {}",
-        stderr
+        "mdr should read from stdin when '-' is passed, got stderr: {stderr}"
     );
 }
 
@@ -118,26 +117,25 @@ fn stdin_pipe_temp_file_is_created_then_removed_on_exit() {
     let path: PathBuf = stderr
         .lines()
         .find_map(|l| l.split_once("piped input stored in "))
-        .map(|(_, p)| PathBuf::from(p.trim()))
-        .unwrap_or_else(|| panic!("mdr -v should report the stdin temp file, got: {}", stderr));
+        .map_or_else(
+            || panic!("mdr -v should report the stdin temp file, got: {stderr}"),
+            |(_, p)| PathBuf::from(p.trim()),
+        );
 
     let mdr_dir = tmp.path().join("mdr");
     assert_eq!(
         path.parent(),
         Some(mdr_dir.as_path()),
-        "temp file should live in <tmpdir>/mdr, got {:?}",
-        path
+        "temp file should live in <tmpdir>/mdr, got {path:?}"
     );
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
         name.starts_with("stdin-") && name.ends_with(".md"),
-        "unexpected temp file name: {}",
-        name
+        "unexpected temp file name: {name}"
     );
     assert!(
         !path.exists(),
-        "temp file {:?} should be removed when mdr exits",
-        path
+        "temp file {path:?} should be removed when mdr exits"
     );
     assert!(
         stdin_temp_files(&mdr_dir).is_empty(),
@@ -159,8 +157,7 @@ fn temp_dir_is_created_with_owner_only_permissions() {
     let mode = std::fs::metadata(&mdr_dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o700,
-        "<tmpdir>/mdr should be created with mode 0700, got {:o}",
-        mode
+        "<tmpdir>/mdr should be created with mode 0700, got {mode:o}"
     );
 }
 
@@ -217,8 +214,7 @@ fn temp_dir_occupied_by_a_regular_file_is_an_error() {
     assert!(!ok, "mdr should fail when <tmpdir>/mdr is not a directory");
     assert!(
         stderr.contains("temp"),
-        "error should mention the temp directory, got: {}",
-        stderr
+        "error should mention the temp directory, got: {stderr}"
     );
 }
 
@@ -253,7 +249,6 @@ fn nonexistent_file_shows_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found"),
-        "should show file not found error, got stderr: {}",
-        stderr
+        "should show file not found error, got stderr: {stderr}"
     );
 }

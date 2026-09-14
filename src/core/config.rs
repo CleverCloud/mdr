@@ -5,7 +5,7 @@ mod tests {
     use super::*;
 
     fn tmp_config(name: &str, content: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("mdr_test_config_{}.kdl", name));
+        let path = std::env::temp_dir().join(format!("mdr_test_config_{name}.kdl"));
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, content).unwrap();
         path
@@ -153,8 +153,7 @@ backend webview
 pub fn default_path() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
         .join(".config/mdr/config.kdl")
 }
 
@@ -203,10 +202,7 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
                     if crate::core::Theme::parse(s).is_some() {
                         cfg.theme = Some(s.clone());
                     } else {
-                        eprintln!(
-                            "mdr: unknown theme '{}', expected 'auto', 'dark' or 'light'",
-                            s
-                        );
+                        eprintln!("mdr: unknown theme '{s}', expected 'auto', 'dark' or 'light'");
                     }
                 }
             }
@@ -217,7 +213,7 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
                     _ => true,
                 });
             }
-            other => eprintln!("mdr: unknown config key '{}'", other),
+            other => eprintln!("mdr: unknown config key '{other}'"),
         }
     }
     Ok(cfg)

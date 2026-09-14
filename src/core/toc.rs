@@ -1,6 +1,6 @@
 use crate::core::slug::SlugGenerator;
 use comrak::nodes::NodeValue;
-use comrak::{parse_document, Arena, Options};
+use comrak::{Arena, Options, parse_document};
 
 #[derive(Debug, Clone)]
 pub struct TocEntry {
@@ -224,7 +224,7 @@ mod anchor_tests {
     fn front_matter_does_not_produce_a_toc_entry() {
         let md = "---\ntitle: front matter\ntags: [a, b]\n---\n\n# Title\n";
         let toc = extract_toc(md);
-        assert_eq!(toc.len(), 1, "{:?}", toc);
+        assert_eq!(toc.len(), 1, "{toc:?}");
         assert_eq!(toc[0].text, "Title");
     }
 }

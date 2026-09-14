@@ -6,7 +6,7 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
-use crate::core::markdown::{parse_markdown, GITHUB_CSS};
+use crate::core::markdown::{GITHUB_CSS, parse_markdown};
 use crate::core::sanitize::sanitize_document_html;
 use crate::core::toc;
 use crate::vlog;
@@ -27,14 +27,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // which breaks relative image resolution when CWD differs from expected.
     let canonical_file = std::fs::canonicalize(&file_path).unwrap_or_else(|_| {
         // If canonicalize fails, try current_dir + file_path
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&file_path))
-            .unwrap_or_else(|_| file_path.clone())
+        std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(&file_path))
     });
-    let base_dir = canonical_file
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let base_dir = canonical_file.parent().map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::Path::to_path_buf,
+    );
     let markdown_content = std::fs::read_to_string(&file_path)?;
     vlog!("webview: file_path={}", file_path.display());
     vlog!("webview: base_dir={}", base_dir.display());
@@ -48,7 +46,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     if crate::core::verbose() {
         use std::sync::OnceLock;
         static RE_VERBOSE: OnceLock<regex::Regex> = OnceLock::new();
-        let re_verbose = RE_VERBOSE.get_or_init(|| regex::Regex::new(r#"<img\s[^>]*?>"#).unwrap());
+        let re_verbose = RE_VERBOSE.get_or_init(|| regex::Regex::new(r"<img\s[^>]*?>").unwrap());
         for cap in re_verbose.find_iter(&html_body) {
             let tag = cap.as_str();
             if tag.len() > 200 {
@@ -72,7 +70,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     // The document currently on screen, shared with the navigation handler so
     // relative links keep resolving after another file has been opened.
-    let current_doc = Arc::new(Mutex::new(canonical_file.clone()));
+    let current_doc = Arc::new(Mutex::new(canonical_file));
     let nav_doc = Arc::clone(&current_doc);
 
     // Create a native Edit menu so that Cmd+C/Ctrl+C/V/X/A work on all platforms
@@ -119,8 +117,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let navigation_handler = move |url: String| {
         let doc = nav_doc
             .lock()
-            .map(|d| d.clone())
-            .unwrap_or_else(|_| PathBuf::new());
+            .map_or_else(|_| PathBuf::new(), |d| d.clone());
         match navigation_decision(&url, &doc) {
             NavDecision::Allow => true,
             NavDecision::Anchor(anchor) => {
@@ -165,7 +162,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .build(&window)?;
 
     let mut watcher_rx = watcher_rx;
-    let mut watched_file = file_path.clone();
+    let mut watched_file = file_path;
     let mut base_dir = base_dir;
 
     event_loop.run(move |event, _, control_flow| {
@@ -197,8 +194,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let new_base = path
                     .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| base_dir.clone());
+                    .map_or_else(|| base_dir.clone(), std::path::Path::to_path_buf);
                 // Unlike a live reload, opening another document starts at the
                 // top of the page.
                 let js = format!(
@@ -208,12 +204,12 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = webview.evaluate_script(&js);
 
                 base_dir = new_base;
-                watched_file = path.clone();
+                watched_file.clone_from(&path);
                 if let Ok(rx) = crate::core::watcher::watch_file(&path) {
                     watcher_rx = rx;
                 }
                 if let Ok(mut doc) = current_doc.lock() {
-                    *doc = path.clone();
+                    doc.clone_from(&path);
                 }
                 window.set_title(&format!("mdr - {}", path.display()));
             }
@@ -268,7 +264,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 Some(data_uri) => {
                     vlog!("    → remote image inlined ({} bytes)", data_uri.len());
                     re_src
-                        .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                        .replace(full_tag, format!("src=\"{data_uri}\"").as_str())
                         .to_string()
                 }
                 None => {
@@ -311,15 +307,14 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
             let is_svg = abs_path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("svg"))
-                .unwrap_or(false);
+                .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
             vlog!("    is_svg={}", is_svg);
             if is_svg {
                 match rasterize_svg_to_png_data_uri(&abs_path) {
                     Ok(png_data_uri) => {
                         vlog!("    → SVG rasterized to PNG ({} bytes)", png_data_uri.len());
                         return re_src
-                            .replace(full_tag, format!("src=\"{}\"", png_data_uri).as_str())
+                            .replace(full_tag, format!("src=\"{png_data_uri}\"").as_str())
                             .to_string();
                     }
                     Err(e) => {
@@ -331,7 +326,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                     Ok(data_uri) => {
                         vlog!("    → SVG embedded as data URI ({} bytes)", data_uri.len());
                         return re_src
-                            .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                            .replace(full_tag, format!("src=\"{data_uri}\"").as_str())
                             .to_string();
                     }
                     Err(e) => {
@@ -346,7 +341,7 @@ fn resolve_local_images(html: &str, base_dir: &std::path::Path) -> String {
                 Ok(data_uri) => {
                     vlog!("    → embedded as data URI ({} bytes)", data_uri.len());
                     return re_src
-                        .replace(full_tag, format!("src=\"{}\"", data_uri).as_str())
+                        .replace(full_tag, format!("src=\"{data_uri}\"").as_str())
                         .to_string();
                 }
                 Err(e) => {
@@ -378,11 +373,11 @@ fn percent_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
             }
             result.push('%');
             result.push_str(&hex);
@@ -420,7 +415,7 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
     };
     let data = std::fs::read(path)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    Ok(format!("data:{};base64,{}", mime, b64))
+    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 fn build_toc_html(entries: &[toc::TocEntry]) -> String {
@@ -559,7 +554,7 @@ fn rasterize_svg_to_png_data_uri(
 
     let png_data = pixmap.encode_png()?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-    Ok(format!("data:image/png;base64,{}", b64))
+    Ok(format!("data:image/png;base64,{b64}"))
 }
 
 fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
@@ -571,9 +566,8 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     // Only include mermaid.js if there are fallback blocks that need JS rendering
     let mermaid_script = if body.contains(r#"class="mermaid""#) {
         format!(
-            r#"<script>{}</script>
-<script>mermaid.initialize({{ startOnLoad: true, theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'default' }});</script>"#,
-            MERMAID_JS
+            r"<script>{MERMAID_JS}</script>
+<script>mermaid.initialize({{ startOnLoad: true, theme: (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'default' }});</script>"
         )
     } else {
         String::new()
@@ -581,10 +575,7 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     // Only include highlight.js when there are fenced code blocks to highlight
     let highlight_script = if body.contains("<pre><code") {
         format!(
-            r#"<style>{css}</style><script>{js}</script><script>{kdl}hljs.registerLanguage('kdl',hljsDefineKdl);hljs.highlightAll();</script>"#,
-            css = HIGHLIGHT_CSS,
-            js = HIGHLIGHT_JS,
-            kdl = HIGHLIGHT_KDL,
+            r"<style>{HIGHLIGHT_CSS}</style><script>{HIGHLIGHT_JS}</script><script>{HIGHLIGHT_KDL}hljs.registerLanguage('kdl',hljsDefineKdl);hljs.highlightAll();</script>",
         )
     } else {
         String::new()
@@ -891,8 +882,8 @@ enum NavDecision {
 ///
 /// `with_html()` hands the HTML straight to the engine, which reports the
 /// document as `about:blank` on every platform wry supports (`loadHTMLString`
-/// with a nil base URL on macOS, `load_html` on WebKitGTK, `NavigateToString`
-/// on WebView2).
+/// with a nil base URL on macOS, `load_html` on `WebKitGTK`, `NavigateToString`
+/// on `WebView2`).
 fn is_mdr_document_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     lower.is_empty() || lower == "about:blank" || lower == "about:srcdoc" || lower == "about:"
@@ -917,8 +908,7 @@ fn has_scheme(url: &str) -> bool {
 fn is_markdown_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-        .unwrap_or(false)
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
 /// Decide what to do with a navigation request, given the document on screen.
@@ -929,10 +919,11 @@ fn navigation_decision(url: &str, current_doc: &Path) -> NavDecision {
     let url = url.trim();
 
     // `#anchor`, possibly already resolved against the `about:blank` base URL.
-    if let Some((base, fragment)) = url.split_once('#') {
-        if !fragment.is_empty() && is_mdr_document_url(base) {
-            return NavDecision::Anchor(fragment.to_string());
-        }
+    if let Some((base, fragment)) = url.split_once('#')
+        && !fragment.is_empty()
+        && is_mdr_document_url(base)
+    {
+        return NavDecision::Anchor(fragment.to_string());
     }
     if is_mdr_document_url(url) {
         return NavDecision::Allow;
@@ -962,7 +953,10 @@ fn navigation_decision(url: &str, current_doc: &Path) -> NavDecision {
     // A relative link, if the engine hands one over unresolved.
     if !has_scheme(url) && !url.is_empty() {
         let target = percent_decode(url.split(['?', '#']).next().unwrap_or(url));
-        let path = current_doc.parent().unwrap_or(Path::new(".")).join(&target);
+        let path = current_doc
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&target);
         if is_markdown_path(&path) {
             return NavDecision::OpenDocument(path);
         }
@@ -1195,7 +1189,7 @@ fn bindings_json() -> String {
     serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 
-const KEYBOARD_JS: &str = r#"
+const KEYBOARD_JS: &str = r"
 (function() {
     var BINDINGS = __MDR_BINDINGS__;
     var byToken = {};
@@ -1296,7 +1290,7 @@ const KEYBOARD_JS: &str = r#"
         });
     }
 })();
-"#;
+";
 
 /// The keyboard layer of the generated page: the binding table plus its dispatcher.
 fn keyboard_script() -> String {
@@ -1598,13 +1592,11 @@ mod tests {
         // SVG should be rasterized to PNG data URI (not inlined as raw SVG)
         assert!(
             result.contains("data:image/png;base64,"),
-            "SVG should be rasterized to PNG, got: {}",
-            result
+            "SVG should be rasterized to PNG, got: {result}"
         );
         assert!(
             !result.contains("<svg"),
-            "Raw SVG should NOT be inlined (security), got: {}",
-            result
+            "Raw SVG should NOT be inlined (security), got: {result}"
         );
         assert!(
             result.contains("<img"),
@@ -1630,13 +1622,11 @@ mod tests {
         // Must NOT contain raw SVG with links
         assert!(
             !result.contains("href=\"https://example.com\""),
-            "SVG links must not leak into page, got: {}",
-            result
+            "SVG links must not leak into page, got: {result}"
         );
         assert!(
             result.contains("data:image/png;base64,"),
-            "Should be rasterized to safe PNG, got: {}",
-            result
+            "Should be rasterized to safe PNG, got: {result}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1657,13 +1647,11 @@ mod tests {
 
         assert!(
             result.contains("data:image/png;base64,"),
-            "PNG should use data URI, got: {}",
-            result
+            "PNG should use data URI, got: {result}"
         );
         assert!(
             result.contains("<img"),
-            "img tag should be preserved for PNG, got: {}",
-            result
+            "img tag should be preserved for PNG, got: {result}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2000,9 +1988,8 @@ mod tests {
             );
             for binding in sc.bindings {
                 assert!(
-                    script.contains(&format!(r#""{}""#, binding)),
-                    "binding {:?} missing from the embedded binding table",
-                    binding
+                    script.contains(&format!(r#""{binding}""#)),
+                    "binding {binding:?} missing from the embedded binding table"
                 );
             }
         }
@@ -2038,9 +2025,7 @@ mod tests {
         // JavaScript cannot close a wry window on its own; it must go through IPC.
         assert!(
             script.contains("ipc.postMessage") && script.contains(IPC_QUIT),
-            "quit must post the {:?} IPC message, got: {}",
-            IPC_QUIT,
-            script
+            "quit must post the {IPC_QUIT:?} IPC message, got: {script}"
         );
     }
 
@@ -2062,8 +2047,7 @@ mod tests {
         let help = build_shortcuts_help_html();
         assert!(
             !help.contains("<kbd></kbd>"),
-            "shortcut labels must not render empty, got: {}",
-            help
+            "shortcut labels must not render empty, got: {help}"
         );
     }
 
@@ -2088,13 +2072,11 @@ mod tests {
         let out = theme_override_css(css);
         assert!(
             out.contains(r#"html[data-theme="dark"] .foo"#),
-            "dark media rules must be re-emitted under the dark data-theme, got: {}",
-            out
+            "dark media rules must be re-emitted under the dark data-theme, got: {out}"
         );
         assert!(
             !out.contains("@media"),
-            "overrides must not stay behind a media query, got: {}",
-            out
+            "overrides must not stay behind a media query, got: {out}"
         );
     }
 
@@ -2104,13 +2086,11 @@ mod tests {
         let out = theme_override_css(css);
         assert!(
             out.contains(r#"html[data-theme="light"] { --bg: #fff; }"#),
-            ":root must become the themed root itself, got: {}",
-            out
+            ":root must become the themed root itself, got: {out}"
         );
         assert!(
             !out.contains(":root"),
-            ":root must not survive in the override, got: {}",
-            out
+            ":root must not survive in the override, got: {out}"
         );
     }
 
@@ -2120,8 +2100,7 @@ mod tests {
         let out = theme_override_css(css);
         assert!(
             out.contains(r#"html[data-theme="dark"] .a,html[data-theme="dark"] .b"#),
-            "every selector in a list must be scoped, got: {}",
-            out
+            "every selector in a list must be scoped, got: {out}"
         );
     }
 
@@ -2131,13 +2110,11 @@ mod tests {
         let out = theme_override_css(css);
         assert!(
             !out.contains(".a"),
-            "unrelated media queries must be left alone, got: {}",
-            out
+            "unrelated media queries must be left alone, got: {out}"
         );
         assert!(
             out.contains(".b"),
-            "theme rules must be picked up, got: {}",
-            out
+            "theme rules must be picked up, got: {out}"
         );
     }
 
@@ -2185,7 +2162,7 @@ mod tests {
     #[test]
     fn build_html_sanitises_the_body_on_its_own() {
         // Even a caller that forgets to sanitise cannot inject a script.
-        let page = build_html(r#"<p>hi</p><script>alert(1)</script>"#, &[]);
+        let page = build_html(r"<p>hi</p><script>alert(1)</script>", &[]);
         assert!(!page.contains("alert(1)"), "{page}");
         assert!(page.contains("<p>hi</p>"));
     }
@@ -2345,8 +2322,7 @@ mod tests {
         for message in ["", "quit", "mdr:quit\n", " mdr:quit", "mdr:quit; rm -rf /"] {
             assert!(
                 !is_quit_request(message),
-                "{:?} must not be treated as a quit request",
-                message
+                "{message:?} must not be treated as a quit request"
             );
         }
     }

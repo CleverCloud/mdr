@@ -91,7 +91,7 @@ pub fn sanitize_document_html(html: &str) -> String {
             };
             continue;
         }
-        if matches!(bytes.get(i + 1), Some(b'!') | Some(b'?')) {
+        if matches!(bytes.get(i + 1), Some(b'!' | b'?')) {
             i = match html[i..].find('>') {
                 Some(off) => i + off + 1,
                 None => bytes.len(),
@@ -281,7 +281,7 @@ fn parse_tag(html: &str, start: usize) -> Option<Tag<'_>> {
 
 /// Content of a raw-text element, and the index just past its end tag.
 fn skip_raw_text<'a>(html: &'a str, from: usize, name: &str) -> (&'a str, usize) {
-    let needle = format!("</{}", name);
+    let needle = format!("</{name}");
     let haystack = html[from..].to_ascii_lowercase();
     match haystack.find(&needle) {
         Some(off) => {
@@ -347,8 +347,7 @@ fn is_dangerous_url(value: &str) -> bool {
     let cut = value
         .char_indices()
         .nth(256)
-        .map(|(idx, _)| idx)
-        .unwrap_or(value.len());
+        .map_or(value.len(), |(idx, _)| idx);
     let decoded = decode_entities(&value[..cut]);
     // Browsers ignore whitespace and control characters inside a URL, so
     // `java\tscript:` is a working payload unless they are removed first.
@@ -387,7 +386,7 @@ fn decode_entities(value: &str) -> String {
         let mut j = i + 1;
         let decoded = if bytes.get(j) == Some(&b'#') {
             j += 1;
-            let hex = matches!(bytes.get(j), Some(b'x') | Some(b'X'));
+            let hex = matches!(bytes.get(j), Some(b'x' | b'X'));
             if hex {
                 j += 1;
             }
@@ -457,7 +456,7 @@ mod tests {
 
     #[test]
     fn a_script_element_and_its_content_are_removed() {
-        let out = sanitize_document_html(r#"<p>a</p><script>alert(1)</script><p>b</p>"#);
+        let out = sanitize_document_html(r"<p>a</p><script>alert(1)</script><p>b</p>");
         assert!(!out.contains("script"), "{out}");
         assert!(!out.contains("alert(1)"), "{out}");
         assert!(
@@ -506,7 +505,7 @@ mod tests {
             r#"<img src="a.png" ONERROR=alert(1)>"#,
             "<img src=\"a.png\"\n  onerror\n  =\n  'alert(1)'>",
             r#"<div onclick="alert(1)">x</div>"#,
-            r#"<body onload=alert(1)>"#,
+            r"<body onload=alert(1)>",
         ];
         for case in cases {
             let out = sanitize_document_html(case);
@@ -539,7 +538,7 @@ mod tests {
             r#"<a href="&#106;avascript:alert(1)">x</a>"#,
             r#"<a href="java&Tab;script:alert(1)">x</a>"#,
             r#"<a href="&#x6a;avascript&colon;alert(1)">x</a>"#,
-            r#"<a href=javascript:alert(1)>x</a>"#,
+            r"<a href=javascript:alert(1)>x</a>",
         ];
         for case in cases {
             let out = sanitize_document_html(case);

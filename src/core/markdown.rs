@@ -1,6 +1,6 @@
 use crate::core::mermaid::process_mermaid_blocks;
 use crate::core::slug::SlugGenerator;
-use comrak::{markdown_to_html, Options};
+use comrak::{Options, markdown_to_html};
 
 /// Convert markdown content to HTML with all GFM extensions enabled.
 /// Processes mermaid code blocks into inline SVG diagrams.
@@ -36,7 +36,7 @@ fn add_heading_ids(html: &str) -> String {
         let content = &caps[2];
         let plain_text = strip_html_tags(content);
         let id = slugs.generate(&plain_text);
-        format!("<{} id=\"{}\">{}</{}>", tag, id, content, tag)
+        format!("<{tag} id=\"{id}\">{content}</{tag}>")
     })
     .to_string()
 }
@@ -336,8 +336,7 @@ mod tests {
             result.contains("mermaid-diagram")
                 || result.contains("mermaid-error")
                 || result.contains("mermaid-fallback"),
-            "Mermaid block should be processed, got: {}",
-            result
+            "Mermaid block should be processed, got: {result}"
         );
     }
 
@@ -365,13 +364,11 @@ mod tests {
         let result = parse_markdown(md);
         assert!(
             result.contains("<img"),
-            "Raw HTML <img> tags should be preserved, got: {}",
-            result
+            "Raw HTML <img> tags should be preserved, got: {result}"
         );
         assert!(
             result.contains("chart.png"),
-            "Image src should be preserved, got: {}",
-            result
+            "Image src should be preserved, got: {result}"
         );
     }
 
@@ -381,13 +378,11 @@ mod tests {
         let result = parse_markdown(md);
         assert!(
             result.contains("<img"),
-            "Centered HTML image should be preserved, got: {}",
-            result
+            "Centered HTML image should be preserved, got: {result}"
         );
         assert!(
             result.contains("logo.png"),
-            "Image src should be preserved, got: {}",
-            result
+            "Image src should be preserved, got: {result}"
         );
     }
 
@@ -398,13 +393,11 @@ mod tests {
         let result = parse_markdown(md);
         assert!(
             result.contains("<img"),
-            "Markdown image should produce <img>, got: {}",
-            result
+            "Markdown image should produce <img>, got: {result}"
         );
         assert!(
             result.contains("image.png"),
-            "Image src should be present, got: {}",
-            result
+            "Image src should be present, got: {result}"
         );
     }
 }

@@ -74,8 +74,7 @@ fn parse_theme(s: &str) -> Result<String, String> {
     match core::Theme::parse(s) {
         Some(_) => Ok(s.to_string()),
         None => Err(format!(
-            "unknown theme '{}', expected 'auto', 'dark' or 'light'",
-            s
+            "unknown theme '{s}', expected 'auto', 'dark' or 'light'"
         )),
     }
 }
@@ -84,8 +83,7 @@ fn parse_backend(s: &str) -> Result<String, String> {
     match s {
         "auto" | "egui" | "webview" | "tui" => Ok(s.to_string()),
         _ => Err(format!(
-            "unknown backend '{}', expected 'auto', 'egui', 'webview', or 'tui'",
-            s
+            "unknown backend '{s}', expected 'auto', 'egui', 'webview', or 'tui'"
         )),
     }
 }
@@ -240,7 +238,7 @@ fn read_stdin_to_tmpfile() -> Result<PathBuf, String> {
     io::stdin()
         .lock()
         .read_to_string(&mut content)
-        .map_err(|e| format!("failed to read from stdin: {}", e))?;
+        .map_err(|e| format!("failed to read from stdin: {e}"))?;
 
     let dir = stdin_tmp_dir();
     ensure_tmp_dir(&dir)
@@ -285,7 +283,7 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
                 0
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 1
             }
         };
@@ -322,7 +320,7 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
             Ok(path)
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             Err(1)
         }
     };
@@ -398,7 +396,7 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
     };
 
     if let Err(e) = result {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         return 1;
     }
     0
@@ -413,10 +411,12 @@ mod tests {
         let cli = Cli::try_parse_from(["mdr", "--theme", "light", "f.md"]).unwrap();
         assert_eq!(cli.theme.as_deref(), Some("light"));
         assert!(Cli::try_parse_from(["mdr", "--theme", "neon", "f.md"]).is_err());
-        assert!(Cli::try_parse_from(["mdr", "f.md"])
-            .unwrap()
-            .theme
-            .is_none());
+        assert!(
+            Cli::try_parse_from(["mdr", "f.md"])
+                .unwrap()
+                .theme
+                .is_none()
+        );
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_stdin_tmp_file(dir.path(), "secret").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
     }
 
     #[cfg(unix)]
@@ -462,7 +462,7 @@ mod tests {
         let dir = base.path().join("mdr");
         ensure_tmp_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 
     #[cfg(unix)]
@@ -477,7 +477,7 @@ mod tests {
 
         ensure_tmp_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 
     #[cfg(unix)]

@@ -85,27 +85,27 @@ The core logic (file watching, Markdown parsing, Mermaid rendering, syntax highl
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `comrak` | GFM Markdown parser | 0.38+ |
+| `comrak` | GFM Markdown parser | 0.55 |
 | `syntect` | Syntax highlighting | 5.x |
-| `mermaid-rs-renderer` | Mermaid → SVG (native Rust) | latest |
+| `mermaid-rs-renderer` | Mermaid → SVG (native Rust) | 0.3 |
 | `notify` | Filesystem watching (FSEvents on macOS) | 8.x |
 | `image` | Image decoding (PNG, JPEG, etc.) | 0.25+ |
-| `resvg` | SVG → raster | 0.45+ |
+| `resvg` | SVG → raster | 0.48 |
 | `clap` | CLI argument parsing | 4.x |
 
 #### egui backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `eframe` | Native window + egui integration | 0.33 |
-| `egui_commonmark` | Markdown → egui widgets | 0.22 |
+| `eframe` | Native window + egui integration | 0.36 |
+| `egui_commonmark` | Markdown → egui widgets | 0.25 |
 
 #### WebView backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `wry` | OS-native WebView | 0.50+ |
-| `tao` | Window management | 0.33+ |
+| `wry` | OS-native WebView | 0.57 |
+| `tao` | Window management | 0.37 |
 
 ### Cargo Features
 
@@ -121,7 +121,7 @@ webview-backend = ["wry", "tao"]
 ### egui_commonmark Features
 
 ```toml
-egui_commonmark = { version = "0.22", features = [
+egui_commonmark = { version = "0.25", features = [
     "better_syntax_highlighting",  # syntect-based highlighting
     "load-images",                 # local image loading
     "svg",                         # SVG rendering

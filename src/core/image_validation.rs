@@ -21,9 +21,9 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
     };
 
     if let Some((magic, kind)) = expected {
-        let data = std::fs::read(path).map_err(|e| format!("cannot read file: {}", e))?;
+        let data = std::fs::read(path).map_err(|e| format!("cannot read file: {e}"))?;
         if data.len() < magic.len() {
-            return Err(format!("file too small to be a valid {}", kind));
+            return Err(format!("file too small to be a valid {kind}"));
         }
         if &data[..magic.len()] != magic {
             // WebP is RIFF + 4 bytes + WEBP
@@ -35,8 +35,7 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
                 return Ok(());
             }
             return Err(format!(
-                "file does not appear to be a valid {} (wrong magic bytes)",
-                kind
+                "file does not appear to be a valid {kind} (wrong magic bytes)"
             ));
         }
     }
@@ -45,7 +44,7 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
 }
 
 fn validate_svg(path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read file: {}", e))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read file: {e}"))?;
     let trimmed = text.trim_start();
     if trimmed.starts_with("<svg")
         || trimmed.starts_with("<?xml")
