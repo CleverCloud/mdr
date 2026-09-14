@@ -76,7 +76,7 @@ usvg = { version = "0.48", optional = true }
 tiny-skia = { version = "0.12", optional = true }
 fontdb = { version = "0.24", optional = true }
 
-# webview backend
+# web backend (wry/tao)
 wry = { version = "0.57", optional = true }
 tao = { version = "0.37", optional = true }
 muda = { version = "0.20", optional = true }
@@ -160,7 +160,7 @@ assets = [
   ["assets/mdr.1", "/usr/share/man/man1/mdr.1", "644"],
   ["README.md", "/usr/share/doc/mdr/README.md", "644"],
 ]
-extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI)."
+extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (gui, tui, web)."
 
 [package.metadata.generate-rpm]
 assets = [

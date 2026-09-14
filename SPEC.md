@@ -22,8 +22,8 @@ There is no `mdr file.md` command that opens a lightweight native window with li
 
 A single Rust binary (`mdr`) with **two rendering backends** that the user can choose:
 
-1. **`--backend egui`** (default) — Pure Rust GPU rendering via egui/eframe. Zero JS, zero WebView, single static binary.
-2. **`--backend webview`** — OS-native WebView (WebKit on macOS) for GitHub-quality HTML/CSS rendering. Still a Rust binary, but uses the OS's built-in browser engine.
+1. **`--backend gui`** (default) — Pure Rust GPU rendering via egui/eframe. Zero JS, zero WebView, single static binary.
+2. **`--backend web`** — OS-native WebView (WebKit on macOS) for GitHub-quality HTML/CSS rendering. Still a Rust binary, but uses the OS's built-in browser engine.
 
 Both backends share the same core pipeline:
 1. Takes a Markdown file path as argument
@@ -65,12 +65,12 @@ fichier.md
   │
   └→ Backend (user choice via --backend flag)
         │
-        ├─ egui (default)
+        ├─ gui (default)
         │    ├→ egui_commonmark (MD → egui widgets)
         │    ├→ resvg (SVG → texture for Mermaid)
         │    └→ eframe window (GPU rendered)
         │
-        └─ webview
+        └─ web
              ├→ comrak (MD → HTML)
              ├→ CSS (GitHub-like, OS theme aware)
              ├→ SVG inline (Mermaid diagrams)
@@ -93,7 +93,7 @@ The core logic (file watching, Markdown parsing, Mermaid rendering, syntax highl
 | `resvg` | SVG → raster | 0.48 |
 | `clap` | CLI argument parsing | 4.x |
 
-#### egui backend
+#### `gui` backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
@@ -140,14 +140,14 @@ ARGS:
     <FILE>    Path to a Markdown file to view
 
 OPTIONS:
-    -b, --backend <BACKEND>    Rendering backend [default: egui] [possible: egui, webview]
+    -b, --backend <BACKEND>    Rendering backend [default: auto] [possible: auto, gui, tui, web]
     -h, --help                 Print help information
     -V, --version              Print version information
 
 EXAMPLES:
-    mdr README.md                          # egui backend (default)
-    mdr --backend webview README.md        # WebView backend
-    mdr -b webview docs/architecture.md    # short form
+    mdr README.md                          # auto-detected backend
+    mdr --backend web README.md            # system webview
+    mdr -b web docs/architecture.md        # short form
 ```
 
 ### User Stories & Acceptance Criteria
@@ -233,7 +233,7 @@ EXAMPLES:
 
 **Context:** We need a window to display rendered Markdown. Options: egui (pure Rust GPU rendering), wry (OS native WebView), terminal TUI (ratatui). Both egui and WebView were prototyped and compared visually.
 
-**Decision:** Support both backends, selectable via `--backend` CLI flag. Default to egui.
+**Decision:** Support both backends, selectable via `--backend` CLI flag. Default to `gui`.
 
 **Rationale:**
 - **egui** (default): Zero JavaScript, zero WebView = true single binary with no runtime deps. GPU-accelerated. egui_commonmark provides production-ready Markdown rendering. Trade-off: less visually polished, no accessibility.
@@ -307,7 +307,7 @@ EXAMPLES:
 
 ```
 mdr --benchmark bench/medium.md              # benchmark default backend
-mdr --benchmark --backend webview bench/medium.md  # benchmark webview
+mdr --benchmark --backend web bench/medium.md      # benchmark the webview
 ```
 
 Output: startup_ms, render_ms, memory_mb, binary_size_mb

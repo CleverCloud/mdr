@@ -17,7 +17,7 @@ Most developers end up previewing Markdown in VS Code, pasting into a browser, o
 - **One command** — `mdr file.md` and you're reading, not editing
 - **Native Rust binary** — no Electron, no Node.js, no npm, starts in milliseconds
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts rendered as SVG natively (no headless browser)
-- **Three backends** — full GUI (egui), native webview (WebKit/WebView2), or terminal UI (TUI) over SSH
+- **Three backends** — a native window (`gui`), the system webview (`web`), or a terminal UI (`tui`) over SSH
 - **Live reload** — edit your file or let your AI tool regenerate it, see changes instantly
 - **In-document search** — Ctrl+F / `/` to find text across all backends
 - **Fully keyboard-driven** — every backend quits, scrolls, searches and navigates from the keyboard
@@ -28,8 +28,8 @@ mdr offers multiple rendering backends, selectable at runtime:
 
 | Backend | Stack | Strengths |
 |---------|-------|-----------|
-| **egui** (default) | Pure Rust GPU rendering | Single static binary, fast startup, cross-platform |
-| **webview** | OS native WebView (WebKit/WebView2) | GitHub-quality HTML/CSS rendering, full CSS support |
+| **`gui`** (default) | Pure Rust GPU rendering (egui) | Single static binary, fast startup, cross-platform |
+| **`web`** | OS native WebView (WebKit/WebView2) | GitHub-quality HTML/CSS rendering, full CSS support |
 | **tui** | Terminal UI (ratatui + crossterm) | Works over SSH, no GUI needed, keyboard-driven |
 
 ## Install
@@ -45,10 +45,10 @@ cargo install --path .
 ### Build with specific backends only
 
 ```bash
-# egui only (smaller binary, no WebView dependency)
+# gui only (smaller binary, no WebView dependency)
 cargo install --path . --no-default-features --features egui-backend
 
-# webview only
+# web only
 cargo install --path . --no-default-features --features webview-backend
 ```
 
@@ -98,11 +98,11 @@ Download from the [Releases](https://github.com/CleverCloud/mdr/releases) page f
 ## Usage
 
 ```bash
-# Open with default backend (egui)
+# Open with the default backend (gui)
 mdr README.md
 
-# Open with webview backend
-mdr --backend webview README.md
+# Open with the web backend
+mdr --backend web README.md
 
 # Open in terminal (TUI)
 mdr --backend tui README.md
@@ -120,7 +120,7 @@ mdr --help
 Clicking an `http(s)` link opens it in your system browser; a link to another
 local `.md` file opens that file in mdr.
 
-### GUI (egui) keybindings
+### `gui` keybindings
 
 | Key | Action |
 |-----|--------|
@@ -136,7 +136,7 @@ On macOS the shortcuts use ⌘, not ⌃.
 
 ### Webview keybindings
 
-Press `?` in the webview backend for this list.
+Press `?` in the `web` backend for this list.
 
 | Key | Action |
 |-----|--------|
@@ -187,7 +187,7 @@ the theme follows `prefers-color-scheme`.
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts, and more (via mermaid-rs-renderer)
 - **Table of Contents** — auto-generated sidebar from headings with click-to-navigate
 - **Live reload** — file watching with 300ms debounce, updates on save
-- **Dark/Light theme** — follows OS theme, overridable with `Ctrl/Cmd+D` (webview backend)
+- **Dark/Light theme** — follows OS theme, overridable with `Ctrl/Cmd+D` (`web` backend)
 - **YAML front matter** — recognised as metadata, so it is neither rendered nor listed in the TOC
 - **Unique heading anchors** — repeated headings get `setup`, `setup-1`, … as GitHub does
 
@@ -207,6 +207,38 @@ while you read.
 - `mdr --offline file.md` disables every network access; remote images are then
   left unresolved. The same can be set permanently with `offline #true` in the
   config file.
+
+## Configuration
+
+mdr writes a commented config file with its defaults the first time it runs, so
+there is nothing to scaffold and no flag to know about. Where it lands follows
+the platform:
+
+| Platform | Path |
+|---|---|
+| Linux, BSD | `$XDG_CONFIG_HOME/mdr/config.kdl`, else `~/.config/mdr/config.kdl` |
+| Windows | `%APPDATA%\mdr\config.kdl` |
+| macOS | `~/.config/mdr/config.kdl` |
+
+An existing `~/.config/mdr/config.kdl` keeps precedence over
+`XDG_CONFIG_HOME`, so setting that variable later does not orphan a config that
+is already in use. `--config PATH` points somewhere else; a path given there
+must exist, since a typo is a mistake rather than a request to create a file.
+
+If no environment variable names a home directory, mdr says so and reads
+`./.config/mdr/config.kdl` if it happens to exist — but writes nothing there,
+rather than leaving a `.config/` behind in whatever directory it was started
+from.
+
+The file is [KDL v2](https://kdl.dev). Four keys are recognised, each mirroring
+the command line option of the same name:
+
+```kdl
+backend auto      // auto, gui, tui or web
+verbose #true     // same as -v
+offline #true     // same as --offline
+theme "auto"      // auto, dark or light
+```
 
 ## Mermaid Support
 
@@ -239,9 +271,9 @@ src/
 │   ├── net.rs           # Remote image fetching (respects --offline)
 │   └── watcher.rs       # File watching (notify, 300ms debounce)
 └── backend/
-    ├── egui.rs          # egui/eframe backend
+    ├── egui.rs          # `gui` backend (egui/eframe)
     ├── tui.rs           # ratatui/crossterm TUI backend
-    └── webview.rs       # wry/tao WebView backend
+    └── webview.rs       # `web` backend (wry/tao)
 ```
 
 ## Building

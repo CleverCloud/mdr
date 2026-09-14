@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking: the backends are named `gui`, `tui` and `web`.** `egui` and
+  `webview` said which library draws the window, which is not what someone
+  choosing a backend is picking between: a native window, a terminal, or the
+  system webview. `mdr --backend web`, `backend gui` in `config.kdl`.
+
+  A config file written before this release is **corrected in place** the first
+  time it is read: `backend egui` becomes `backend gui`, comments and every
+  other setting are preserved, and the run says so once. Nothing to edit by
+  hand, and the migration removes itself — a file only needs fixing once. On
+  the command line there is no such mapping: `--backend egui` is simply not a
+  backend any more, and the error lists the names that are.
+
+  The Cargo features keep the crate names (`egui-backend`, `webview-backend`,
+  `tui-backend`), so documented build commands and packaging recipes are
+  unaffected.
+
+- **The config file is written on first run, and its location follows the
+  platform.** `$XDG_CONFIG_HOME/mdr/config.kdl` on Linux and BSD,
+  `%APPDATA%\mdr\config.kdl` on Windows, `~/.config/mdr/config.kdl` otherwise.
+  An existing `~/.config/mdr/config.kdl` keeps precedence, so setting
+  `XDG_CONFIG_HOME` later does not orphan a config already in use, and
+  `%USERPROFILE%` is preferred over `HOME` on Windows because Git Bash sets
+  `HOME` to a POSIX path a native binary cannot resolve. Being unable to write
+  the file is a warning, not a failure: mdr runs on the defaults the file would
+  have carried anyway.
+
+  The generated file selects `backend auto`, which every build has — it used to
+  hard-code `webview`, which a `--no-default-features --features tui-backend`
+  binary cannot run. When nothing names a home directory mdr still reads
+  `./.config/mdr/config.kdl` if it is there, but writes nothing, so no
+  `.config/` is left behind in the directory it was started from.
+
+### Removed
+
+- **`--init`.** The config file is created at startup, so the flag had nothing
+  left to do. A file the program can write for itself is not worth an option,
+  and needing to run it first was the only thing keeping new users from
+  discovering that mdr is configurable at all.
+
 ## [0.5.1] - 2026-09-07
 
 Both of these come from finally looking at the 0.5.0 rendering in an actual

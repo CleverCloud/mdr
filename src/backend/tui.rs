@@ -726,15 +726,19 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             .to_string()
     };
 
-    // The bar sits on the last row of the content area, so an area with no rows
-    // has nowhere to put it: `y + height - 1` used to underflow and panic on a
-    // terminal reporting a height of zero.
-    if content_area.height > 0 {
-        // `Rect::width` is a column count, so measure the bar in columns rather
-        // than in `str::len` bytes, which overstate anything outside ASCII. The
-        // `min` below already kept the bar inside the panel either way, so this
-        // corrects what the number means, not a visible overrun.
-        let available = content_area.width.saturating_sub(2);
+    // The bar is one row inside the content area's borders, so it needs both a
+    // row to sit on and a column to occupy: `y + height - 1` used to underflow
+    // and panic on a terminal reporting a height of zero, and `x + 1` lands
+    // outside an area no wider than its own borders.
+    //
+    // The width is a column count, so the bar is measured in columns rather
+    // than in `str::len` bytes, which overstate anything outside ASCII. Clipping
+    // to `available` bounded it either way, so this corrects what the number
+    // means rather than a visible overrun.
+    let available = content_area.width.saturating_sub(2);
+    if content_area.height > 0 && available > 0 {
+        // The display width is saturated into `u16` and then clipped to the
+        // columns actually available.
         let wanted = u16::try_from(Line::from(bar_text.as_str()).width()).unwrap_or(u16::MAX);
         let help_area = Rect {
             x: content_area.x + 1,
@@ -1822,7 +1826,7 @@ mod tests {
         // A pty that reports 0x0 — `script -q /dev/null mdr --backend tui f.md`
         // on macOS is one — used to underflow the bottom bar's row and abort.
         let mut app = app_for_drawing("# Title\n\nText.\n");
-        for (w, h) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 2)] {
+        for (w, h) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (2, 2), (3, 1)] {
             let backend = ratatui::backend::TestBackend::new(w, h);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|f| ui(f, &mut app)).unwrap();

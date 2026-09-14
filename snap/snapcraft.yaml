@@ -4,7 +4,7 @@ adopt-info: mdr
 summary: A lightweight Markdown viewer with live reload
 description: |
   A lightweight Markdown viewer with Mermaid diagram support,
-  live reload, and multiple rendering backends (egui, webview, TUI).
+  live reload, and multiple rendering backends (gui, tui, web).
 grade: stable
 confinement: strict
 license: MIT

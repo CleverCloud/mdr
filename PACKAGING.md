@@ -191,10 +191,9 @@ CI jobs relate to it:
 - `msrv` pins that toolchain and runs `cargo check --all-features --all-targets`
   plus `cargo test --all-features`. Both jobs are blocking.
 
-1.95 is the highest `rust-version` declared in the dependency tree (`kdl` 6.7.1;
-next highest is 1.92 for the egui/epaint family, then 1.88 for `ratatui` 0.30
-and `image` 0.25, then 1.85 for `clap` 4 / `comrak` 0.52 / `ureq` 3). It was
-confirmed by an actual build: `cargo check --all-features --all-targets` on a
+1.95 is the highest `rust-version` declared in the dependency tree. The ranking
+below it is not written down here: it moves with every dependency bump, and a
+stale list is worse than none. It was confirmed by an actual build: `cargo check --all-features --all-targets` on a
 1.95.0 toolchain exits 0.
 
 Recompute the floor after a dependency bump with:

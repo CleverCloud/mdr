@@ -17,7 +17,7 @@ struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
 
-    /// Rendering backend to use: egui (native GUI), webview (HTML), tui (terminal)
+    /// Rendering backend to use: gui (native window), tui (terminal), web (HTML)
     #[arg(short, long, value_parser = parse_backend)]
     backend: Option<String>,
 
@@ -40,10 +40,6 @@ struct Cli {
     /// List available backends and exit
     #[arg(long)]
     list_backends: bool,
-
-    /// Create a default config file and exit
-    #[arg(long)]
-    init: bool,
 }
 
 fn print_backends() {
@@ -56,16 +52,16 @@ fn print_backends() {
     }
     eprintln!("Available backends:");
     eprintln!(
-        "  egui      Native GUI window (OpenGL)            [{}]",
+        "  gui       Native window (OpenGL)                [{}]",
         status(cfg!(feature = "egui-backend"))
     );
     eprintln!(
-        "  webview   System webview (WebKit/WebView2)      [{}]",
-        status(cfg!(feature = "webview-backend"))
+        "  tui       Terminal UI with image support        [{}]",
+        status(cfg!(feature = "tui-backend"))
     );
     eprintln!(
-        "  tui       Terminal UI with image support         [{}]",
-        status(cfg!(feature = "tui-backend"))
+        "  web       System webview (WebKit/WebView2)      [{}]",
+        status(cfg!(feature = "webview-backend"))
     );
     eprintln!("  auto      Auto-detect best available (default)");
 }
@@ -94,7 +90,7 @@ fn parse_backend(s: &str) -> Result<String, String> {
 fn detect_backend() -> &'static str {
     // If no DISPLAY/WAYLAND and we have a TTY → TUI
     // If SSH session → TUI
-    // Otherwise → egui (or first available GUI backend)
+    // Otherwise → gui (or the web backend when gui is not compiled in)
     let is_ssh = std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok();
     let has_display = std::env::var("DISPLAY").is_ok()
         || std::env::var("WAYLAND_DISPLAY").is_ok()
@@ -108,9 +104,9 @@ fn detect_backend() -> &'static str {
 
     if has_display {
         #[cfg(feature = "egui-backend")]
-        return "egui";
+        return "gui";
         #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
-        return "webview";
+        return "web";
     }
 
     #[cfg(feature = "tui-backend")]
@@ -119,9 +115,9 @@ fn detect_backend() -> &'static str {
     #[cfg(not(feature = "tui-backend"))]
     {
         #[cfg(feature = "egui-backend")]
-        return "egui";
+        return "gui";
         #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
-        return "webview";
+        return "web";
         #[cfg(not(any(feature = "egui-backend", feature = "webview-backend")))]
         {
             eprintln!("Error: no backend compiled");
@@ -274,28 +270,29 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
         return 0;
     }
 
-    if cli.init {
-        let path = cli
-            .config
-            .clone()
-            .unwrap_or_else(core::config::default_path);
-        return match core::config::write_default(&path) {
-            Ok(()) => {
-                eprintln!("Created config file: {}", path.display());
-                0
-            }
-            Err(e) => {
-                eprintln!("Error: {e}");
-                1
-            }
-        };
+    // Load config. An explicit `--config` must exist — a typo in a path the user
+    // just typed is a mistake, not an invitation to create a file there. The
+    // default path is created on first run instead, so the settings are
+    // discoverable without a flag to run first.
+    let (default_path, may_create) = if cli.config.is_none() {
+        let (path, confident) = core::config::default_location();
+        (Some(path), confident)
+    } else {
+        (None, false)
+    };
+    let cfg_path = cli.config.clone().or(default_path).unwrap_or_default();
+    if may_create {
+        match core::config::ensure_exists(&cfg_path) {
+            Ok(true) => vlog!("created config file: {}", cfg_path.display()),
+            Ok(false) => {}
+            // Not being able to write it costs nothing at this point: mdr runs
+            // on its defaults, which is what the file would have said anyway.
+            Err(e) => eprintln!(
+                "mdr: warning: could not create '{}': {e}",
+                cfg_path.display()
+            ),
+        }
     }
-
-    // Load config (explicit path errors if missing; default path is optional)
-    let cfg_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(core::config::default_path);
     let cfg = if cli.config.is_some() && !cfg_path.exists() {
         eprintln!("Error: config file '{}' not found", cfg_path.display());
         return 1;
@@ -366,22 +363,20 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 
     let result = match backend {
         #[cfg(feature = "egui-backend")]
-        "egui" => backend::egui::run(file),
+        "gui" => backend::egui::run(file),
 
         #[cfg(not(feature = "egui-backend"))]
-        "egui" => {
-            eprintln!("Error: egui backend not compiled. Rebuild with --features egui-backend");
+        "gui" => {
+            eprintln!("Error: gui backend not compiled. Rebuild with --features egui-backend");
             return 1;
         }
 
         #[cfg(feature = "webview-backend")]
-        "webview" => backend::webview::run(file),
+        "web" => backend::webview::run(file),
 
         #[cfg(not(feature = "webview-backend"))]
-        "webview" => {
-            eprintln!(
-                "Error: webview backend not compiled. Rebuild with --features webview-backend"
-            );
+        "web" => {
+            eprintln!("Error: web backend not compiled. Rebuild with --features webview-backend");
             return 1;
         }
 
