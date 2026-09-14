@@ -17,6 +17,15 @@ fn isolate_config<'a>(cmd: &'a mut Command, home: &std::path::Path) -> &'a mut C
         .env("APPDATA", home.join("appdata"))
 }
 
+/// A directory of this test's own.
+///
+/// A fixed name under the system temp directory is shared with every other run
+/// of the suite: two at once delete each other's fixtures. The `TempDir` also
+/// takes the cleanup off each test's hands.
+fn sandbox() -> tempfile::TempDir {
+    tempfile::tempdir().expect("a temp directory")
+}
+
 fn mdr_bin() -> std::path::PathBuf {
     // cargo test builds the binary in the same target directory
     let mut path = std::env::current_exe().unwrap();
@@ -29,10 +38,9 @@ fn mdr_bin() -> std::path::PathBuf {
 #[test]
 fn stdin_pipe_with_list_backends_exits_successfully() {
     // --list-backends exits before backend runs, proving CLI accepts piped stdin
-    let home = std::env::temp_dir().join("mdr_test_list_home");
-    let _ = std::fs::create_dir_all(&home);
+    let sandbox = sandbox();
     let mut cmd = Command::new(mdr_bin());
-    let mut child = isolate_config(&mut cmd, &home)
+    let mut child = isolate_config(&mut cmd, sandbox.path())
         .arg("--list-backends")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -52,14 +60,28 @@ fn stdin_pipe_with_list_backends_exits_successfully() {
 }
 
 #[test]
-fn stdin_dash_argument_does_not_error_file_not_found() {
-    let home = std::env::temp_dir().join("mdr_test_dash_home");
-    let _ = std::fs::create_dir_all(&home);
+fn a_dash_argument_reads_the_document_from_stdin() {
+    // `-` names stdin, not a file called "-". Asserting only that an error
+    // message is absent would pass on a crash, so this checks the positive
+    // outcome instead: the piped bytes reach the temporary file the backends
+    // are handed.
+    let sandbox = sandbox();
+    let tmp = sandbox.path().join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let home = sandbox.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    const DOC: &[u8] = b"# From stdin, via a dash\n";
+
     let mut cmd = Command::new(mdr_bin());
     let mut child = isolate_config(&mut cmd, &home)
         .arg("-")
         .arg("-b")
         .arg("tui")
+        .arg("-v")
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -67,18 +89,29 @@ fn stdin_dash_argument_does_not_error_file_not_found() {
         .expect("failed to spawn mdr");
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(b"# Test from stdin dash\n").unwrap();
+        stdin.write_all(DOC).unwrap();
     }
 
-    // The TUI backend may fail without a real terminal, so give it a moment
-    // then kill it. The key assertion is that it does NOT fail with "file '-' not found".
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = child.kill();
+    // The tui backend refuses a non-TTY stdout, so this exits on its own rather
+    // than needing to be killed — and the exit is the ordinary error path, not
+    // a crash.
     let output = child.wait_with_output().expect("failed to wait");
     let stderr = String::from_utf8_lossy(&output.stderr);
+
     assert!(
         !stderr.contains("file '-' not found"),
-        "mdr should read from stdin when '-' is passed, got stderr: {stderr}"
+        "'-' must not be taken for a filename, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("requires a terminal"),
+        "the expected exit is the TTY refusal, not something else, got: {stderr}"
+    );
+
+    // The temporary is removed on the way out — another test covers that — so
+    // the evidence that stdin was read is the trace mdr leaves under `-v`.
+    assert!(
+        stderr.contains("piped input stored in"),
+        "the piped document should have been stored, got: {stderr}"
     );
 }
 
@@ -257,10 +290,9 @@ fn temp_dir_symlink_is_not_followed() {
 
 #[test]
 fn nonexistent_file_shows_error() {
-    let home = std::env::temp_dir().join("mdr_test_missing_home");
-    let _ = std::fs::create_dir_all(&home);
+    let sandbox = sandbox();
     let mut cmd = Command::new(mdr_bin());
-    let output = isolate_config(&mut cmd, &home)
+    let output = isolate_config(&mut cmd, sandbox.path())
         .arg("this_file_does_not_exist.md")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

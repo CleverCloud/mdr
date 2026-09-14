@@ -50,7 +50,9 @@ fn strip_html_tags(html: &str) -> String {
 
 /// CSS for GitHub-like markdown rendering with dark/light theme support.
 /// The stylesheet, with its palette and sizes taken from [`crate::core::style`]
-/// rather than written out here, so the `web` backend cannot drift from `gui`.
+/// rather than written out here, so `web` and `gui` share one palette, one body
+/// size and one `h1`. The intermediate heading sizes are not shared: `gui`
+/// renders through `egui_commonmark`, which interpolates its own.
 pub fn github_css() -> String {
     use crate::core::style;
 

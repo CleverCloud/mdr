@@ -68,8 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.85 em, code at 85 %, GitHub colours. `gui` used to run on egui's defaults —
   a 13 pt body with an 18 pt heading, so `h1` through `h6` all landed within
   five points of each other — and `web` rendered `h3` to `h6` at the browser's
-  own sizes, which were a third scale again. The stylesheet is now generated
-  from those constants, so the two cannot drift.
+  own sizes, which were a third scale again. The stylesheet is generated from those
+  constants, so the palette and the body size stay in step.
 
   The palette and the body size are shared; the heading *scale* is not, and
   cannot be. `gui` renders through `egui_commonmark`, which interpolates its own
@@ -99,6 +99,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floating scrollbar on top of the text (the rest of #27).
 
 ### Fixed
+
+- **`cat doc.md | mdr --backend tui` is usable again.** The document was drawn
+  and the first key press then killed it with "Failed to initialize input
+  reader", leaving the terminal on the alternate screen.
+
+  The cause is specific to macOS. With the document on stdin, crossterm falls
+  back to `/dev/tty` for the keyboard — but that is a *clone* device, and the
+  kernel refuses to register it with kqueue: `EVFILT_READ` returns `EINVAL`.
+  mio's registration fails, the event source is never built, and crossterm
+  swallows the error until the first read. mdr now reopens the real terminal
+  device (`/dev/ttys004` rather than `/dev/tty`) onto stdin before starting, so
+  crossterm takes its ordinary path.
 
 - **A document taller than 65535 rows no longer wraps around.** An element's
   height was narrowed to `u16` while a wrapped paragraph is as tall as its line

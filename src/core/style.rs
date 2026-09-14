@@ -14,9 +14,12 @@
 //! (`auto`, `dark`, `light`) the terminal backend picks. This module is the
 //! palette and the sizes; that one is which of the two palettes to use.
 //!
-//! Colours follow the GitHub markdown palette. Every foreground/background pair
-//! that carries text is checked against the WCAG 2.2 contrast minimum (SC 1.4.3,
-//! 4.5:1 for body text) by the tests at the bottom of this file.
+//! Colours follow the GitHub markdown palette. The pairs listed in the tests at
+//! the bottom of this file — the document, the code backgrounds and the sidebar
+//! states — are checked against the WCAG 2.2 contrast minimum (SC 1.4.3, 4.5:1
+//! for body text). Colours that come from elsewhere are not: syntax
+//! highlighting, search highlights and error text are outside this palette and
+//! outside that check.
 
 /// An opaque sRGB colour.
 pub type Rgb = [u8; 3];

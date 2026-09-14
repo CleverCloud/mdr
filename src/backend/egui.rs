@@ -888,6 +888,85 @@ fn rasterize_svg_to_png_data_uri(
 mod tests {
     use super::*;
 
+    /// `apply_style` needs a context, not a window, so the palette and the type
+    /// scale can be checked without opening anything.
+    #[test]
+    fn the_style_carries_the_shared_palette_into_both_themes() {
+        use crate::core::style;
+
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+
+        for (theme, palette, name) in [
+            (egui::Theme::Dark, &style::DARK, "dark"),
+            (egui::Theme::Light, &style::LIGHT, "light"),
+        ] {
+            let style = ctx.style_of(theme);
+            let expect = |c: style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
+
+            assert_eq!(
+                style.visuals.panel_fill,
+                expect(palette.bg),
+                "{name}: the page background must come from the shared palette"
+            );
+            assert_eq!(
+                style.visuals.hyperlink_color,
+                expect(palette.link),
+                "{name}: links must come from the shared palette"
+            );
+            assert_eq!(
+                style.visuals.code_bg_color,
+                expect(palette.inline_code_bg),
+                "{name}: inline code must use the chip background, not the block one"
+            );
+            assert_eq!(
+                style.visuals.weak_text_color(),
+                expect(palette.muted),
+                "{name}: blockquotes read weak_text_color, so it has to be set"
+            );
+            assert_eq!(
+                style.visuals.widgets.hovered.fg_stroke.color,
+                expect(palette.strong),
+                "{name}: egui draws bold by colour alone, so strong must differ"
+            );
+            assert_ne!(
+                style.visuals.widgets.hovered.fg_stroke.color,
+                style.visuals.widgets.inactive.fg_stroke.color,
+                "{name}: bold text must not be the same colour as body text"
+            );
+        }
+    }
+
+    #[test]
+    fn the_style_sets_the_shared_type_scale() {
+        use crate::core::style::{BASE_FONT_SIZE, CODE_FONT_SCALE, heading_size};
+        use egui::TextStyle;
+
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let style = ctx.style_of(egui::Theme::Dark);
+
+        assert_eq!(
+            style.text_styles[&TextStyle::Body].size,
+            BASE_FONT_SIZE,
+            "the body must be the shared size, not egui's 13 pt default"
+        );
+        assert_eq!(
+            style.text_styles[&TextStyle::Heading].size,
+            heading_size(1),
+            "the heading style is the h1 end of the scale"
+        );
+        assert_eq!(
+            style.text_styles[&TextStyle::Monospace].size,
+            BASE_FONT_SIZE * CODE_FONT_SCALE,
+            "code is set at a fraction of the prose around it"
+        );
+        assert!(
+            style.text_styles[&TextStyle::Heading].size > style.text_styles[&TextStyle::Body].size,
+            "a heading that is not larger than the body is the bug this fixed"
+        );
+    }
+
     // --- split_by_headings tests ---
 
     #[test]

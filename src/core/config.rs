@@ -143,6 +143,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_config_is_not_replaced() {
         // A rename would swap the link for a regular file, quietly undoing a
@@ -156,10 +157,8 @@ mod tests {
         let real = dir.join("real.kdl");
         std::fs::write(&real, "backend auto\n").unwrap();
         let link = dir.join("config.kdl");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        #[cfg(unix)]
         {
             let err = publish_atomically(&link, "backend tui\n").expect_err("must refuse");
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -909,11 +908,16 @@ impl TempFile {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos());
             let path = dir.join(format!(".mdr-config-{pid}-{nanos}-{attempt}.tmp"));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Created private, not widened later: `set_permissions` after the
+            // fact does not revoke a descriptor another process already opened.
+            #[cfg(unix)]
             {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
                 Ok(file) => {
                     let tmp = Self { path, armed: true };
                     // Before any content. A failure drops `tmp`, which removes

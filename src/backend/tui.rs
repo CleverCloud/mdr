@@ -296,6 +296,71 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Point stdin back at the terminal when the document arrived through a pipe.
+///
+/// macOS only, because the defect is: with the document on stdin, crossterm
+/// falls back to `/dev/tty` for the keyboard, and `/dev/tty` is a *clone*
+/// device the kernel refuses to register with kqueue — `EVFILT_READ` returns
+/// `EINVAL`. mio's registration fails, `UnixInternalEventSource::new` returns
+/// an error crossterm swallows, and the first key read reports "Failed to
+/// initialize input reader", after the document has already been drawn.
+/// Opening the real device instead (`/dev/ttys004`) registers fine.
+///
+/// Linux is deliberately left alone: `/dev/tty` works with epoll there, and
+/// this swap would replace the process's *controlling* terminal with whatever
+/// terminal stdout happens to point at — not necessarily the same one.
+///
+/// Scope: this leaks the old descriptor 0 rather than restoring it, which is
+/// fine for mdr — the piped document has already been read into a file, one
+/// backend runs, and the process exits after it. It is not a routine something
+/// else should call.
+#[cfg(target_os = "macos")]
+fn reattach_stdin_to_terminal() {
+    use std::io::IsTerminal;
+
+    if io::stdin().is_terminal() {
+        return;
+    }
+
+    // `ttyname_r` rather than `ttyname`: POSIX does not require the latter to be
+    // thread-safe, and it returns a pointer into a static buffer.
+    let mut buffer = [0_i8; libc::PATH_MAX as usize];
+    // SAFETY: the buffer is owned here and its real length is passed, so
+    // `ttyname_r` cannot write past it.
+    let rc = unsafe {
+        libc::ttyname_r(
+            libc::STDOUT_FILENO,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if rc != 0 {
+        crate::vlog!("stdin not reattached: no terminal on stdout (ttyname_r: {rc})");
+        return;
+    }
+
+    // SAFETY: `ttyname_r` returned success, so the buffer holds a NUL-terminated
+    // path; the descriptor is closed unless it becomes stdin.
+    unsafe {
+        let fd = libc::open(buffer.as_ptr().cast(), libc::O_RDWR);
+        if fd < 0 {
+            crate::vlog!("stdin not reattached: {}", std::io::Error::last_os_error());
+            return;
+        }
+        if libc::dup2(fd, libc::STDIN_FILENO) < 0 {
+            crate::vlog!("stdin not reattached: {}", std::io::Error::last_os_error());
+        } else {
+            crate::vlog!(
+                "stdin reattached to {}",
+                std::ffi::CStr::from_ptr(buffer.as_ptr().cast()).to_string_lossy()
+            );
+        }
+        if fd != libc::STDIN_FILENO {
+            libc::close(fd);
+        }
+    }
+}
+
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&file_path)?;
     let toc_entries = toc::extract_toc(&content);
@@ -307,15 +372,22 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         return Err("tui backend requires a terminal (stdout is not a TTY)".into());
     }
 
+    // `cat doc.md | mdr --backend tui` leaves stdin on the pipe, and the keys
+    // have to come from somewhere else.
+    #[cfg(target_os = "macos")]
+    reattach_stdin_to_terminal();
+
     // Setup terminal. Everything past this point runs with the terminal in raw
     // mode and on the alternate screen, so the restore has to happen on every
     // way out — including an early `?` and a panic, which a plain cleanup at the
     // end of the function misses. A failure to read an event used to leave the
     // user's shell raw and stuck on the alternate screen.
     enable_raw_mode()?;
+    // Armed here, not after the `execute!` below: that call can fail, and it
+    // would leave the terminal raw with nothing to put it back.
+    let _restore = TerminalRestore;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let _restore = TerminalRestore;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
