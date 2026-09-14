@@ -172,7 +172,7 @@ the theme follows `prefers-color-scheme`.
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Quit |
+| `q` / `Esc` / `Ctrl+C` | Quit |
 | `j` / `↓` | Scroll down |
 | `k` / `↑` | Scroll up |
 | `Space` / `PgDn` | Page down |

@@ -502,24 +502,43 @@ mod tests {
 
     #[test]
     fn the_help_lists_every_value_the_parsers_accept() {
-        // The help is where people look for the accepted values, and nothing
-        // ties the doc comment to the parser — so tie it here instead.
+        // Per argument, not across the whole help text: `auto` belongs to both
+        // `--backend` and `--theme`, so searching the rendered help as one
+        // string would let either of them hide the other's omission.
         use clap::CommandFactory;
-        let help = Cli::command().render_help().to_string();
+        let command = Cli::command();
+        let help_for = |long: &str| {
+            command
+                .get_arguments()
+                .find(|a| a.get_long() == Some(long))
+                .unwrap_or_else(|| panic!("no --{long} argument"))
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        };
+
+        let backend_help = help_for("backend");
         for backend in core::config::BACKENDS {
             assert!(
-                help.contains(backend),
-                "--backend accepts '{backend}' but the help does not mention it:\n{help}"
+                backend_help.contains(backend),
+                "--backend accepts '{backend}' but its help does not say so: {backend_help}"
             );
         }
+        let set_default_help = help_for("set-default-backend");
+        assert!(
+            !set_default_help.is_empty(),
+            "--set-default-backend should describe itself"
+        );
+
+        let theme_help = help_for("theme");
         for theme in ["auto", "dark", "light"] {
             assert!(
                 core::Theme::parse(theme).is_some(),
                 "'{theme}' should be a theme"
             );
             assert!(
-                help.contains(theme),
-                "--theme accepts '{theme}' but the help does not mention it:\n{help}"
+                theme_help.contains(theme),
+                "--theme accepts '{theme}' but its help does not say so: {theme_help}"
             );
         }
     }

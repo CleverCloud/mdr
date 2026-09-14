@@ -25,15 +25,20 @@ pub fn validate_image_file(path: &Path) -> Result<(), String> {
         if data.len() < magic.len() {
             return Err(format!("file too small to be a valid {kind}"));
         }
-        if &data[..magic.len()] != magic {
-            // WebP is RIFF + 4 bytes + WEBP
-            if kind == "WebP"
-                && data.len() >= 12
-                && &data[..4] == b"RIFF"
-                && &data[8..12] == b"WEBP"
-            {
-                return Ok(());
-            }
+
+        let matches = if kind == "WebP" {
+            // RIFF is only the container: `.wav` and `.avi` start with it too.
+            // The format itself is named at bytes 8..12, and this used to be
+            // checked inside the `!= magic` arm — that is, only when the file
+            // did *not* start with RIFF, which cannot happen. The four-byte
+            // check passed on its own and any RIFF file named `.webp` went
+            // through unexamined.
+            data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
+        } else {
+            &data[..magic.len()] == magic
+        };
+
+        if !matches {
             return Err(format!(
                 "file does not appear to be a valid {kind} (wrong magic bytes)"
             ));
@@ -62,6 +67,49 @@ fn validate_svg(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write(name: &str, bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    /// `RIFF` + a size + the format name. Only the last part says WebP.
+    fn riff(format: &[u8; 4]) -> Vec<u8> {
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(format);
+        bytes
+    }
+
+    #[test]
+    fn a_webp_is_recognised_by_its_format_name_not_just_its_container() {
+        let (_dir, path) = write("image.webp", &riff(b"WEBP"));
+        assert!(validate_image_file(&path).is_ok(), "a real WebP must pass");
+    }
+
+    #[test]
+    fn another_riff_format_named_webp_is_refused() {
+        // The container is shared with WAV and AVI. This used to pass: the
+        // format check sat in a branch that could not be reached.
+        for format in [b"WAVE", b"AVI "] {
+            let (_dir, path) = write("image.webp", &riff(format));
+            let err = validate_image_file(&path)
+                .expect_err("only WEBP may pass as a WebP, got a pass for {format:?}");
+            assert!(
+                err.contains("WebP"),
+                "the error should name the format: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_webp_truncated_before_its_format_name_is_refused() {
+        let (_dir, path) = write("image.webp", b"RIFF\0\0\0\0");
+        assert!(validate_image_file(&path).is_err());
+    }
+
     use std::io::Write;
 
     #[test]

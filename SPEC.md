@@ -1,5 +1,11 @@
 # MDR — Markdown Reader
 
+> **This is the design document written before mdr existed**, kept for its
+> reasoning and its Architecture Decision Records. It is not a description of
+> the current program: for that, read `README.md`, `mdr --help` and the man
+> page, and `CHANGELOG.md` for the history. Where this file states versions or
+> behaviour, treat the code as the authority.
+
 ## Pitch (Shape Up Format)
 
 ### Problem
@@ -329,28 +335,27 @@ Output: startup_ms, render_ms, memory_mb, binary_size_mb
 
 ## Roadmap
 
-### MVP (v0.1 — 3-4 weeks)
+Kept for the record. The MVP and v0.2 lists below are what was planned before
+any of it existed; the state of each item is now the truth of the repository,
+not of this file. `CHANGELOG.md` is the record of what actually shipped.
 
-- [x] ~~Prototype validated (egui vs WebView comparison)~~
-- [ ] Project bootstrap (`cargo init`, CI, README)
-- [ ] Single file mode: `mdr file.md`
-- [ ] GFM Markdown rendering (egui_commonmark + comrak)
-- [ ] Syntax highlighting (syntect)
-- [ ] Image support (local + URL + base64)
-- [ ] Mermaid → SVG → egui image (mmdr integration)
-- [ ] Mermaid error handling (inline error + source code)
-- [ ] File watching + live reload (notify, 300ms debounce)
-- [ ] Scroll position preservation on reload
-- [ ] OS dark/light theme support
-- [ ] Release build + binary distribution
+### MVP (v0.1) — shipped
 
-### v0.2 — Post-MVP
+Project bootstrap, single file mode, GFM rendering, syntax highlighting, images
+(local, URL and base64), Mermaid to SVG, Mermaid error handling showing the
+source, file watching with live reload, scroll preservation, OS theme support,
+and binary distribution.
 
-- [ ] Directory mode: `mdr ./docs/` with sidebar file browser
-- [ ] Table of Contents in sidebar (auto-generated from headings)
-- [ ] stdin/pipe mode: `cat file.md | mdr`
-- [ ] Internal navigation for .md links
-- [ ] Mermaid.js fallback for unsupported diagram types
-- [ ] Homebrew formula
-- [ ] CSS custom override for theming
-- [ ] Linux + Windows support
+### v0.2 — shipped
+
+Table of contents in the sidebar, stdin/pipe mode, internal navigation between
+`.md` files, the Homebrew formula, and Linux plus Windows support.
+
+### Still open
+
+- **Directory mode**: `mdr ./docs/` with a sidebar file browser. Not started.
+- **Mermaid.js fallback for unsupported diagram types.** What exists is not
+  this: an unsupported diagram is shown as its own source in a
+  `mermaid-fallback` block, with no JavaScript renderer behind it.
+- **CSS custom override for theming.** Not started; the stylesheet is generated
+  from `src/core/style.rs` and cannot be replaced from outside.

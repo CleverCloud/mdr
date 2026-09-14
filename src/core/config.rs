@@ -4,8 +4,20 @@ use std::path::{Path, PathBuf};
 mod tests {
     use super::*;
 
+    /// A config fixture, at a path no other test can be using.
+    ///
+    /// The name alone was not enough: it is fixed per test, so two `cargo test`
+    /// processes running at once — or a rerun overlapping the previous one —
+    /// wrote to and deleted the same file. The process id and a counter make
+    /// each call's path its own; every test already removes what it created.
     fn tmp_config(name: &str, content: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("mdr_test_config_{name}.kdl"));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let unique = CALLS.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mdr_test_config_{name}_{}_{unique}.kdl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         std::fs::write(&path, content).unwrap();
         path

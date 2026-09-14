@@ -1971,8 +1971,9 @@ mod tests {
         for sc in SHORTCUTS {
             assert!(
                 script.contains(&format!("{}:", sc.action)),
-                "no handler named {:?} in window.mdrActions",
-                sc.action
+                "{:?} is bound to {:?} but has no handler in window.mdrActions",
+                sc.action,
+                sc.bindings
             );
         }
     }
@@ -2042,12 +2043,41 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_escapes_shortcut_labels() {
-        // Labels are rendered as HTML; a raw "<" would break the markup.
+    fn shortcut_labels_reach_the_overlay_and_are_not_empty() {
+        // Renamed from a promise it did not keep: it asserted nothing about
+        // escaping. That belongs to `escape_html`, tested below on its own.
         let help = build_shortcuts_help_html();
         assert!(
             !help.contains("<kbd></kbd>"),
             "shortcut labels must not render empty, got: {help}"
+        );
+        for sc in SHORTCUTS {
+            assert!(
+                help.contains(&escape_html(sc.label)),
+                "{:?} is missing from the overlay",
+                sc.label
+            );
+        }
+    }
+
+    #[test]
+    fn escape_html_neutralises_the_characters_that_would_break_the_markup() {
+        // The overlay interpolates labels and descriptions into HTML, so the
+        // characters that close a tag or open an entity have to come out inert.
+        assert_eq!(escape_html("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        // Quotes are deliberately left alone: labels land in element *text*
+        // (`<kbd>…</kbd>`, `<td>…</td>`), never in an attribute value, and text
+        // content does not end at a quote. What matters is that the tag cannot
+        // be closed early.
+        assert_eq!(
+            escape_html(r#"<img src=x onerror="alert(1)">"#),
+            r#"&lt;img src=x onerror="alert(1)"&gt;"#
+        );
+        assert_eq!(escape_html("nothing to do"), "nothing to do");
+        assert_eq!(
+            escape_html("&amp;"),
+            "&amp;amp;",
+            "an ampersand is escaped once, not interpreted"
         );
     }
 
@@ -2323,27 +2353,6 @@ mod tests {
             assert!(
                 !is_quit_request(message),
                 "{message:?} must not be treated as a quit request"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod scroll_tests {
-    use super::*;
-
-    /// Every scrolling shortcut must be wired to an action; a binding whose
-    /// action is missing from `mdrActions` fails silently in the page.
-    #[test]
-    fn every_binding_has_an_action_in_the_script() {
-        let js = keyboard_script();
-        for shortcut in SHORTCUTS {
-            assert!(
-                js.contains(&format!("{}:", shortcut.action))
-                    || js.contains(&format!("{}: ", shortcut.action)),
-                "action {} is bound to {:?} but not defined in mdrActions",
-                shortcut.action,
-                shortcut.bindings
             );
         }
     }

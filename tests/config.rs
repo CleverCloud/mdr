@@ -10,11 +10,9 @@ fn sandbox() -> tempfile::TempDir {
 }
 
 fn mdr_bin() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // remove test binary name
-    path.pop(); // remove "deps"
-    path.push("mdr");
-    path
+    // Cargo hands the test the path it built, extension and all; deriving it
+    // from `current_exe` guessed wrong on Windows, where it is `mdr.exe`.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_mdr"))
 }
 
 #[test]
@@ -107,4 +105,117 @@ fn explicit_missing_config_errors() {
         stderr.contains("not found"),
         "should report config file not found, got: {stderr}"
     );
+}
+
+/// A config that exists, in a directory of its own.
+fn config_with(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.kdl");
+    std::fs::write(&path, contents).unwrap();
+    (dir, path)
+}
+
+#[test]
+fn set_default_backend_writes_through_the_command_line() {
+    // The unit tests call `set_backend` directly; this is the path a user takes,
+    // including the argument parsing and the exit code.
+    let (_dir, path) = config_with("// mine\nbackend auto\nverbose #true\n");
+
+    let output = Command::new(mdr_bin())
+        .arg("-s")
+        .arg("tui")
+        .arg("-c")
+        .arg(&path)
+        .output()
+        .expect("failed to run mdr");
+
+    assert!(
+        output.status.success(),
+        "mdr -s should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains("backend tui"), "got:\n{after}");
+    assert!(
+        after.contains("// mine") && after.contains("verbose #true"),
+        "the rest of the file must survive, got:\n{after}"
+    );
+}
+
+#[test]
+fn set_default_backend_refuses_a_name_that_is_not_a_backend() {
+    let (_dir, path) = config_with("backend auto\n");
+
+    let output = Command::new(mdr_bin())
+        .arg("-s")
+        .arg("webview") // the name before 0.6; not a backend any more
+        .arg("-c")
+        .arg(&path)
+        .output()
+        .expect("failed to run mdr");
+
+    assert!(
+        !output.status.success(),
+        "an unknown backend must not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("auto, gui, tui, web"),
+        "the error should list what is accepted, got: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "backend auto\n",
+        "a refused value must leave the file alone"
+    );
+}
+
+#[test]
+fn set_default_backend_will_not_create_the_file_it_was_pointed_at() {
+    // Same rule as reading: an explicit `--config` path that does not exist is
+    // a typo, not a request to create one.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.kdl");
+
+    let output = Command::new(mdr_bin())
+        .arg("-s")
+        .arg("tui")
+        .arg("-c")
+        .arg(&missing)
+        .output()
+        .expect("failed to run mdr");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not found"),
+        "should report the missing file"
+    );
+    assert!(!missing.exists(), "nothing should have been created");
+}
+
+#[test]
+fn the_command_line_backend_beats_the_config_file() {
+    // `--backend` is typed now; the file was written some time ago.
+    let (dir, path) = config_with("backend web\n");
+    let md = dir.path().join("doc.md");
+    std::fs::write(&md, "# test\n").unwrap();
+
+    let output = Command::new(mdr_bin())
+        .arg("-c")
+        .arg(&path)
+        .arg("-b")
+        .arg("tui")
+        .arg(&md)
+        .output()
+        .expect("failed to run mdr");
+
+    // The tui backend refuses a non-TTY stdout, which is the proof it was the
+    // one chosen: had the file won, this would have tried to open a window.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tui backend requires a terminal"),
+        "the command line should have won, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&md);
 }

@@ -345,11 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn render_mermaid_panic_safety() {
-        // Test that catch_unwind works - even bizarre input doesn't crash
-        let result = render_mermaid_to_svg("\0\0\0");
-        // Must not panic
-        let _ = result;
+    fn unusual_input_does_not_panic() {
+        // Named for what it establishes. It does NOT prove the `catch_unwind`
+        // fires: nothing here makes the renderer panic, so the guard is not
+        // shown to be doing anything. What it rules out is this input taking
+        // the process down, whichever path it goes through.
+        let _ = render_mermaid_to_svg("\0\0\0");
+        let _ = render_mermaid_to_svg("");
+        let _ = render_mermaid_to_svg("graph");
     }
 
     // --- process_mermaid_blocks tests ---
