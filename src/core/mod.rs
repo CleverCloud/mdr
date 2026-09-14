@@ -17,6 +17,9 @@ pub mod paths;
 #[cfg(feature = "webview-backend")]
 pub mod sanitize;
 pub mod slug;
+/// Shared palette and type scale: only the two graphical backends draw a page.
+#[cfg(any(feature = "egui-backend", feature = "webview-backend"))]
+pub mod style;
 pub mod toc;
 pub mod watcher;
 

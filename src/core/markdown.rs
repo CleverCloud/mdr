@@ -49,19 +49,63 @@ fn strip_html_tags(html: &str) -> String {
 }
 
 /// CSS for GitHub-like markdown rendering with dark/light theme support.
-pub const GITHUB_CSS: &str = r#"
-@media (prefers-color-scheme: dark) {
-    :root { --bg: #0d1117; --fg: #e6edf3; --code-bg: #161b22; --border: #30363d; --link: #58a6ff; --blockquote: #8b949e; --sidebar-bg: #010409; --sidebar-hover: #161b22; --sidebar-active: #1f6feb33; }
+/// The stylesheet, with its palette and sizes taken from [`crate::core::style`]
+/// rather than written out here, so the `web` backend cannot drift from `gui`.
+pub fn github_css() -> String {
+    use crate::core::style;
+
+    fn variables(palette: &style::Palette) -> String {
+        format!(
+            "--bg: {}; --fg: {}; --strong: {}; --code-bg: {}; --inline-code-bg: {}; \
+             --border: {}; --link: {}; --blockquote: {}; --sidebar-bg: {}; \
+             --sidebar-hover: {}; --sidebar-active: {};",
+            style::hex(palette.bg),
+            style::hex(palette.fg),
+            style::hex(palette.strong),
+            style::hex(palette.code_bg),
+            style::hex(palette.inline_code_bg),
+            style::hex(palette.border),
+            style::hex(palette.link),
+            style::hex(palette.muted),
+            style::hex(palette.sidebar_bg),
+            style::hex(palette.sidebar_hover),
+            style::hex(palette.sidebar_active),
+        )
+    }
+
+    // `h3` to `h6` used to fall through to the browser's own sizes — 1.17, 1,
+    // 0.83, 0.67 em — which is not the scale `gui` renders. Every level is
+    // written out now, from the one table.
+    let headings: String = (1..=6)
+        .map(|level| {
+            format!(
+                "h{level} {{ font-size: {}em; }}\n",
+                style::heading_scale(level)
+            )
+        })
+        .collect();
+
+    format!(
+        "@media (prefers-color-scheme: dark) {{\n    :root {{ {dark} }}\n}}\n\
+         @media (prefers-color-scheme: light) {{\n    :root {{ {light} }}\n}}\n\
+         :root {{ --base-font-size: {base}px; --code-font-size: {code}%; \
+         --line-height: {line}; }}\n{headings}{rest}",
+        dark = variables(&style::DARK),
+        light = variables(&style::LIGHT),
+        base = style::BASE_FONT_SIZE,
+        code = style::CODE_FONT_SCALE * 100.0,
+        line = style::LINE_HEIGHT,
+        rest = STATIC_CSS,
+    )
 }
-@media (prefers-color-scheme: light) {
-    :root { --bg: #ffffff; --fg: #1f2328; --code-bg: #f6f8fa; --border: #d0d7de; --link: #0969da; --blockquote: #656d76; --sidebar-bg: #f6f8fa; --sidebar-hover: #eaeef2; --sidebar-active: #ddf4ff; }
-}
+
+const STATIC_CSS: &str = r#"
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; }
 body {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-    font-size: 16px;
-    line-height: 1.6;
+    font-size: var(--base-font-size);
+    line-height: var(--line-height);
     color: var(--fg);
     background: var(--bg);
     display: flex;
@@ -109,13 +153,13 @@ body {
     padding: 32px 24px 3rem;
     flex: 1;
 }
-h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; font-weight: 600; line-height: 1.25; }
-h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
-h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
+h1, h2, h3, h4, h5, h6 { margin-top: 24px; margin-bottom: 16px; font-weight: 600; line-height: 1.25; color: var(--strong); }
+h1, h2 { padding-bottom: 0.3em; border-bottom: 1px solid var(--border); }
+strong, b { color: var(--strong); }
 code {
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 85%;
-    background: var(--code-bg);
+    font-size: var(--code-font-size);
+    background: var(--inline-code-bg);
     padding: 0.2em 0.4em;
     border-radius: 6px;
 }
@@ -127,7 +171,7 @@ pre {
     overflow-x: auto;
     line-height: 1.45;
 }
-pre code { background: transparent; padding: 0; font-size: 85%; }
+pre code { background: transparent; padding: 0; font-size: var(--code-font-size); }
 table { border-collapse: collapse; width: 100%; margin: 16px 0; }
 th, td { border: 1px solid var(--border); padding: 6px 13px; }
 th { font-weight: 600; background: var(--code-bg); }

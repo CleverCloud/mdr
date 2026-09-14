@@ -44,8 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The generated file selects `backend auto`, which every build has — it used to
   hard-code `webview`, which a `--no-default-features --features tui-backend`
   binary cannot run. When nothing names a home directory mdr still reads
-  `./.config/mdr/config.kdl` if it is there, but writes nothing, so no
-  `.config/` is left behind in the directory it was started from.
+  `./.config/mdr/config.kdl` if it is there — and treats it like any other
+  config, including correcting an old backend name in it — but does not create
+  one, so no `.config/` is left behind in the directory it was started from.
 
 ### Added
 
@@ -53,12 +54,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file and exits. Only that value is replaced — comments and every other
   setting are preserved — and mdr refuses to write a backend this binary was
   not built with, which would only fail on the next start.
+- The publishing setup documents every channel the release workflow drives:
+  `PACKAGING.md` named four of the seven secrets and three of the six
+  variables, leaving Chocolatey, Scoop and the Snap Store undocumented even
+  though their jobs run. The README gained the `cargo install mdr` /
+  `cargo binstall mdr` route, which was never written down.
 - Short forms for the options that lacked them: `-t` for `--theme`, `-c` for
   `--config` and `-l` for `--list-backends`. `--theme` was also missing from the
   man page's option list, though it was already documented as a config key.
 
+- **The `gui` and `web` backends share one palette and one type scale**
+  (`src/core/style.rs`): a 16 px body, headings at 2 / 1.5 / 1.25 / 1 / 0.875 /
+  0.85 em, code at 85 %, GitHub colours. `gui` used to run on egui's defaults —
+  a 13 pt body with an 18 pt heading, so `h1` through `h6` all landed within
+  five points of each other — and `web` rendered `h3` to `h6` at the browser's
+  own sizes, which were a third scale again. The stylesheet is now generated
+  from those constants, so the two cannot drift.
+
+  The palette and the body size are shared; the heading *scale* is not, and
+  cannot be. `gui` renders through `egui_commonmark`, which interpolates its own
+  sizes between the heading and body styles and takes no table, so setting those
+  two ends makes `h1` and the body agree while `h2` to `h6` come out larger than
+  the stylesheet's. Fixing that needs a change upstream.
+
+  The pairs a reader actually meets are checked against the WCAG 2.2 contrast
+  minimum by unit tests, including muted text on a hovered sidebar entry — which
+  GitHub's own `#656d76` misses at 4.4999:1, so the light palette uses `#646c75`.
+  egui's default inline-code chip put body text at 3.1:1.
+
+- **`gui` picks the platform's UI and monospace faces** (SF Pro / SF Mono,
+  Segoe UI / Cascadia Mono, Cantarell / Noto Sans Mono…), matching the
+  `system-ui` and `ui-monospace` stacks the stylesheet asks for. Every other
+  installed face stays behind them as a fallback for non-Latin scripts.
+
+- **`**bold**` is visible in `gui` again.** egui has no font weights —
+  `strong()` only changes the colour — so bold and body text were drawn
+  identically. Strong text has its own palette entry now, with a test that they
+  cannot be equal.
+
+- **The `gui` table of contents follows the `web` sidebar**: a small uppercase
+  muted label instead of a document-sized heading, entries graded by depth, and
+  entries wider than the panel ellipsised rather than dragging it wider. Its
+  scroll area no longer shrinks to its widest entry, which is what put egui's
+  floating scrollbar on top of the text (the rest of #27).
+
 ### Fixed
 
+- **A document taller than 65535 rows no longer wraps around.** An element's
+  height was narrowed to `u16` while a wrapped paragraph is as tall as its line
+  count, which nothing bounds to the terminal. Everything derived from it — the
+  document height, search offsets, scrolling — went wrong past that point; a
+  65545-row document reported 9.
+- **The terminal backend caps the SVGs it rasterises**, like the three other
+  rendering paths already did. The size declared by the document decided the
+  buffer to allocate outright, so an SVG claiming 40000x20000 asked for one that
+  size. It is now scaled down to fit 8192 per side, never up.
 - `--help` now lists every value the parsers accept. `--theme` named none at
   all, and `--backend` left out `auto` — the one the generated config file
   selects. A test ties both lists to what the parsers take, so they cannot

@@ -10,6 +10,9 @@ Configure these in **GitHub repo → Settings → Secrets and variables → Acti
 |--------|--------------|---------|
 | `CARGO_REGISTRY_TOKEN` | crates.io → Settings → Tokens → New Token (publish-update) | crates.io publish |
 | `HOMEBREW_TAP_TOKEN` | GitHub PAT with write access to `CleverCloud/homebrew-misc` | Homebrew formula update |
+| `CHOCOLATEY_API_KEY` | community.chocolatey.org → My Account → API Key | Chocolatey package push |
+| `SCOOP_BUCKET_TOKEN` | GitHub PAT with write access to `CleverCloud/scoop-bucket` | Scoop manifest update |
+| `SNAPCRAFT_STORE_CREDENTIALS` | `snapcraft export-login --snaps mdr-markdown-renderer --acls package_push,package_update -` | Snap Store publish |
 | `WINGET_TOKEN` | GitHub classic PAT with `public_repo` scope | WinGet package update |
 | `AUR_SSH_PRIVATE_KEY` | SSH key registered on aur.archlinux.org | AUR package update |
 
@@ -20,8 +23,14 @@ Configure in **GitHub repo → Settings → Secrets and variables → Actions �
 | Variable | Value | Purpose |
 |----------|-------|---------|
 | `HOMEBREW_TAP_ENABLED` | `true` | Enable Homebrew tap updates on release |
+| `CHOCOLATEY_ENABLED` | `true` | Enable Chocolatey publishing on release |
+| `SCOOP_ENABLED` | `true` | Enable Scoop bucket updates on release |
+| `SNAP_ENABLED` | `true` | Enable Snap Store publishing on release |
 | `WINGET_ENABLED` | `true` | Enable WinGet package updates on release |
 | `AUR_ENABLED` | `true` | Enable AUR package updates on release |
+
+Each job is skipped when its variable is not `true`, so a release still succeeds
+when a channel is not configured.
 
 ## Repos to Create
 
@@ -31,7 +40,16 @@ Homebrew tap for Clever Cloud tools.
 
 1. Create the repo `CleverCloud/homebrew-misc` on GitHub
 2. Initialize with a `Formula/` directory
-3. Users install with: `brew tap CleverCloud/misc && brew install mdr`
+3. Users install with: `brew install CleverCloud/misc/mdr`
+
+### `CleverCloud/scoop-bucket`
+
+Scoop bucket for Clever Cloud tools.
+
+1. Create the repo `CleverCloud/scoop-bucket` on GitHub
+2. The release workflow writes `bucket/mdr.json` into it
+3. Users install with:
+   `scoop bucket add clevercloud https://github.com/CleverCloud/scoop-bucket && scoop install mdr`
 
 ## Setting Up Homebrew Tap Token
 

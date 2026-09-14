@@ -34,6 +34,18 @@ mdr offers multiple rendering backends, selectable at runtime:
 
 ## Install
 
+### From crates.io
+
+```bash
+cargo install mdr
+# or, to download the release binary instead of compiling
+cargo binstall mdr
+```
+
+> **Note**: `cargo install` compiles the three backends; on Linux that needs the
+> [system dependencies](#linux-dependencies) below. `cargo binstall` downloads
+> the release binary instead.
+
 ### From source
 
 ```bash
@@ -234,9 +246,10 @@ there must exist, since a typo is a mistake rather than a request to create a
 file.
 
 If no environment variable names a home directory, mdr says so and reads
-`./.config/mdr/config.kdl` if it happens to exist — but writes nothing there,
-rather than leaving a `.config/` behind in whatever directory it was started
-from.
+`./.config/mdr/config.kdl` if it happens to exist — but does not create one
+there, rather than leaving a `.config/` behind in whatever directory it was
+started from. A file that is already there is treated like any other config,
+including having an old backend name corrected in it.
 
 The file is [KDL v2](https://kdl.dev). Four keys are recognised, each mirroring
 the command line option of the same name:
@@ -314,6 +327,10 @@ Pre-built binaries are available on the [Releases](https://github.com/CleverClou
 - macOS (Apple Silicon + Intel)
 - Linux (x86_64 + aarch64)
 - Windows (x86_64)
+
+Each release also updates the Homebrew tap, the Scoop bucket, the Chocolatey
+package, the Snap Store (`edge` channel) and crates.io — see
+[PACKAGING.md](PACKAGING.md) for the publishing setup.
 
 Release notes are the matching section of [CHANGELOG.md](CHANGELOG.md), so add
 it before pushing the tag.

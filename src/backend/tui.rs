@@ -75,10 +75,18 @@ enum ContentElement {
 
 impl ContentElement {
     /// Returns the number of terminal rows this element occupies.
-    fn row_height(&self) -> u16 {
+    /// How many rows this element occupies in the document.
+    ///
+    /// In `usize`, deliberately: a wrapped paragraph is as tall as its line
+    /// count, which nothing bounds to the height of the terminal. Narrowing
+    /// here used to wrap around silently past 65535 rows and corrupt the row
+    /// arithmetic — the total height, the search offsets and the scrolling all
+    /// derive from this. The conversion to `u16` belongs where a value has
+    /// already been clipped to the viewport.
+    fn row_height(&self) -> usize {
         match self {
-            Self::TextLine(text) | Self::ImagePlaceholder(text) => text.height() as u16,
-            Self::Image { height, .. } => *height,
+            Self::TextLine(text) | Self::ImagePlaceholder(text) => text.height(),
+            Self::Image { height, .. } => usize::from(*height),
         }
     }
 }
@@ -577,7 +585,7 @@ fn compute_search_matches(elements: &[ContentElement], query: &str) -> Vec<usize
         {
             matches.push(row_offset);
         }
-        row_offset += element.row_height() as usize;
+        row_offset += element.row_height();
     }
     matches
 }
@@ -593,7 +601,7 @@ fn update_search_matches(app: &mut TuiApp) {
 
 /// Calculate the total number of terminal rows occupied by all content elements.
 fn total_content_rows(elements: &[ContentElement]) -> usize {
-    elements.iter().map(|e| e.row_height() as usize).sum()
+    elements.iter().map(ContentElement::row_height).sum()
 }
 
 fn ui(f: &mut Frame, app: &mut TuiApp) {
@@ -738,13 +746,15 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     // painted over them.
     let available = content_area.width.saturating_sub(2);
     if content_area.height > 0 && available > 0 {
-        // The display width is saturated into `u16` and then clipped to the
-        // columns actually available.
-        let wanted = u16::try_from(Line::from(bar_text.as_str()).width()).unwrap_or(u16::MAX);
+        // Clipped to the available columns while still `usize`, so the result
+        // is known to fit and the conversion cannot fail or saturate.
+        let wanted = Line::from(bar_text.as_str()).width();
+        let width = u16::try_from(wanted.min(usize::from(available)))
+            .expect("clipped to a u16 above, so it fits");
         let help_area = Rect {
             x: content_area.x + 1,
             y: content_area.bottom() - 1,
-            width: available.min(wanted),
+            width,
             height: 1,
         };
 
@@ -783,7 +793,7 @@ fn render_content_elements(
             break;
         }
 
-        let elem_height = element.row_height() as usize;
+        let elem_height = element.row_height();
         let current_absolute_row = absolute_row;
         absolute_row += elem_height;
 
@@ -885,7 +895,7 @@ fn find_heading_row(
         {
             return Some(row_offset);
         }
-        row_offset += element.row_height() as usize;
+        row_offset += element.row_height();
     }
 
     None
@@ -1099,15 +1109,35 @@ fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::err
     };
     let tree = usvg::Tree::from_str(svg_data, &options)?;
     let size = tree.size();
-    let width = size.width() as u32;
-    let height = size.height() as u32;
+    let (svg_w, svg_h) = (size.width(), size.height());
+
+    // The document being rendered is untrusted, and its declared size decided
+    // how large a buffer to allocate: an SVG claiming 100000x100000 asked for
+    // forty gigabytes. The three other rasterisation paths already cap a side at
+    // MAX_TEXTURE_SIZE; this one did not, and the terminal is the backend most
+    // likely to be pointed at a file someone else wrote.
+    const MAX_TEXTURE_SIZE: u32 = 8192;
+    let scale = if svg_w > MAX_TEXTURE_SIZE as f32 || svg_h > MAX_TEXTURE_SIZE as f32 {
+        let scale_w = MAX_TEXTURE_SIZE as f32 / svg_w;
+        let scale_h = MAX_TEXTURE_SIZE as f32 / svg_h;
+        scale_w.min(scale_h).min(1.0) // never scale up, only down
+    } else {
+        1.0
+    };
+
+    let width = (svg_w * scale) as u32;
+    let height = (svg_h * scale) as u32;
 
     if width == 0 || height == 0 {
         return Err("SVG has zero dimensions".into());
     }
 
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
 
     // Convert RGBA pixmap to DynamicImage
     let img = image::RgbaImage::from_raw(width, height, pixmap.data().to_vec())
@@ -1840,6 +1870,48 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_svg_is_scaled_down_before_it_is_rasterised() {
+        // The declared size used to decide the buffer size outright, so a
+        // document could ask for an allocation of any size it liked.
+        let huge = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40000" height="20000"><rect width="10" height="10"/></svg>"#;
+        let img = rasterize_svg(huge).expect("an oversized SVG must still render");
+        assert!(
+            img.width() <= 8192 && img.height() <= 8192,
+            "expected a capped surface, got {}x{}",
+            img.width(),
+            img.height()
+        );
+        assert!(
+            img.width() > 0 && img.height() > 0,
+            "the aspect ratio must survive the scaling"
+        );
+
+        // A small one is untouched: the cap only ever scales down.
+        let small = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="10" height="10"/></svg>"#;
+        let img = rasterize_svg(small).expect("a small SVG must render");
+        assert_eq!((img.width(), img.height()), (40, 20));
+    }
+
+    #[test]
+    fn a_document_taller_than_u16_keeps_its_real_height() {
+        // A wrapped paragraph is as tall as its line count, which nothing bounds
+        // to the terminal. `row_height` used to narrow that to `u16`, so a very
+        // long document wrapped around past 65535 rows and every offset derived
+        // from it — total height, search matches, scrolling — went wrong.
+        let tall = u16::MAX as usize + 10;
+        let mut text = WrappedText::new(Line::from("x"));
+        text.lines = vec![Line::from("x"); tall];
+        let elements = vec![ContentElement::TextLine(text)];
+
+        assert_eq!(elements[0].row_height(), tall);
+        assert_eq!(
+            total_content_rows(&elements),
+            tall,
+            "the document's height must survive being taller than a u16"
+        );
+    }
+
+    #[test]
     fn the_bottom_bar_is_measured_in_columns_not_bytes() {
         // Two queries of the same length on screen, one outside ASCII. The bar
         // used to be sized from `str::len`, so the accented one claimed two
@@ -2179,7 +2251,7 @@ mod tests {
             {
                 break;
             }
-            expected += element.row_height() as usize;
+            expected += element.row_height();
         }
         assert_eq!(matches[0], expected);
         assert!(

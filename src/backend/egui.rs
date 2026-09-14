@@ -6,12 +6,51 @@ use std::sync::mpsc::Receiver;
 use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
 
-/// Load system fonts into egui to support non-Latin scripts (CJK, etc.).
+/// The platform's UI font, best first — the same intent as the `system-ui`
+/// stack the `web` backend asks CSS for.
+const UI_FONT_FAMILIES: &[&str] = &[
+    "SF Pro Text",
+    "SF Pro Display",
+    ".AppleSystemUIFont",
+    "Helvetica Neue",
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    "Cantarell",
+    "Ubuntu",
+    "Noto Sans",
+    "DejaVu Sans",
+];
+
+/// Monospace equivalents, matching the `ui-monospace` stack in the stylesheet.
+const MONO_FONT_FAMILIES: &[&str] = &[
+    "SF Mono",
+    "SFMono-Regular",
+    "Menlo",
+    "Cascadia Mono",
+    "Consolas",
+    "Noto Sans Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+];
+
+/// Where `name` sits in `preferences`, if at all. Lower is better.
+fn preference(preferences: &[&str], name: &str) -> Option<usize> {
+    preferences
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+/// Load system fonts into egui: the platform's UI and monospace faces first, so
+/// the backend does not render in egui's bundled typeface while `web` renders in
+/// the system one; every other installed face stays behind them as a fallback
+/// for non-Latin scripts (CJK, etc.).
 fn load_system_fonts(ctx: &egui::Context) {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
 
     let mut fonts = egui::FontDefinitions::default();
+    let mut preferred_ui: Option<(usize, String)> = None;
+    let mut preferred_mono: Option<(usize, String)> = None;
 
     let mut counter = 0usize;
     for face in db.faces() {
@@ -27,10 +66,18 @@ fn load_system_fonts(ctx: &egui::Context) {
             .map_or_else(|| format!("font_{counter}"), |(name, _)| name.clone());
 
         if let Ok(data) = std::fs::read(source) {
-            let key = format!("{}_{}", name, face.index);
-            fonts
-                .font_data
-                .insert(key.clone(), egui::FontData::from_owned(data).into());
+            // The key has to identify the FACE, not the family: two files of the
+            // same family — a regular and a bold — both report index 0, so
+            // keying on family and index made the second overwrite the first,
+            // and the face finally drawn was whichever happened to load last.
+            // `counter` is per-face and therefore unique.
+            let key = format!("{name}#{counter}");
+            // `from_owned` always sets index 0. Inside a collection (.ttc) that
+            // is a different face from the one selected above, so the real index
+            // has to be put back.
+            let mut font_data = egui::FontData::from_owned(data);
+            font_data.index = face.index;
+            fonts.font_data.insert(key.clone(), font_data.into());
 
             // Insert into proportional and monospace fallbacks
             fonts
@@ -42,12 +89,110 @@ fn load_system_fonts(ctx: &egui::Context) {
                 .families
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
-                .push(key);
+                .push(key.clone());
+
+            // Only upright regular faces are candidates for the primary font;
+            // picking an italic or a bold as the body face looks like a bug.
+            // Weight and style alone do not separate a condensed or expanded
+            // face from the plain one, and either would be a surprising body
+            // font.
+            let upright_regular = face.weight == fontdb::Weight::NORMAL
+                && face.style == fontdb::Style::Normal
+                && face.stretch == fontdb::Stretch::Normal;
+            if upright_regular {
+                if let Some(rank) = preference(UI_FONT_FAMILIES, &name)
+                    && preferred_ui.as_ref().is_none_or(|(best, _)| rank < *best)
+                {
+                    preferred_ui = Some((rank, key.clone()));
+                }
+                if let Some(rank) = preference(MONO_FONT_FAMILIES, &name)
+                    && preferred_mono.as_ref().is_none_or(|(best, _)| rank < *best)
+                {
+                    preferred_mono = Some((rank, key));
+                }
+            }
         }
         counter += 1;
     }
 
+    // Move the chosen faces to the front of their family, ahead of egui's own.
+    for (family, chosen) in [
+        (egui::FontFamily::Proportional, preferred_ui),
+        (egui::FontFamily::Monospace, preferred_mono),
+    ] {
+        if let Some((_, key)) = chosen
+            && let Some(list) = fonts.families.get_mut(&family)
+        {
+            list.retain(|existing| existing != &key);
+            list.insert(0, key);
+        }
+    }
+
     ctx.set_fonts(fonts);
+}
+
+/// Apply the shared palette and type scale.
+///
+/// Without this the backend runs on egui's defaults: a 13 pt body with an 18 pt
+/// heading, so `h1` through `h6` all land within five points of each other,
+/// while `web` renders the same document on a 16 px body and a 2 em `h1`.
+fn apply_style(ctx: &egui::Context) {
+    use crate::core::style::{self, BASE_FONT_SIZE, CODE_FONT_SCALE};
+    use egui::{FontFamily, FontId, TextStyle};
+
+    let colour = |c: style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
+
+    // Sizes are the same whichever palette is in use.
+    ctx.all_styles_mut(|s| {
+        s.text_styles = [
+            (
+                TextStyle::Small,
+                FontId::new(BASE_FONT_SIZE * 0.875, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Body,
+                FontId::new(BASE_FONT_SIZE, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Button,
+                FontId::new(BASE_FONT_SIZE, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(style::heading_size(1), FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(BASE_FONT_SIZE * CODE_FONT_SCALE, FontFamily::Monospace),
+            ),
+        ]
+        .into();
+    });
+
+    // Both palettes are installed, so following the OS costs nothing at runtime.
+    for (theme, palette) in [
+        (egui::Theme::Dark, &style::DARK),
+        (egui::Theme::Light, &style::LIGHT),
+    ] {
+        ctx.style_mut_of(theme, |s| {
+            let v = &mut s.visuals;
+            v.panel_fill = colour(palette.bg);
+            v.window_fill = colour(palette.bg);
+            v.extreme_bg_color = colour(palette.code_bg);
+            v.code_bg_color = colour(palette.inline_code_bg);
+            v.hyperlink_color = colour(palette.link);
+            v.widgets.noninteractive.fg_stroke.color = colour(palette.fg);
+            v.widgets.inactive.fg_stroke.color = colour(palette.fg);
+            // `RichText::strong()` resolves to this one, and egui has no font
+            // weights — brightening the colour is the only bold it can draw.
+            v.widgets.hovered.fg_stroke.color = colour(palette.strong);
+            v.widgets.active.fg_stroke.color = colour(palette.strong);
+            v.widgets.noninteractive.bg_stroke.color = colour(palette.border);
+            // egui_commonmark draws blockquotes with `weak_text_color`, which
+            // otherwise stays egui's own grey rather than the shared muted.
+            v.weak_text_color = Some(colour(palette.muted));
+        });
+    }
 }
 
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -89,6 +234,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| {
             load_system_fonts(&cc.egui_ctx);
+            apply_style(&cc.egui_ctx);
             Ok(Box::new(MdrApp {
                 markdown,
                 sections,
@@ -457,27 +603,64 @@ impl eframe::App for MdrApp {
                 .default_size(220.0)
                 .resizable(true)
                 .show(root_ui, |ui| {
-                    ui.heading("Table of Contents");
+                    use crate::core::style::{self, BASE_FONT_SIZE};
+
+                    // Follow the theme in use: pinning this to the dark palette
+                    // put #8b949e on white, a 3.08:1 contrast at this size.
+                    let palette = if ui.visuals().dark_mode {
+                        &style::DARK
+                    } else {
+                        &style::LIGHT
+                    };
+                    let muted = egui::Color32::from_rgb(
+                        palette.muted[0],
+                        palette.muted[1],
+                        palette.muted[2],
+                    );
+
+                    // A small uppercase label, like the `web` sidebar — not a
+                    // document heading. `ui.heading` resolves to the h1 size and
+                    // would take two lines of the panel to say "Contents".
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("TABLE OF CONTENTS")
+                            .size(BASE_FONT_SIZE * 0.75)
+                            .color(muted),
+                    );
                     ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (i, entry) in self.toc_entries.iter().enumerate() {
-                            let indent = ((f32::from(entry.level) - 1.0) * 12.0).max(0.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(indent);
-                                let text = match entry.level {
-                                    1 => egui::RichText::new(&entry.text).strong(),
-                                    2 => egui::RichText::new(&entry.text).strong().size(13.0),
-                                    3 => egui::RichText::new(&entry.text).size(13.0),
-                                    _ => egui::RichText::new(&entry.text).size(12.0).weak(),
-                                };
-                                if ui.link(text).clicked() {
-                                    // Map TOC index to section index
-                                    let section_idx = if has_preamble { i + 1 } else { i };
-                                    *scroll_target = Some(section_idx);
-                                }
-                            });
-                        }
-                    });
+
+                    // `auto_shrink` off: the default lets the area hug its widest
+                    // entry, which puts egui's floating scrollbar on top of the
+                    // text instead of at the panel's edge, and drags the panel
+                    // wider than the size the reader chose.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            // Entries wider than the panel are ellipsised rather
+                            // than forcing it wider than the size the reader
+                            // dragged it to.
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                            for (i, entry) in self.toc_entries.iter().enumerate() {
+                                let indent = ((f32::from(entry.level) - 1.0) * 12.0).max(0.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(indent);
+                                    // Graded by depth, on the same scale as the
+                                    // body rather than on hard-coded points.
+                                    let text = egui::RichText::new(&entry.text);
+                                    let text = match entry.level {
+                                        1 => text.strong(),
+                                        2 => text.size(BASE_FONT_SIZE * 0.875).strong(),
+                                        3 => text.size(BASE_FONT_SIZE * 0.875),
+                                        _ => text.size(BASE_FONT_SIZE * 0.8125).color(muted),
+                                    };
+                                    if ui.link(text).clicked() {
+                                        // Map TOC index to section index
+                                        let section_idx = if has_preamble { i + 1 } else { i };
+                                        *scroll_target = Some(section_idx);
+                                    }
+                                });
+                            }
+                        });
                 });
         }
 

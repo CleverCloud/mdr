@@ -17,21 +17,11 @@ struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
 
+    // Declared in alphabetical order, which is the order clap prints them in;
+    // `--help` and `--version` are appended after these by clap itself.
     /// Rendering backend: auto, gui, tui, web
     #[arg(short, long, value_parser = parse_backend)]
     backend: Option<String>,
-
-    /// Enable verbose logging (image resolution, mermaid rendering, etc.)
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// Never access the network: remote images are not downloaded
-    #[arg(long)]
-    offline: bool,
-
-    /// Colour scheme the terminal backend highlights code with: auto, dark, light
-    #[arg(short, long, value_name = "THEME", value_parser = parse_theme)]
-    theme: Option<String>,
 
     /// Path to the config file (must exist; -v prints the one in use)
     #[arg(short, long, value_name = "PATH")]
@@ -41,9 +31,21 @@ struct Cli {
     #[arg(short, long)]
     list_backends: bool,
 
+    /// Never access the network: remote images are not downloaded
+    #[arg(long)]
+    offline: bool,
+
     /// Write the backend to use into the config file and exit
     #[arg(short, long, value_name = "BACKEND", value_parser = parse_backend)]
     set_default_backend: Option<String>,
+
+    /// Colour scheme the terminal backend highlights code with: auto, dark, light
+    #[arg(short, long, value_name = "THEME", value_parser = parse_theme)]
+    theme: Option<String>,
+
+    /// Enable verbose logging (image resolution, mermaid rendering, etc.)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 /// Whether this binary was built with the backend `name` (`auto` always is).
@@ -88,15 +90,15 @@ fn print_backends() {
     eprintln!("Available backends:");
     eprintln!(
         "  gui       Native window (OpenGL)                [{}]",
-        status(cfg!(feature = "egui-backend"))
+        status(backend_is_compiled("gui"))
     );
     eprintln!(
         "  tui       Terminal UI with image support        [{}]",
-        status(cfg!(feature = "tui-backend"))
+        status(backend_is_compiled("tui"))
     );
     eprintln!(
         "  web       System webview (WebKit/WebView2)      [{}]",
-        status(cfg!(feature = "webview-backend"))
+        status(backend_is_compiled("web"))
     );
     eprintln!("  auto      Auto-detect best available (default)");
 }
@@ -370,6 +372,10 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
     core::set_verbose(cli.verbose || cfg.verbose.unwrap_or(false));
     if created_config {
         vlog!("created config file: {}", cfg_path.display());
+    } else if cfg_path.exists() {
+        vlog!("config file: {}", cfg_path.display());
+    } else {
+        vlog!("no config file at {}", cfg_path.display());
     }
     core::set_offline(cli.offline || cfg.offline.unwrap_or(false));
     core::set_theme(
@@ -477,6 +483,22 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_backend_name_maps_to_a_cargo_feature() {
+        // `backend_feature` returning "" would make the "not compiled" error
+        // read "Rebuild with --features " — so adding a backend to `BACKENDS`
+        // without teaching that table has to fail here.
+        for name in core::config::BACKENDS {
+            if *name == "auto" {
+                continue;
+            }
+            assert!(
+                !backend_feature(name).is_empty(),
+                "backend '{name}' has no Cargo feature"
+            );
+        }
+    }
 
     #[test]
     fn the_help_lists_every_value_the_parsers_accept() {

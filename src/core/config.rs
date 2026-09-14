@@ -103,6 +103,101 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_config_is_not_replaced() {
+        // A rename only needs the directory to be writable, so without an
+        // explicit check the migration would overwrite a file the user locked —
+        // something the plain `fs::write` it replaced could never have done.
+        let path = tmp_config("readonly", "backend auto\n");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let err = publish_atomically(&path, "backend tui\n").expect_err("must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "backend auto\n",
+            "the file must be untouched"
+        );
+
+        // Put the file back before removing it: a read-only file cannot be
+        // deleted on Windows. `set_readonly(false)` would make it world-writable
+        // on Unix, so restore an explicit mode there instead.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        {
+            // The lint warns that this makes a file world-writable — which it
+            // does, on Unix. That is exactly why this branch is the one Unix
+            // does not take.
+            #[allow(clippy::permissions_set_readonly_false)]
+            {
+                let mut perms = std::fs::metadata(&path).unwrap().permissions();
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_symlinked_config_is_not_replaced() {
+        // A rename would swap the link for a regular file, quietly undoing a
+        // deliberate arrangement. Every path that rewrites the config shares
+        // this guard, `-s` included.
+        // A directory of its own: a fixed name under the system temp directory
+        // is shared with every other run of the suite, and two at once would
+        // delete each other's fixture.
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let real = dir.join("real.kdl");
+        std::fs::write(&real, "backend auto\n").unwrap();
+        let link = dir.join("config.kdl");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        #[cfg(unix)]
+        {
+            let err = publish_atomically(&link, "backend tui\n").expect_err("must refuse");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "the link must survive"
+            );
+            assert_eq!(std::fs::read_to_string(&real).unwrap(), "backend auto\n");
+
+            // `-s` goes through the same guard.
+            assert!(set_backend(&link, "web").is_err());
+            assert_eq!(std::fs::read_to_string(&real).unwrap(), "backend auto\n");
+        }
+    }
+
+    #[test]
+    fn publishing_leaves_no_temporary_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let path = dir.join("config.kdl");
+        std::fs::write(&path, "backend auto\n").unwrap();
+
+        publish_atomically(&path, "backend web\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "backend web\n");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "config.kdl")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the temporary must be gone, found: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn set_backend_replaces_the_value_and_keeps_the_rest_of_the_file() {
         let path = tmp_config(
             "set_backend",
@@ -121,6 +216,21 @@ mod tests {
             "other settings must survive, got:\n{after}"
         );
         assert_eq!(load(&path).unwrap().backend.as_deref(), Some("web"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn set_backend_changes_the_entry_that_actually_wins() {
+        // `load` keeps the last `backend` node, so changing the first would
+        // report success and leave the effective default alone.
+        let path = tmp_config("set_backend_multi", "backend auto\nbackend tui\n");
+        set_backend(&path, "web").unwrap();
+
+        assert_eq!(
+            load(&path).unwrap().backend.as_deref(),
+            Some("web"),
+            "the value mdr will actually use must be the one that changed"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -332,14 +442,29 @@ mod tests {
             .join(FILE_NAME)
     }
 
+    /// An absolute path for the host running the tests.
+    ///
+    /// `resolve` asks `Path::is_absolute`, whose answer comes from the real OS
+    /// and not from the `windows` flag the test passes in: `/home/dev/cfg` is
+    /// not absolute on Windows, so hard-coding it would make this pass on Unix
+    /// and fail there.
+    fn absolute(tail: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{tail}")
+        } else {
+            format!("/{tail}")
+        }
+    }
+
     #[test]
     fn xdg_config_home_wins_over_the_home_directory() {
+        let xdg = absolute("home/dev/cfg");
         let r = resolve_with(
-            &[("HOME", "/home/dev"), ("XDG_CONFIG_HOME", "/home/dev/cfg")],
+            &[("HOME", "/home/dev"), ("XDG_CONFIG_HOME", &xdg)],
             &[],
             false,
         );
-        assert_eq!(r.path, config_in("/home/dev/cfg"));
+        assert_eq!(r.path, config_in(&xdg));
         assert!(r.warning.is_none());
     }
 
@@ -431,9 +556,11 @@ pub const BACKENDS: &[&str] = &["auto", "gui", "tui", "web"];
 ///
 /// A config file is not what the user is editing when mdr starts, so an old
 /// name there is rewritten to the current one in place rather than refused —
-/// after one run the file is up to date and this table stops mattering, which
-/// is what lets it be deleted later. The command line has no such mapping: it
-/// is retyped every run, so an old name is simply not a backend any more.
+/// a file mdr has read and been able to write comes out carrying the current
+/// name. That is what makes removing this table cheap later — but not free: a
+/// config never opened, or one mdr could not write to, still holds the old
+/// name. The command line has no such mapping: it is retyped every run, so an
+/// old name is simply not a backend any more.
 pub const RENAMED_BACKENDS: &[(&str, &str)] = &[("egui", "gui"), ("webview", "web")];
 
 /// Whether `name` is one of [`BACKENDS`].
@@ -655,12 +782,23 @@ pub fn set_backend(path: &Path, backend: &str) -> Result<(), Box<dyn std::error:
     let text = std::fs::read_to_string(path)?;
     let mut doc = kdl::KdlDocument::parse_v2(&text)?;
 
-    match doc.get_mut("backend") {
-        Some(node) if node.entries().iter().any(|e| e.name().is_none()) => {
-            set_first_argument(node, backend);
-        }
-        // Either no `backend` node at all, or one with nothing to replace.
-        _ => {
+    // The LAST `backend` node is the one `load` keeps, so that is the one to
+    // change: `doc.get_mut` returns the first, and writing to it would report
+    // success while leaving the effective default untouched.
+    let target = doc
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.name().value() == "backend" && node.entries().iter().any(|e| e.name().is_none())
+        })
+        .map(|(index, _)| index)
+        .next_back();
+
+    match target.and_then(|index| doc.nodes_mut().get_mut(index)) {
+        Some(node) => set_first_argument(node, backend),
+        // Either no `backend` node at all, or none with a value to replace.
+        None => {
             let mut node = kdl::KdlNode::new("backend");
             node.push(kdl::KdlValue::String(backend.to_string()));
             doc.nodes_mut().push(node);
@@ -745,25 +883,121 @@ fn report_unmigrated(path: &Path, migrations: &[(usize, String, &'static str)], 
 /// Replace `path`'s contents in one step, so a crash cannot leave the config
 /// half-written. The temporary lands in the same directory, since a rename only
 /// counts as atomic within a filesystem.
-fn publish_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".new");
-    let tmp = dir.join(PathBuf::from(tmp).file_name().unwrap_or_default());
+/// A temporary file that removes itself unless it is handed off.
+struct TempFile {
+    path: PathBuf,
+    armed: bool,
+}
 
-    std::fs::write(&tmp, contents)?;
-    // Carry the original's permissions over: the rename replaces the inode, so
-    // a config the user had locked down would otherwise come back as 0644.
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+impl TempFile {
+    /// Create a uniquely named file in `dir`, failing rather than reusing one.
+    ///
+    /// The name has to be unique and the creation exclusive: a fixed
+    /// `config.kdl.new` would collide with a file already sitting there, and two
+    /// mdr migrating the same config at once would write through each other.
+    ///
+    /// `permissions` are applied before the caller can write a single byte, so
+    /// the contents of a restricted config never sit in a laxer file — not even
+    /// for the width of a write.
+    fn create_in(
+        dir: &Path,
+        permissions: &std::fs::Permissions,
+    ) -> std::io::Result<(Self, std::fs::File)> {
+        let pid = std::process::id();
+        for attempt in 0..64u32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            let path = dir.join(format!(".mdr-config-{pid}-{nanos}-{attempt}.tmp"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    let tmp = Self { path, armed: true };
+                    // Before any content. A failure drops `tmp`, which removes
+                    // the empty file, and leaves the original untouched.
+                    file.set_permissions(permissions.clone())?;
+                    return Ok((tmp, file));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not find a free temporary name next to the config file",
+        ))
     }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+
+    /// Give up ownership: the file is now somewhere else, under another name.
+    fn handed_off(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// Replace `path`'s contents in one step, so a crash cannot leave the config
+/// half-written.
+///
+/// What this does and does not promise:
+///
+/// - The replacement is atomic *for readers of `path`*: they see the old file
+///   or the new one, never a truncated one. The temporary lands in the same
+///   directory, since a rename is only atomic within a filesystem.
+/// - It is **not** a lock. A writer that changes the file between the caller's
+///   read and this rename loses its change; narrowing that window is all the
+///   re-read in [`migrate_backend_names`] does.
+/// - It refuses a read-only file. `fs::write` would have failed on one, whereas
+///   a rename only needs the *directory* to be writable — so without this check
+///   the migration would quietly overwrite a config the user had locked.
+/// - It carries the original's **mode and read-only bit** onto the replacement,
+///   and applies them before any content is written. It does not preserve what
+///   `std::fs::Permissions` cannot express — POSIX ACLs, ownership, extended
+///   attributes — so this is mode preservation, not a general guarantee that
+///   the file's authorisations survive.
+/// - It refuses a symlink, since a rename would replace the link itself.
+fn publish_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // A symlink is a deliberate arrangement, and a rename would replace it with
+    // a regular file. This guard lives here rather than in one caller so that
+    // every path that rewrites the config obeys the same policy.
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the config file is a symlink",
+        ));
+    }
+
+    let meta = std::fs::metadata(path)?;
+    if meta.permissions().readonly() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the config file is read-only",
+        ));
+    }
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let (tmp, mut file) = TempFile::create_in(dir, &meta.permissions())?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    std::fs::rename(&tmp.path, path)?;
+    tmp.handed_off();
+    Ok(())
 }
 
 /// Load config from `path`. Returns defaults if the file does not exist.

@@ -30,8 +30,13 @@ the document is read from standard input.
 Rendering backend to use:
 .BR auto ", " gui ", " tui " or " web .
 .TP
-.BR \-v ", " \-\-verbose
-Enable verbose logging (image resolution, mermaid rendering, etc.).
+.BR \-c ", " \-\-config " " \fIPATH\fR
+Path to the config file. A path given here must exist; without it mdr uses the
+per\-platform location described under
+.BR FILES .
+.TP
+.BR \-l ", " \-\-list\-backends
+List available backends and exit.
 .TP
 .B \-\-offline
 Never access the network: remote images are not downloaded. Can also be set in
@@ -39,6 +44,15 @@ the config file with
 .BR "offline #true" .
 The flag only turns the mode on: it cannot re\-enable network access when the
 config file already disables it.
+.TP
+.BR \-s ", " \-\-set\-default\-backend " " \fIBACKEND\fR
+Write
+.I BACKEND
+into the config file's
+.B backend
+entry and exit. Only that value is replaced: comments and every other setting
+are kept. mdr refuses to write a backend this binary was not built with, since
+the result would fail on the next start.
 .TP
 .BR \-t ", " \-\-theme " " \fITHEME\fR
 Colour scheme the terminal backend assumes for syntax highlighting:
@@ -49,22 +63,8 @@ reads
 and falls back to dark. Can also be set in the config file with
 .BR "theme \(dqlight\(dq" .
 .TP
-.BR \-c ", " \-\-config " " \fIPATH\fR
-Path to the config file. A path given here must exist; without it mdr uses the
-per\-platform location described under
-.BR FILES .
-.TP
-.BR \-l ", " \-\-list\-backends
-List available backends and exit.
-.TP
-.BR \-s ", " \-\-set\-default\-backend " " \fIBACKEND\fR
-Write
-.I BACKEND
-into the config file's
-.B backend
-entry and exit. Only that value is replaced: comments and every other setting
-are kept. mdr refuses to write a backend this binary was not built with, since
-the result would fail on the next start.
+.BR \-v ", " \-\-verbose
+Enable verbose logging (image resolution, mermaid rendering, etc.).
 .TP
 .BR \-h ", " \-\-help
 Print help.
@@ -96,7 +96,8 @@ may hold a POSIX path a native binary cannot resolve.
 .TP
 .I ./.config/mdr/config.kdl
 Last resort, when no environment variable names a home directory. mdr reads
-this file if it is there but never creates it, so no
+this file if it is there, and treats it like any other config, but does not
+create one, so no
 .I .config
 directory is left behind in the directory mdr was started from.
 .PP

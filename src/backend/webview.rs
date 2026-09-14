@@ -6,7 +6,7 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
-use crate::core::markdown::{GITHUB_CSS, parse_markdown};
+use crate::core::markdown::{github_css, parse_markdown};
 use crate::core::sanitize::sanitize_document_html;
 use crate::core::toc;
 use crate::vlog;
@@ -585,7 +585,7 @@ fn build_html(body: &str, toc_entries: &[toc::TocEntry]) -> String {
     // Ctrl/Cmd+D can override the system preference.
     let theme_overrides = format!(
         "{}{}",
-        theme_override_css(GITHUB_CSS),
+        theme_override_css(&github_css()),
         if highlight_script.is_empty() {
             String::new()
         } else {
@@ -849,7 +849,7 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
 <script>{keyboard_script}</script>
 </body>
 </html>"#,
-        css = GITHUB_CSS,
+        css = github_css(),
         toc = toc_html,
         body = body,
         highlight_script = highlight_script,
