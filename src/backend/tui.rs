@@ -732,9 +732,10 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     // outside an area no wider than its own borders.
     //
     // The width is a column count, so the bar is measured in columns rather
-    // than in `str::len` bytes, which overstate anything outside ASCII. Clipping
-    // to `available` bounded it either way, so this corrects what the number
-    // means rather than a visible overrun.
+    // than in `str::len` bytes, which overstate anything outside ASCII. That is
+    // visible, not merely pedantic: an accented search query used to give the
+    // bar two cells per character more than it draws, and its background was
+    // painted over them.
     let available = content_area.width.saturating_sub(2);
     if content_area.height > 0 && available > 0 {
         // The display width is saturated into `u16` and then clipped to the
@@ -1819,6 +1820,37 @@ mod tests {
             search_matches: Vec::new(),
             current_match_idx: 0,
         }
+    }
+
+    /// How many cells on the bottom row carry the search bar's background.
+    fn search_bar_width(query: &str) -> usize {
+        let mut app = app_for_drawing("# Titre\n\nDu texte.\n");
+        app.search_mode = true;
+        app.search_query = query.to_string();
+
+        let backend = ratatui::backend::TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom = buffer.area.height - 1;
+        (0..buffer.area.width)
+            .filter(|x| buffer[(*x, bottom)].style().bg == Some(Color::Rgb(40, 40, 40)))
+            .count()
+    }
+
+    #[test]
+    fn the_bottom_bar_is_measured_in_columns_not_bytes() {
+        // Two queries of the same length on screen, one outside ASCII. The bar
+        // used to be sized from `str::len`, so the accented one claimed two
+        // extra cells per character and painted its background over them.
+        let ascii = search_bar_width("aa");
+        let accented = search_bar_width("éé");
+        assert!(ascii > 0, "the search bar should be drawn at all");
+        assert_eq!(
+            ascii, accented,
+            "two queries that are the same width on screen must fill the same cells"
+        );
     }
 
     #[test]

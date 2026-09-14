@@ -25,13 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tui-backend`), so documented build commands and packaging recipes are
   unaffected.
 
-- **The config file is written on first run, and its location follows the
-  platform.** `$XDG_CONFIG_HOME/mdr/config.kdl` on Linux and BSD,
-  `%APPDATA%\mdr\config.kdl` on Windows, `~/.config/mdr/config.kdl` otherwise.
-  An existing `~/.config/mdr/config.kdl` keeps precedence, so setting
-  `XDG_CONFIG_HOME` later does not orphan a config already in use, and
-  `%USERPROFILE%` is preferred over `HOME` on Windows because Git Bash sets
-  `HOME` to a POSIX path a native binary cannot resolve. Being unable to write
+- **The config file is written on first run, and its location is resolved
+  rather than hard-coded.** In order, on every platform: an existing
+  `~/.config/mdr/config.kdl`, then `$XDG_CONFIG_HOME/mdr/config.kdl` when that
+  variable holds an absolute path, then `%APPDATA%\mdr\config.kdl` on Windows,
+  then `~/.config/mdr/config.kdl`. `%USERPROFILE%` gives the home directory on
+  Windows, because Git Bash sets `HOME` to a POSIX path a native binary cannot
+  resolve.
+
+  Putting an existing `~/.config/mdr/config.kdl` ahead of `XDG_CONFIG_HOME` is
+  a deliberate departure from the spec, which says the variable wins: every mdr
+  before this release read that one path and nothing else, so deferring to the
+  variable would silently ignore the config of everyone who has both. A
+  relative `XDG_CONFIG_HOME` is ignored with a warning, as the spec requires. Being unable to write
   the file is a warning, not a failure: mdr runs on the defaults the file would
   have carried anyway.
 
@@ -40,6 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary cannot run. When nothing names a home directory mdr still reads
   `./.config/mdr/config.kdl` if it is there, but writes nothing, so no
   `.config/` is left behind in the directory it was started from.
+
+### Added
+
+- `-s, --set-default-backend <BACKEND>` writes the backend into the config
+  file and exits. Only that value is replaced — comments and every other
+  setting are preserved — and mdr refuses to write a backend this binary was
+  not built with, which would only fail on the next start.
+- Short forms for the options that lacked them: `-t` for `--theme`, `-c` for
+  `--config` and `-l` for `--list-backends`. `--theme` was also missing from the
+  man page's option list, though it was already documented as a config key.
+
+### Fixed
+
+- `--help` now lists every value the parsers accept. `--theme` named none at
+  all, and `--backend` left out `auto` — the one the generated config file
+  selects. A test ties both lists to what the parsers take, so they cannot
+  drift apart again.
 
 ### Removed
 

@@ -4,6 +4,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 /// Helper to get the path to the mdr binary built by cargo test.
+/// Point a child at a config directory of its own.
+///
+/// Without this a spawned mdr resolves the *developer's* config: since the file
+/// is created on first run and an old backend name is corrected in place, a test
+/// run would create or rewrite the real `~/.config/mdr/config.kdl`. Every
+/// variable the resolver consults has to be set, not just `HOME`.
+fn isolate_config<'a>(cmd: &'a mut Command, home: &std::path::Path) -> &'a mut Command {
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join("xdg"))
+        .env("APPDATA", home.join("appdata"))
+}
+
 fn mdr_bin() -> std::path::PathBuf {
     // cargo test builds the binary in the same target directory
     let mut path = std::env::current_exe().unwrap();
@@ -16,7 +29,10 @@ fn mdr_bin() -> std::path::PathBuf {
 #[test]
 fn stdin_pipe_with_list_backends_exits_successfully() {
     // --list-backends exits before backend runs, proving CLI accepts piped stdin
-    let mut child = Command::new(mdr_bin())
+    let home = std::env::temp_dir().join("mdr_test_list_home");
+    let _ = std::fs::create_dir_all(&home);
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, &home)
         .arg("--list-backends")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -37,7 +53,10 @@ fn stdin_pipe_with_list_backends_exits_successfully() {
 
 #[test]
 fn stdin_dash_argument_does_not_error_file_not_found() {
-    let mut child = Command::new(mdr_bin())
+    let home = std::env::temp_dir().join("mdr_test_dash_home");
+    let _ = std::fs::create_dir_all(&home);
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, &home)
         .arg("-")
         .arg("-b")
         .arg("tui")
@@ -82,7 +101,8 @@ fn stdin_temp_files(mdr_dir: &Path) -> Vec<PathBuf> {
 /// Run `mdr` with `content` piped on stdin and an isolated TMPDIR, and return
 /// (exit success, stderr).
 fn run_piped(tmpdir: &Path, args: &[&str], content: &[u8]) -> (bool, String) {
-    let mut child = Command::new(mdr_bin())
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, tmpdir)
         .args(args)
         // `std::env::temp_dir()` reads TMPDIR on Unix but TMP then TEMP on
         // Windows, so all three have to be set or the child writes to the real
@@ -237,7 +257,10 @@ fn temp_dir_symlink_is_not_followed() {
 
 #[test]
 fn nonexistent_file_shows_error() {
-    let output = Command::new(mdr_bin())
+    let home = std::env::temp_dir().join("mdr_test_missing_home");
+    let _ = std::fs::create_dir_all(&home);
+    let mut cmd = Command::new(mdr_bin());
+    let output = isolate_config(&mut cmd, &home)
         .arg("this_file_does_not_exist.md")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

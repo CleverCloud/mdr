@@ -111,7 +111,7 @@ mdr --backend tui README.md
 mdr --offline README.md
 
 # Force the palette used to highlight code in the terminal
-mdr --theme light README.md
+mdr -t light README.md
 
 # Show help
 mdr --help
@@ -134,7 +134,7 @@ local `.md` file opens that file in mdr.
 
 On macOS the shortcuts use ⌘, not ⌃.
 
-### Webview keybindings
+### `web` keybindings
 
 Press `?` in the `web` backend for this list.
 
@@ -214,16 +214,24 @@ mdr writes a commented config file with its defaults the first time it runs, so
 there is nothing to scaffold and no flag to know about. Where it lands follows
 the platform:
 
-| Platform | Path |
+| Order | Path |
 |---|---|
-| Linux, BSD | `$XDG_CONFIG_HOME/mdr/config.kdl`, else `~/.config/mdr/config.kdl` |
-| Windows | `%APPDATA%\mdr\config.kdl` |
-| macOS | `~/.config/mdr/config.kdl` |
+| 1 | `~/.config/mdr/config.kdl`, if it already exists |
+| 2 | `$XDG_CONFIG_HOME/mdr/config.kdl`, when that variable holds an absolute path |
+| 3 | `%APPDATA%\mdr\config.kdl`, on Windows |
+| 4 | `~/.config/mdr/config.kdl` |
 
-An existing `~/.config/mdr/config.kdl` keeps precedence over
-`XDG_CONFIG_HOME`, so setting that variable later does not orphan a config that
-is already in use. `--config PATH` points somewhere else; a path given there
-must exist, since a typo is a mistake rather than a request to create a file.
+The order is the same on every platform; only step 3 is Windows-only. `HOME`
+gives the home directory, except on Windows where `%USERPROFILE%` comes first,
+since Git Bash sets `HOME` to a POSIX path a native binary cannot resolve.
+
+Step 1 is a deliberate departure from the XDG spec, which says the variable
+wins: every mdr before 0.6 read `~/.config/mdr/config.kdl` and nothing else, so
+letting `XDG_CONFIG_HOME` take precedence would silently ignore the config of
+everyone who has both. A relative `XDG_CONFIG_HOME` is ignored with a warning,
+as the spec requires. `-c, --config PATH` points somewhere else; a path given
+there must exist, since a typo is a mistake rather than a request to create a
+file.
 
 If no environment variable names a home directory, mdr says so and reads
 `./.config/mdr/config.kdl` if it happens to exist — but writes nothing there,
@@ -232,6 +240,9 @@ from.
 
 The file is [KDL v2](https://kdl.dev). Four keys are recognised, each mirroring
 the command line option of the same name:
+
+`mdr -s web` writes the backend into the file for you, leaving comments and
+every other setting alone; it refuses a backend the binary was not built with.
 
 ```kdl
 backend auto      // auto, gui, tui or web

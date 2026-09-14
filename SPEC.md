@@ -81,7 +81,7 @@ The core logic (file watching, Markdown parsing, Mermaid rendering, syntax highl
 
 ### Crate Dependencies
 
-#### Core (shared by both backends)
+#### Core (shared by every backend)
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
@@ -100,22 +100,33 @@ The core logic (file watching, Markdown parsing, Mermaid rendering, syntax highl
 | `eframe` | Native window + egui integration | 0.36 |
 | `egui_commonmark` | Markdown → egui widgets | 0.25 |
 
-#### WebView backend
+#### `web` backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
 | `wry` | OS-native WebView | 0.57 |
 | `tao` | Window management | 0.37 |
+| `muda` | Native menus | 0.20 |
+
+#### `tui` backend
+
+| Crate | Purpose | Version |
+|-------|---------|---------|
+| `ratatui` | Terminal UI | 0.30 |
+| `crossterm` | Terminal control | 0.29 |
+| `ratatui-image` | Images in the terminal | 11.0 |
 
 ### Cargo Features
 
-Both backends are compiled by default. Users can opt out via feature flags:
+All three backends are compiled by default. Users can opt out via feature
+flags, whose names keep the crate that draws rather than the backend name:
 
 ```toml
 [features]
-default = ["egui-backend", "webview-backend"]
-egui-backend = ["eframe", "egui_commonmark"]
-webview-backend = ["wry", "tao"]
+default = ["egui-backend", "webview-backend", "tui-backend"]
+egui-backend = ["eframe", "egui_commonmark", ...]
+webview-backend = ["wry", "tao", "muda", ...]
+tui-backend = ["ratatui", "crossterm", "ratatui-image", ...]
 ```
 
 ### egui_commonmark Features
@@ -125,7 +136,6 @@ egui_commonmark = { version = "0.25", features = [
     "better_syntax_highlighting",  # syntect-based highlighting
     "load-images",                 # local image loading
     "svg",                         # SVG rendering
-    "fetch",                       # remote URL image fetching
     "embedded_image",              # base64 inline images
 ] }
 ```
@@ -230,6 +240,9 @@ EXAMPLES:
 ## Architecture Decision Records
 
 ### ADR-001: Dual backend architecture (egui + WebView)
+
+**Superseded in part:** a third backend, `tui`, was added later. The reasoning
+below is kept as the record of the original two-way decision.
 
 **Context:** We need a window to display rendered Markdown. Options: egui (pure Rust GPU rendering), wry (OS native WebView), terminal TUI (ratatui). Both egui and WebView were prototyped and compared visually.
 

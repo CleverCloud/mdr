@@ -103,6 +103,39 @@ mod tests {
     }
 
     #[test]
+    fn set_backend_replaces_the_value_and_keeps_the_rest_of_the_file() {
+        let path = tmp_config(
+            "set_backend",
+            "// keep me\nbackend auto\n\n// and me\nverbose #true\n",
+        );
+        set_backend(&path, "web").unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("backend web"), "got:\n{after}");
+        assert!(
+            after.contains("// keep me") && after.contains("// and me"),
+            "comments must survive, got:\n{after}"
+        );
+        assert!(
+            after.contains("verbose #true"),
+            "other settings must survive, got:\n{after}"
+        );
+        assert_eq!(load(&path).unwrap().backend.as_deref(), Some("web"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn set_backend_adds_the_entry_when_the_file_has_none() {
+        let path = tmp_config("set_backend_absent", "verbose #true\n");
+        set_backend(&path, "tui").unwrap();
+
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.backend.as_deref(), Some("tui"));
+        assert_eq!(cfg.verbose, Some(true), "other settings must be kept");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_property_on_the_backend_node_survives_the_correction() {
         // "corriger le nom" is not a licence to drop the rest of the line.
         let path = tmp_config("backend_props", "backend \"egui\" extra=1\n");
@@ -351,6 +384,19 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_xdg_config_home_is_ignored() {
+        // The spec calls a relative value invalid, and mdr writes the file, so
+        // honouring it would drop a config into the current directory.
+        let r = resolve_with(
+            &[("HOME", "/home/dev"), ("XDG_CONFIG_HOME", "cfg")],
+            &[],
+            false,
+        );
+        assert_eq!(r.path, dotconfig_in("/home/dev"));
+        assert!(r.warning.is_none(), "the home directory was still found");
+    }
+
+    #[test]
     fn empty_variables_are_ignored() {
         let r = resolve_with(
             &[("HOME", "/home/dev"), ("XDG_CONFIG_HOME", "")],
@@ -482,11 +528,21 @@ fn resolve(
         };
     }
 
-    if let Some(xdg) = non_empty(env("XDG_CONFIG_HOME")) {
-        return Resolution {
-            path: PathBuf::from(xdg).join("mdr").join(FILE_NAME),
-            warning: None,
-        };
+    // The XDG spec says a relative `XDG_CONFIG_HOME` is invalid and must be
+    // ignored. It matters more than pedantry here: mdr creates the file, so
+    // honouring a relative value would write a config into the current
+    // directory instead of the user's home.
+    if let Some(xdg) = non_empty(env("XDG_CONFIG_HOME")).map(PathBuf::from) {
+        if xdg.is_absolute() {
+            return Resolution {
+                path: xdg.join("mdr").join(FILE_NAME),
+                warning: None,
+            };
+        }
+        eprintln!(
+            "mdr: warning: ignoring XDG_CONFIG_HOME '{}', which must be an absolute path",
+            xdg.display()
+        );
     }
 
     if windows && let Some(appdata) = non_empty(env("APPDATA")) {
@@ -569,13 +625,63 @@ pub fn ensure_exists(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     }
 }
 
+/// Replace a node's first positional argument, leaving everything else alone.
+///
+/// Properties, any further arguments and the formatting around them are the
+/// user's. And `set_value` on its own changes nothing on the way out: a parsed
+/// entry keeps the literal text it came from (`KdlEntryFormat::value_repr`) and
+/// prints that, so the representation has to be rewritten too — keeping the
+/// quoting the user chose, so a quoted value stays quoted and a bare one bare.
+fn set_first_argument(node: &mut kdl::KdlNode, value: &str) {
+    let Some(entry) = node.entries_mut().iter_mut().find(|e| e.name().is_none()) else {
+        return;
+    };
+    entry.set_value(kdl::KdlValue::String(value.to_string()));
+    if let Some(format) = entry.format_mut() {
+        format.value_repr = if format.value_repr.trim_start().starts_with('"') {
+            format!("\"{value}\"")
+        } else {
+            value.to_string()
+        };
+    }
+}
+
+/// Write `backend` into the `backend` entry of the config at `path`.
+///
+/// Everything else in the file is preserved: the document is parsed and only
+/// that one value is replaced, so comments and other settings survive. A file
+/// without a `backend` node gains one at the end.
+pub fn set_backend(path: &Path, backend: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut doc = kdl::KdlDocument::parse_v2(&text)?;
+
+    match doc.get_mut("backend") {
+        Some(node) if node.entries().iter().any(|e| e.name().is_none()) => {
+            set_first_argument(node, backend);
+        }
+        // Either no `backend` node at all, or one with nothing to replace.
+        _ => {
+            let mut node = kdl::KdlNode::new("backend");
+            node.push(kdl::KdlValue::String(backend.to_string()));
+            doc.nodes_mut().push(node);
+        }
+    }
+
+    publish_atomically(path, &doc.to_string())?;
+    Ok(())
+}
+
 /// Rewrite the old backend names in `path` to the current ones.
 ///
-/// The point is that the migration removes itself: after one run the file no
-/// longer carries a name from before the rename, so this table can be deleted
-/// later without stranding anyone. It is best-effort — the value is already
-/// mapped in memory by the time this runs, so nothing here can make the run
-/// fail.
+/// The point is that the migration mostly removes itself: a file mdr has read
+/// and been able to write no longer carries a name from before the rename. It
+/// is best-effort — the value is already mapped in memory by the time this
+/// runs, so nothing here can make the run fail — which is also why deleting
+/// this table later is not free: a config that was never opened, or that mdr
+/// could not write to, still holds the old name.
+///
+/// Whoever removes it should keep `renamed_backend` reporting a clear message
+/// for those names, rather than letting them fall through as unknown.
 fn migrate_backend_names(
     path: &Path,
     original: &str,
@@ -593,26 +699,8 @@ fn migrate_backend_names(
     }
 
     for (index, _, current) in migrations {
-        let Some(node) = doc.nodes_mut().get_mut(*index) else {
-            continue;
-        };
-        // Only the first positional argument is replaced. Properties, any
-        // further arguments and the formatting around them are the user's, and
-        // "correct the name" is not a licence to drop them.
-        let Some(entry) = node.entries_mut().iter_mut().find(|e| e.name().is_none()) else {
-            continue;
-        };
-        // `set_value` alone changes nothing on the way out: a parsed entry keeps
-        // the literal text it came from (`KdlEntryFormat::value_repr`) and
-        // prints that. The repr has to be rewritten too — keeping the quoting
-        // the user chose, so a quoted value stays quoted and a bare one bare.
-        entry.set_value(kdl::KdlValue::String((*current).to_string()));
-        if let Some(format) = entry.format_mut() {
-            format.value_repr = if format.value_repr.trim_start().starts_with('"') {
-                format!("\"{current}\"")
-            } else {
-                (*current).to_string()
-            };
+        if let Some(node) = doc.nodes_mut().get_mut(*index) {
+            set_first_argument(node, current);
         }
     }
 

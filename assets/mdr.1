@@ -40,13 +40,31 @@ the config file with
 The flag only turns the mode on: it cannot re\-enable network access when the
 config file already disables it.
 .TP
-.BR \-\-config " " \fIPATH\fR
+.BR \-t ", " \-\-theme " " \fITHEME\fR
+Colour scheme the terminal backend assumes for syntax highlighting:
+.BR auto ", " dark " or " light .
+.B auto
+reads
+.B COLORFGBG
+and falls back to dark. Can also be set in the config file with
+.BR "theme \(dqlight\(dq" .
+.TP
+.BR \-c ", " \-\-config " " \fIPATH\fR
 Path to the config file. A path given here must exist; without it mdr uses the
 per\-platform location described under
 .BR FILES .
 .TP
-.B \-\-list\-backends
+.BR \-l ", " \-\-list\-backends
 List available backends and exit.
+.TP
+.BR \-s ", " \-\-set\-default\-backend " " \fIBACKEND\fR
+Write
+.I BACKEND
+into the config file's
+.B backend
+entry and exit. Only that value is replaced: comments and every other setting
+are kept. mdr refuses to write a backend this binary was not built with, since
+the result would fail on the next start.
 .TP
 .BR \-h ", " \-\-help
 Print help.
@@ -86,7 +104,7 @@ Use
 .B \-\-config
 to point somewhere else; a path given there must already exist.
 .PP
-Three keys are recognised, each mirroring the command line option of the same
+Four keys are recognised, each mirroring the command line option of the same
 name:
 .TP
 .B backend
@@ -98,6 +116,10 @@ Boolean, enables verbose logging by default.
 .TP
 .B offline
 Boolean, never access the network.
+.TP
+.B theme
+Colour scheme the terminal backend assumes for syntax highlighting:
+.BR auto ", " dark " or " light .
 .PP
 Booleans use the KDL syntax
 .RB ( "verbose #true" ", " "offline #false" );

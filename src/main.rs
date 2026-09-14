@@ -17,7 +17,7 @@ struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
 
-    /// Rendering backend to use: gui (native window), tui (terminal), web (HTML)
+    /// Rendering backend: auto, gui, tui, web
     #[arg(short, long, value_parser = parse_backend)]
     backend: Option<String>,
 
@@ -29,17 +29,52 @@ struct Cli {
     #[arg(long)]
     offline: bool,
 
-    /// Colour scheme to assume for syntax highlighting in the terminal backend
-    #[arg(long, value_name = "THEME", value_parser = parse_theme)]
+    /// Colour scheme the terminal backend highlights code with: auto, dark, light
+    #[arg(short, long, value_name = "THEME", value_parser = parse_theme)]
     theme: Option<String>,
 
-    /// Path to config file [default: ~/.config/mdr/config.kdl]
-    #[arg(long, value_name = "PATH")]
+    /// Path to the config file (must exist; -v prints the one in use)
+    #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
 
     /// List available backends and exit
-    #[arg(long)]
+    #[arg(short, long)]
     list_backends: bool,
+
+    /// Write the backend to use into the config file and exit
+    #[arg(short, long, value_name = "BACKEND", value_parser = parse_backend)]
+    set_default_backend: Option<String>,
+}
+
+/// Whether this binary was built with the backend `name` (`auto` always is).
+fn backend_is_compiled(name: &str) -> bool {
+    // Written as a chain rather than a `match`: every arm is a `cfg!`, which
+    // collapses to a literal per build, and in an all-features build they all
+    // collapse to `true` — which is exactly when clippy mistakes this for a
+    // `matches!`. It is not one: in a single-backend build the arms differ.
+    if name == "auto" {
+        return true;
+    }
+    if name == "gui" {
+        return cfg!(feature = "egui-backend");
+    }
+    if name == "tui" {
+        return cfg!(feature = "tui-backend");
+    }
+    if name == "web" {
+        return cfg!(feature = "webview-backend");
+    }
+    false
+}
+
+/// The Cargo feature that builds the backend `name`.
+fn backend_feature(name: &str) -> &'static str {
+    match name {
+        "gui" => "egui-backend",
+        "tui" => "tui-backend",
+        "web" => "webview-backend",
+        _ => "",
+    }
 }
 
 fn print_backends() {
@@ -281,9 +316,12 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
         (None, false)
     };
     let cfg_path = cli.config.clone().or(default_path).unwrap_or_default();
+    let mut created_config = false;
     if may_create {
         match core::config::ensure_exists(&cfg_path) {
-            Ok(true) => vlog!("created config file: {}", cfg_path.display()),
+            // Verbosity is not known yet — it partly comes from the very file
+            // being created — so the log waits until `set_verbose` below.
+            Ok(true) => created_config = true,
             Ok(false) => {}
             // Not being able to write it costs nothing at this point: mdr runs
             // on its defaults, which is what the file would have said anyway.
@@ -293,6 +331,32 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
             ),
         }
     }
+    if let Some(backend) = &cli.set_default_backend {
+        // Writing a backend this binary cannot run would produce a config that
+        // fails on the next start, which is not what "set the default" means.
+        if !backend_is_compiled(backend) {
+            eprintln!(
+                "Error: {backend} backend not compiled. Rebuild with --features {}",
+                backend_feature(backend)
+            );
+            return 1;
+        }
+        if !cfg_path.exists() {
+            eprintln!("Error: config file '{}' not found", cfg_path.display());
+            return 1;
+        }
+        return match core::config::set_backend(&cfg_path, backend) {
+            Ok(()) => {
+                eprintln!("Set backend to {backend} in {}", cfg_path.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        };
+    }
+
     let cfg = if cli.config.is_some() && !cfg_path.exists() {
         eprintln!("Error: config file '{}' not found", cfg_path.display());
         return 1;
@@ -304,6 +368,9 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
     };
 
     core::set_verbose(cli.verbose || cfg.verbose.unwrap_or(false));
+    if created_config {
+        vlog!("created config file: {}", cfg_path.display());
+    }
     core::set_offline(cli.offline || cfg.offline.unwrap_or(false));
     core::set_theme(
         cli.theme
@@ -410,6 +477,59 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_lists_every_value_the_parsers_accept() {
+        // The help is where people look for the accepted values, and nothing
+        // ties the doc comment to the parser — so tie it here instead.
+        use clap::CommandFactory;
+        let help = Cli::command().render_help().to_string();
+        for backend in core::config::BACKENDS {
+            assert!(
+                help.contains(backend),
+                "--backend accepts '{backend}' but the help does not mention it:\n{help}"
+            );
+        }
+        for theme in ["auto", "dark", "light"] {
+            assert!(
+                core::Theme::parse(theme).is_some(),
+                "'{theme}' should be a theme"
+            );
+            assert!(
+                help.contains(theme),
+                "--theme accepts '{theme}' but the help does not mention it:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_long_option_has_its_short_form() {
+        // The short forms are the documented spelling in the man page, so a
+        // rename that drops one has to fail here rather than in someone's shell.
+        let long = Cli::try_parse_from(["mdr", "--theme", "light", "--config", "c.kdl", "f.md"])
+            .expect("long forms parse");
+        let short = Cli::try_parse_from(["mdr", "-t", "light", "-c", "c.kdl", "f.md"])
+            .expect("short forms parse");
+        assert_eq!(long.theme, short.theme);
+        assert_eq!(long.config, short.config);
+
+        assert!(Cli::try_parse_from(["mdr", "-l"]).unwrap().list_backends);
+        assert_eq!(
+            Cli::try_parse_from(["mdr", "-s", "tui"])
+                .unwrap()
+                .set_default_backend
+                .as_deref(),
+            Some("tui")
+        );
+        assert_eq!(
+            Cli::try_parse_from(["mdr", "-b", "web", "f.md"])
+                .unwrap()
+                .backend
+                .as_deref(),
+            Some("web")
+        );
+        assert!(Cli::try_parse_from(["mdr", "-v", "f.md"]).unwrap().verbose);
+    }
 
     #[test]
     fn cli_parses_and_validates_the_theme_flag() {
