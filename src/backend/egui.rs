@@ -1,10 +1,10 @@
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 use crate::core::mermaid::preprocess_mermaid_for_egui;
 use crate::core::toc::{self, TocEntry};
+use crate::core::watcher::Watch;
 
 /// The platform's UI font, best first — the same intent as the `system-ui`
 /// stack the `web` backend asks CSS for.
@@ -323,8 +323,9 @@ fn read_within(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
 /// title with `<p>` and `<h1>` showed its own markup at the top of the window.
 ///
 /// The answer is not an HTML renderer. It is a short, explicit list of tags —
-/// headings, paragraphs, images, line breaks — rewritten as the Markdown that
-/// means the same thing, so they go on to travel the existing pipeline: image
+/// headings, paragraphs and images — rewritten as the Markdown that means the
+/// same thing. `<br>` becomes a space, since a cell of this conversion is one
+/// run of text, so they go on to travel the existing pipeline: image
 /// paths are resolved and SVGs rasterised exactly as for `![](…)`, and headings
 /// land in the table of contents. `align="center"` has no Markdown equivalent
 /// and is dropped; the content comes back, its layout does not.
@@ -335,6 +336,10 @@ fn read_within(path: &std::path::Path, limit: u64) -> Option<Vec<u8>> {
 /// Only whole HTML blocks are touched, and they are located by parsing rather
 /// than by matching lines, so a `<p>` inside a fenced code block stays the code
 /// it was written as.
+///
+/// Only blocks at the top level, at that. The replacement works on whole lines,
+/// which cannot carry back the `>` of a block quote or the indent of a list
+/// item — a block nested inside one is left exactly as it was written.
 fn render_simple_html(markdown: &str, base_dir: &std::path::Path) -> String {
     use comrak::nodes::NodeValue;
     use comrak::{Arena, Options, parse_document};
@@ -353,7 +358,7 @@ fn render_simple_html(markdown: &str, base_dir: &std::path::Path) -> String {
     // Line ranges are 1-based and inclusive, and collected before any edit so
     // the positions stay those of the document that was parsed.
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-    for node in root.descendants() {
+    for node in root.children() {
         let data = node.data.borrow();
         if let NodeValue::HtmlBlock(block) = &data.value {
             let converted = html_to_markdown(&block.literal, base_dir);
@@ -402,7 +407,7 @@ fn html_to_markdown(html: &str, base_dir: &std::path::Path) -> String {
     let mut heading: Option<usize> = None;
 
     let flush = |out: &mut String, text: &mut String, heading: &mut Option<usize>| {
-        let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = decode_entities(&text.split_whitespace().collect::<Vec<_>>().join(" "));
         text.clear();
         if body.is_empty() {
             return;
@@ -411,7 +416,10 @@ fn html_to_markdown(html: &str, base_dir: &std::path::Path) -> String {
             out.push_str(&"#".repeat(level));
             out.push(' ');
         }
-        out.push_str(&body);
+        // What was between the tags is text. Without this, `<p>*a*</p>` came
+        // out as emphasis and `<p># t</p>` became a heading — and, being a
+        // heading, went into the table of contents.
+        out.push_str(&escape_markdown(&body));
         out.push_str("\n\n");
     };
 
@@ -423,51 +431,42 @@ fn html_to_markdown(html: &str, base_dir: &std::path::Path) -> String {
             i += 1;
             continue;
         }
-        let Some(close) = bytes[i..].iter().position(|c| *c == '>') else {
+        let Some((tag, consumed)) = parse_tag(&bytes[i..]) else {
             // An unterminated `<` is text, not a tag.
             text.push('<');
             i += 1;
             continue;
         };
-        let tag: String = bytes[i + 1..i + close].iter().collect();
-        i += close + 1;
+        i += consumed;
+        let (name, closing) = (tag.name.as_str(), tag.closing);
 
-        let name: String = tag
-            .trim_start_matches('/')
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let closing = tag.starts_with('/');
-
-        match name.as_str() {
+        match name {
             "img" if !closing => {
                 flush(&mut out, &mut text, &mut heading);
-                if let Some(src) = attribute(&tag, "src") {
-                    let alt = attribute(&tag, "alt").unwrap_or_default();
-                    let width = attribute(&tag, "width").and_then(|w| w.trim().parse::<f32>().ok());
-                    // Markdown carries no width, so a declared one is honoured
-                    // by rasterising the drawing at that size. Only vector
-                    // images can be resized without loss, so that is the only
-                    // case handled: a bitmap keeps the size it was saved at,
-                    // which `web` would have scaled.
-                    let sized = width
-                        .filter(|w| *w > 0.0)
-                        .and_then(|w| {
-                            let path = base_dir.join(&src);
-                            let is_svg = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-                            let within = crate::core::paths::is_within_image_root(&path, base_dir);
-                            (is_svg && within && path.exists())
-                                .then(|| rasterize_svg_at(&path, Some(w)).ok())
-                                .flatten()
-                        })
-                        .unwrap_or(src);
-                    // The destination is not escaped: it is a URL, and comrak
-                    // takes it literally inside the parentheses.
-                    out.push_str(&format!("![{}]({})\n\n", escape_markdown(&alt), sized));
+                if let Some(src) = tag.attribute("src") {
+                    let alt = tag.attribute("alt").unwrap_or_default();
+                    let width = tag
+                        .attribute("width")
+                        .and_then(|w| w.trim().parse::<f32>().ok());
+                    // Resolved here, through the very path an `![](…)` takes:
+                    // inside the image root, a real image of the type its name
+                    // claims, remote only when mdr is allowed on the network.
+                    // Markdown carries no width, so a declared one is passed
+                    // along and honoured when the drawing is rasterised — which
+                    // is possible for a vector image and not for a bitmap, so
+                    // that is where it applies.
+                    let alt = escape_alt(&alt);
+                    let original = format!("![{alt}]({src})");
+                    let resolved = rewrite_image_sized(
+                        &alt,
+                        &src,
+                        &original,
+                        base_dir,
+                        width.filter(|w| *w > 0.0),
+                        &crate::core::net::remote_image_data_uri,
+                    );
+                    out.push_str(&resolved);
+                    out.push_str("\n\n");
                 }
             }
             "br" => text.push(' '),
@@ -486,26 +485,134 @@ fn html_to_markdown(html: &str, base_dir: &std::path::Path) -> String {
     out
 }
 
-/// The value of `name` in a tag's attribute list, for quoted values only.
-fn attribute(tag: &str, name: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let mut from = 0usize;
+/// One tag, read from `<` to its matching `>`.
+struct Tag {
+    /// Lowercased element name.
+    name: String,
+    /// Whether this is a closing tag.
+    closing: bool,
+    /// Attributes in the order they were written, names lowercased and values
+    /// already decoded.
+    attributes: Vec<(String, String)>,
+}
+
+impl Tag {
+    /// The value of `name`, if the tag carries it.
+    fn attribute(&self, name: &str) -> Option<String> {
+        self.attributes
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    }
+}
+
+/// Read the tag that starts at `chars[0]`, and how many characters it spans.
+///
+/// Attributes are read one after another rather than searched for, and the
+/// closing `>` is only recognised outside a quoted value. Looking for the name
+/// anywhere in the tag picked the wrong one out of
+/// `<img title="old src='a.png'" src="b.png">`, and cutting at the first `>`
+/// ended the tag inside a value that contained one.
+///
+/// Only quoted values are supported; an unquoted one is skipped, which is a
+/// limit and not a guess.
+fn parse_tag(chars: &[char]) -> Option<(Tag, usize)> {
+    let mut i = 1usize; // past the `<`
+    let closing = chars.get(i) == Some(&'/');
+    if closing {
+        i += 1;
+    }
+    let start = i;
+    // The whole name, hyphens and underscores included. Stopping at the first
+    // non-alphanumeric turned the custom element `<h1-title>` into an `h1` and
+    // `<img-icon>` into an `img`.
+    while chars
+        .get(i)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+    {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let name: String = chars[start..i]
+        .iter()
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    let mut attributes = Vec::new();
     loop {
-        let at = lower[from..].find(name)? + from;
-        let rest = &tag[at + name.len()..];
-        let trimmed = rest.trim_start();
-        // `alt` must not match the `alt` inside another attribute's name.
-        let preceded_by_space = at == 0 || tag[..at].ends_with(|c: char| c.is_whitespace());
-        if preceded_by_space && trimmed.starts_with('=') {
-            let value = trimmed[1..].trim_start();
-            let quote = value.chars().next()?;
-            if quote == '"' || quote == '\'' {
-                let end = value[1..].find(quote)? + 1;
-                return Some(decode_entities(&value[1..end]));
-            }
-            return None;
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
         }
-        from = at + name.len();
+        match chars.get(i) {
+            None => return None, // unterminated
+            Some('>') => {
+                return Some((
+                    Tag {
+                        name,
+                        closing,
+                        attributes,
+                    },
+                    i + 1,
+                ));
+            }
+            Some('/') => {
+                i += 1;
+                continue;
+            }
+            Some(_) => {}
+        }
+
+        let key_start = i;
+        while chars
+            .get(i)
+            .is_some_and(|c| !c.is_whitespace() && *c != '=' && *c != '>')
+        {
+            i += 1;
+        }
+        if i == key_start {
+            // Something we do not understand: step over it rather than loop.
+            i += 1;
+            continue;
+        }
+        let key: String = chars[key_start..i]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
+
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        if chars.get(i) != Some(&'=') {
+            // A valueless attribute, such as `hidden`.
+            attributes.push((key, String::new()));
+            continue;
+        }
+        i += 1;
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        let Some(quote) = chars.get(i).copied().filter(|c| *c == '"' || *c == '\'') else {
+            // Unquoted: skip to the next separator without reading a value.
+            while chars
+                .get(i)
+                .is_some_and(|c| !c.is_whitespace() && *c != '>')
+            {
+                i += 1;
+            }
+            continue;
+        };
+        i += 1;
+        let value_start = i;
+        while chars.get(i).is_some_and(|c| *c != quote) {
+            i += 1;
+        }
+        // An unterminated value means an unterminated tag.
+        chars.get(i)?;
+        let value: String = chars[value_start..i].iter().collect();
+        i += 1;
+        attributes.push((key, decode_entities(&value)));
     }
 }
 
@@ -518,17 +625,65 @@ fn decode_entities(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// What a refused image leaves behind: a note, and no link.
+///
+/// The destination stops being a destination. When `egui_extras`' file loader
+/// was built in, a link left in place was read from disk whatever mdr had
+/// decided about it; that loader is gone, and this keeps the refusal legible
+/// rather than silent. The source is still named when there is no alt text to
+/// name instead — it is text at that point, not something a loader can follow.
+fn refused_image(alt: &str, src: &str) -> String {
+    // `alt` arrives ready for Markdown — every caller has already escaped what
+    // it holds — so escaping again here would show `&amp;` to a reader whose
+    // alt said `&`.
+    let what = if alt.trim().is_empty() {
+        escape_markdown(src)
+    } else {
+        alt.to_string()
+    };
+    // The brackets are escaped: an unescaped `[…]` can still be picked up as a
+    // reference link if the document happens to define one by that name.
+    format!("\\[⚠ image not shown: {what}\\]")
+}
+
+/// Prepare an HTML `alt` for use as Markdown link text.
+///
+/// The author's words are kept, brackets included: they are escaped, not
+/// dropped. The image is resolved here rather than by the later pass over
+/// `![](…)`, so an alt that expression could not read is no longer a problem.
+fn escape_alt(text: &str) -> String {
+    escape_markdown(text)
+}
+
 /// Escape the characters that would turn HTML text into Markdown markup.
+///
+/// The result is read once more, by comrak, so everything that means something
+/// to it has to be neutralised here.
 fn escape_markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(
-            c,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '!'
-        ) {
+    // `1.` and `1)` open an ordered list, so the separator after a leading run
+    // of digits has to be escaped too.
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    for (i, c) in text.chars().enumerate() {
+        // A block is flattened to one line before this runs, so the only line
+        // start to guard is the first character — and the marker a leading
+        // number would make.
+        let opens_a_block = (i == 0 && matches!(c, '>' | '-' | '+' | '=' | '|'))
+            || (digits > 0 && i == digits && matches!(c, '.' | ')'));
+        if opens_a_block
+            || matches!(
+                c,
+                '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '!'
+            )
+        {
             out.push('\\');
         }
-        out.push(c);
+        // `&` and `<` would start an entity or a tag on the second reading.
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            _ => out.push(c),
+        }
     }
     out
 }
@@ -537,81 +692,131 @@ fn escape_markdown(text: &str) -> String {
 ///
 /// `egui_commonmark` draws a table as a `Frame::group` around a striped `Grid`
 /// (`parsers/pulldown.rs`): no cell borders, no padding, and a header row drawn
-/// exactly like any other. The stylesheet gives `web` `border: 1px solid` and
+/// exactly like any other, with each box sized to its own content rather than
+/// to its column. The stylesheet gives `web` `border: 1px solid` and
 /// `padding: 6px 13px` on every cell, and a header that stands out — so the
 /// only way to bring the two together is to draw it.
-struct MarkdownTable {
-    header: Vec<String>,
-    rows: Vec<Vec<String>>,
-}
-
-/// Split one row of a pipe table into its cells.
 ///
-/// The leading and trailing pipes are optional in GFM, and an escaped `\|` is a
-/// literal character inside a cell rather than a separator.
-fn table_cells(line: &str) -> Vec<String> {
-    let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
-    let mut cells = Vec::new();
-    let mut current = String::new();
-    let mut escaped = false;
-    for c in trimmed.chars() {
-        match c {
-            '\\' if !escaped => {
-                escaped = true;
-                current.push('\\');
-            }
-            '|' if !escaped => {
-                cells.push(current.trim().to_string());
-                current = String::new();
-            }
-            _ => {
-                escaped = false;
-                current.push(c);
-            }
-        }
-    }
-    cells.push(current.trim().to_string());
-    cells
+/// The cells come from comrak, which has already settled what GFM means by a
+/// row, a column and an alignment. Nothing here re-reads the pipe syntax.
+struct MarkdownTable {
+    header: Vec<Cell>,
+    rows: Vec<Vec<Cell>>,
+    alignments: Vec<comrak::nodes::TableAlignment>,
+    /// The column count comrak derived from the header row, which is what
+    /// bounds a GFM table — a longer body row is truncated, a shorter one
+    /// padded.
+    columns: usize,
 }
 
-/// Whether a line is a table's delimiter row — the `|---|:--:|` under the head.
-fn is_delimiter_row(line: &str) -> bool {
-    let cells = table_cells(line);
-    !cells.is_empty()
-        && cells.iter().all(|cell| {
-            let body = cell.trim_start_matches(':').trim_end_matches(':');
-            !body.is_empty() && body.chars().all(|c| c == '-')
-        })
+/// The inline content of one cell, already flattened out of the parse tree.
+type Cell = Vec<CellPiece>;
+
+/// One run of a cell, with the formatting that applies to it.
+#[derive(Clone, Default)]
+struct CellPiece {
+    text: String,
+    code: bool,
+    strong: bool,
+    emph: bool,
+    strikethrough: bool,
+    link: Option<String>,
 }
 
 impl MarkdownTable {
-    /// Parse a pipe table, or return `None` if these lines are not one.
-    fn parse(block: &str) -> Option<Self> {
-        let mut lines = block.lines().filter(|l| !l.trim().is_empty());
-        let header = table_cells(lines.next()?);
-        if !is_delimiter_row(lines.next()?) {
-            return None;
-        }
-        let rows: Vec<Vec<String>> = lines.map(table_cells).collect();
-        Some(Self { header, rows })
-    }
+    /// Read a table out of the node comrak produced for it.
+    fn from_node<'a>(
+        node: &'a comrak::arena_tree::Node<'a, std::cell::RefCell<comrak::nodes::Ast>>,
+    ) -> Option<Self> {
+        use comrak::nodes::NodeValue;
 
-    /// How many columns the widest row has: a short row is padded rather than
-    /// dropped, so a malformed table still renders.
-    fn columns(&self) -> usize {
-        std::iter::once(self.header.len())
-            .chain(self.rows.iter().map(Vec::len))
-            .max()
-            .unwrap_or(0)
+        let NodeValue::Table(table) = &node.data.borrow().value else {
+            return None;
+        };
+        let (alignments, columns) = (table.alignments.clone(), table.num_columns);
+
+        let mut header = Vec::new();
+        let mut rows = Vec::new();
+        for row in node.children() {
+            let NodeValue::TableRow(is_header) = row.data.borrow().value else {
+                continue;
+            };
+            let cells: Vec<Cell> = row
+                .children()
+                .map(|cell| {
+                    let mut pieces = Vec::new();
+                    collect_inline(cell, &CellPiece::default(), &mut pieces);
+                    pieces
+                })
+                .collect();
+            if is_header {
+                header = cells;
+            } else {
+                rows.push(cells);
+            }
+        }
+        Some(Self {
+            header,
+            rows,
+            alignments,
+            columns,
+        })
     }
 }
 
-/// The inline Markdown a table cell can contain, laid out as one run of text.
-///
-/// Only code spans and emphasis: a cell is a phrase, and this is what a cell in
-/// a real document actually holds. Anything else keeps its characters.
+/// Flatten a cell's inline nodes into runs of formatted text.
+fn collect_inline<'a>(
+    node: &'a comrak::arena_tree::Node<'a, std::cell::RefCell<comrak::nodes::Ast>>,
+    inherited: &CellPiece,
+    out: &mut Vec<CellPiece>,
+) {
+    use comrak::nodes::NodeValue;
+
+    let value = &node.data.borrow().value;
+    let mut style = inherited.clone();
+    match value {
+        NodeValue::Text(text) => {
+            out.push(CellPiece {
+                text: text.to_string(),
+                ..style
+            });
+            return;
+        }
+        NodeValue::Code(code) => {
+            out.push(CellPiece {
+                text: code.literal.clone(),
+                code: true,
+                ..style
+            });
+            return;
+        }
+        // A cell is one line, so either kind of break is a space in it.
+        NodeValue::SoftBreak | NodeValue::LineBreak => {
+            out.push(CellPiece {
+                text: " ".to_string(),
+                ..style
+            });
+            return;
+        }
+        // An image has no place in a row of text; its alt text does, and that
+        // is in the children. The `title` is the tooltip, not the alt, and
+        // pushing it here put it in front of the text it belongs to.
+        NodeValue::Image(_) => {}
+        NodeValue::Strong => style.strong = true,
+        NodeValue::Emph => style.emph = true,
+        // Dropping it changed what a sentence meant, not just how it looked.
+        NodeValue::Strikethrough => style.strikethrough = true,
+        NodeValue::Link(link) => style.link = Some(link.url.clone()),
+        _ => {}
+    }
+    for child in node.children() {
+        collect_inline(child, &style, out);
+    }
+}
+
+/// Lay a cell out as one run of text.
 fn cell_layout(
-    text: &str,
+    cell: &[CellPiece],
     header: bool,
     palette: &crate::core::style::Palette,
 ) -> egui::text::LayoutJob {
@@ -621,128 +826,61 @@ fn cell_layout(
 
     let body = FontId::new(BASE_FONT_SIZE, FontFamily::Proportional);
     let mono = FontId::new(BASE_FONT_SIZE * CODE_FONT_SCALE, FontFamily::Monospace);
+    // egui has no font weights, so bold is a colour here as it is everywhere
+    // else in this backend.
     let plain = colour(if header { palette.strong } else { palette.fg });
-    let strong = colour(palette.strong);
 
     let mut job = egui::text::LayoutJob::default();
-    let chars: Vec<char> = text.chars().collect();
-    let mut run = String::new();
-    let mut bold = false;
-    let mut italic = false;
-    let mut i = 0usize;
-
-    let flush = |job: &mut egui::text::LayoutJob, run: &mut String, bold: bool, italic: bool| {
-        if run.is_empty() {
-            return;
-        }
+    for piece in cell {
+        let colour_for = if piece.link.is_some() {
+            colour(palette.link)
+        } else if piece.strong {
+            colour(palette.strong)
+        } else {
+            plain
+        };
         job.append(
-            run,
+            &piece.text,
             0.0,
             TextFormat {
-                font_id: body.clone(),
-                color: if bold { strong } else { plain },
-                italics: italic,
+                font_id: if piece.code {
+                    mono.clone()
+                } else {
+                    body.clone()
+                },
+                color: colour_for,
+                background: if piece.code {
+                    colour(palette.inline_code_bg)
+                } else {
+                    egui::Color32::TRANSPARENT
+                },
+                italics: piece.emph,
+                underline: if piece.link.is_some() {
+                    egui::Stroke::new(1.0, colour(palette.link))
+                } else {
+                    egui::Stroke::NONE
+                },
+                strikethrough: if piece.strikethrough {
+                    egui::Stroke::new(1.0, colour_for)
+                } else {
+                    egui::Stroke::NONE
+                },
                 ..Default::default()
             },
         );
-        run.clear();
-    };
-
-    while i < chars.len() {
-        match chars[i] {
-            '`' => {
-                // A code span first: the emphasis markers inside one are
-                // characters, not markup.
-                let rest: String = chars[i + 1..].iter().collect();
-                match rest.find('`') {
-                    Some(close) => {
-                        flush(&mut job, &mut run, bold, italic);
-                        job.append(
-                            &rest[..close],
-                            0.0,
-                            TextFormat {
-                                font_id: mono.clone(),
-                                color: plain,
-                                background: colour(palette.inline_code_bg),
-                                ..Default::default()
-                            },
-                        );
-                        i += 1 + rest[..close].chars().count() + 1;
-                    }
-                    // An unpaired backtick is a character.
-                    None => {
-                        run.push('`');
-                        i += 1;
-                    }
-                }
-            }
-            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                flush(&mut job, &mut run, bold, italic);
-                bold = !bold;
-                i += 2;
-            }
-            '*' | '_' => {
-                flush(&mut job, &mut run, bold, italic);
-                italic = !italic;
-                i += 1;
-            }
-            '[' => {
-                // `[text](url)` keeps its text, in the link colour. It is not
-                // clickable: a cell is laid out as one run of text, and the
-                // destination is not lost, only unlinked.
-                let rest: String = chars[i..].iter().collect();
-                match link_text(&rest) {
-                    Some((label, consumed)) => {
-                        flush(&mut job, &mut run, bold, italic);
-                        job.append(
-                            &label,
-                            0.0,
-                            TextFormat {
-                                font_id: body.clone(),
-                                color: colour(palette.link),
-                                ..Default::default()
-                            },
-                        );
-                        i += consumed;
-                    }
-                    None => {
-                        run.push('[');
-                        i += 1;
-                    }
-                }
-            }
-            c => {
-                run.push(c);
-                i += 1;
-            }
-        }
     }
-    flush(&mut job, &mut run, bold, italic);
     job
-}
-
-/// The label of a `[text](url)` at the start of `s`, and how many characters it
-/// takes up. `None` when this is not a link.
-fn link_text(s: &str) -> Option<(String, usize)> {
-    let close = s.find("](")?;
-    let end = s[close..].find(')')? + close;
-    let label = &s[1..close];
-    if label.contains('[') || label.contains('\n') {
-        return None;
-    }
-    Some((label.to_string(), s[..=end].chars().count()))
-}
-
-/// How wide a cell wants to be, padding included.
-fn cell_width(ui: &egui::Ui, text: &str, palette: &crate::core::style::Palette) -> f32 {
-    let job = cell_layout(text, false, palette);
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    galley.size().x + 2.0 * CELL_PADDING_X
 }
 
 /// The stylesheet's `padding: 6px 13px`, in points.
 const CELL_PADDING_X: f32 = 13.0;
 const CELL_PADDING_Y: f32 = 6.0;
+
+/// How wide a cell would like to be, padding included.
+fn cell_width(ui: &egui::Ui, cell: &[CellPiece], palette: &crate::core::style::Palette) -> f32 {
+    let galley = ui.fonts_mut(|f| f.layout_job(cell_layout(cell, false, palette)));
+    galley.size().x + 2.0 * CELL_PADDING_X
+}
 
 /// Draw a whole table: bordered, padded cells on a fixed column grid.
 ///
@@ -750,42 +888,62 @@ const CELL_PADDING_Y: f32 = 6.0;
 /// boxes came out ragged. The widths are measured here instead and every cell
 /// in a column is given the same one, which is what makes it read as a table.
 fn show_table(ui: &mut egui::Ui, table: &MarkdownTable) {
+    use comrak::nodes::TableAlignment;
+
     let palette = if ui.visuals().dark_mode {
         &crate::core::style::DARK
     } else {
         &crate::core::style::LIGHT
     };
     let colour = |c: crate::core::style::Rgb| egui::Color32::from_rgb(c[0], c[1], c[2]);
-    let columns = table.columns();
+    let columns = table.columns;
     if columns == 0 {
         return;
     }
 
-    fn cell(row: &[String], column: usize) -> &str {
-        row.get(column).map_or("", String::as_str)
+    fn cell_at(row: &[Cell], column: usize) -> &[CellPiece] {
+        row.get(column).map_or(&[][..], Vec::as_slice)
     }
+
     let mut widths: Vec<f32> = (0..columns)
         .map(|column| {
-            std::iter::once(cell(&table.header, column))
-                .chain(table.rows.iter().map(|row| cell(row, column)))
-                .map(|text| cell_width(ui, text, palette))
+            std::iter::once(cell_at(&table.header, column))
+                .chain(table.rows.iter().map(|row| cell_at(row, column)))
+                .map(|cell| cell_width(ui, cell, palette))
                 .fold(0.0_f32, f32::max)
         })
         .collect();
 
     // A table wider than the column is scaled to fit rather than clipped: the
-    // text inside a cell then wraps, as it does in `web`.
+    // text inside a cell then wraps, as it does in `web`. No column is allowed
+    // below its own padding, or the text would have nowhere to go.
+    let floor = 2.0 * CELL_PADDING_X + 1.0;
     let total: f32 = widths.iter().sum();
     let available = ui.available_width();
     if total > available && total > 0.0 {
         let ratio = available / total;
         for width in &mut widths {
-            *width *= ratio;
+            *width = (*width * ratio).max(floor);
         }
     }
 
     let stroke = egui::Stroke::new(1.0, colour(palette.border));
-    let row_ui = |ui: &mut egui::Ui, row: &[String], header: bool| {
+    let row_ui = |ui: &mut egui::Ui, row: &[Cell], header: bool| {
+        // Every cell of a row is given the height of the tallest, so a cell that
+        // wraps onto three lines does not leave its neighbours' borders short.
+        let height = (0..columns)
+            .map(|column| {
+                let job = cell_layout(cell_at(row, column), header, palette);
+                let width = widths[column] - 2.0 * CELL_PADDING_X;
+                let galley = ui.fonts_mut(|f| {
+                    let mut job = job;
+                    job.wrap.max_width = width;
+                    f.layout_job(job)
+                });
+                galley.size().y
+            })
+            .fold(0.0_f32, f32::max);
+
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             for (column, width) in widths.iter().enumerate() {
@@ -802,11 +960,19 @@ fn show_table(ui: &mut egui::Ui, table: &MarkdownTable) {
                 }
                 frame.show(ui, |ui| {
                     ui.set_width(width - 2.0 * CELL_PADDING_X);
-                    ui.add(egui::Label::new(cell_layout(
-                        cell(row, column),
-                        header,
-                        palette,
-                    )));
+                    ui.set_min_height(height);
+                    let align = match table.alignments.get(column) {
+                        Some(TableAlignment::Center) => egui::Align::Center,
+                        Some(TableAlignment::Right) => egui::Align::Max,
+                        _ => egui::Align::Min,
+                    };
+                    ui.with_layout(egui::Layout::top_down(align), |ui| {
+                        ui.add(egui::Label::new(cell_layout(
+                            cell_at(row, column),
+                            header,
+                            palette,
+                        )));
+                    });
                 });
             }
         });
@@ -838,11 +1004,15 @@ fn split_tables(section: &str) -> Vec<Segment<'_>> {
     options.extension.footnotes = true;
 
     let root = parse_document(&arena, section, &options);
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut ranges: Vec<(usize, usize, MarkdownTable)> = Vec::new();
     for node in root.children() {
         let data = node.data.borrow();
         if matches!(data.value, NodeValue::Table(_)) {
-            ranges.push((data.sourcepos.start.line, data.sourcepos.end.line));
+            drop(data);
+            if let Some(table) = MarkdownTable::from_node(node) {
+                let data = node.data.borrow();
+                ranges.push((data.sourcepos.start.line, data.sourcepos.end.line, table));
+            }
         }
     }
     if ranges.is_empty() {
@@ -864,13 +1034,13 @@ fn split_tables(section: &str) -> Vec<Segment<'_>> {
 
     let mut segments = Vec::new();
     let mut cursor = 0usize;
-    for (start, end) in ranges {
+    for (start, end, table) in ranges {
         let from = line_start(start);
         let to = line_end(end);
         if from > cursor && !section[cursor..from].trim().is_empty() {
             segments.push(Segment::Markdown(&section[cursor..from]));
         }
-        segments.push(Segment::Table(&section[from..to]));
+        segments.push(Segment::Table(table));
         cursor = to;
     }
     if cursor < section.len() && !section[cursor..].trim().is_empty() {
@@ -882,7 +1052,7 @@ fn split_tables(section: &str) -> Vec<Segment<'_>> {
 /// A run of a section, and who draws it.
 enum Segment<'a> {
     Markdown(&'a str),
-    Table(&'a str),
+    Table(MarkdownTable),
 }
 
 /// The widest the document column is drawn, in points.
@@ -897,13 +1067,16 @@ const CONTENT_WIDTH: f32 = 900.0;
 /// `better_syntax_highlighting` the crate takes the block's background from the
 /// syntect theme rather than from `Visuals::extreme_bg_color`, so naming the
 /// theme is how that background is chosen.
+///
+/// There is no image width here on purpose: `max_image_width` reads as a cap
+/// and is a floor — `CommonMarkOptions::max_width` returns
+/// `max_image_width.max(available_width)` — so it can never make an image
+/// smaller. An image declared at a width in the source is resized when it is
+/// rasterised instead; see `html_to_markdown`.
 fn viewer<'a>() -> CommonMarkViewer<'a> {
     CommonMarkViewer::new()
         .syntax_theme_dark("base16-ocean.dark")
         .syntax_theme_light("InspiredGitHub")
-        // A logo declared at 180 px in the source has no width here, so an
-        // image is capped rather than allowed to fill the window.
-        .max_image_width(Some(720))
 }
 
 /// Split a section into the heading that opens it and the rest, when `web`
@@ -912,13 +1085,41 @@ fn viewer<'a>() -> CommonMarkViewer<'a> {
 /// Only `h1` and `h2` get one, matching the stylesheet. A section that does not
 /// open with one — the preamble, or a deeper heading — comes back as `None` and
 /// is rendered in one piece.
+///
+/// Both spellings count: `# Title` and a title underlined with `===` or `---`.
+/// `split_by_headings` already opens a section on either, so recognising only
+/// the first left the other without its rule.
 fn underlined_heading(section: &str) -> Option<(&str, &str)> {
-    let (first, rest) = section.split_once('\n')?;
-    let trimmed = first.trim_start();
-    if !(trimmed.starts_with("# ") || trimmed.starts_with("## ")) {
+    use comrak::nodes::NodeValue;
+    use comrak::{Arena, Options, parse_document};
+
+    // Asked of the parser, not of the lines. Both spellings count — `# Title`
+    // and a title underlined with `===` or `---` — and a fenced block whose
+    // first line happens to be dashes is not one of them, which is exactly what
+    // a line-by-line reader got wrong.
+    let arena = Arena::new();
+    let root = parse_document(&arena, section, &Options::default());
+    let first = root.first_child()?;
+    let data = first.data.borrow();
+    let NodeValue::Heading(heading) = data.value else {
+        return None;
+    };
+    // Only `h1` and `h2` are underlined, matching the stylesheet.
+    if heading.level > 2 {
         return None;
     }
-    Some((first, rest))
+
+    // `sourcepos` lines are 1-based and inclusive.
+    let end_line = data.sourcepos.end.line;
+    let mut offset = 0usize;
+    for (n, line) in section.split_inclusive('\n').enumerate() {
+        offset += line.len();
+        if n + 1 == end_line {
+            let head = section[..offset].trim_end_matches('\n');
+            return Some((head, &section[offset..]));
+        }
+    }
+    None
 }
 
 /// Flip the colour scheme the window is currently drawn in.
@@ -939,13 +1140,10 @@ fn toggle_theme(ctx: &egui::Context) {
 /// here: eframe stays on `ThemePreference::System`, so the OS had the last word
 /// whatever the flag said.
 ///
-/// `Auto` sets `System` rather than leaving the preference alone, and that is
-/// deliberate. The preference lives in egui's `Options`, which the `persistence`
-/// feature restores from disk at startup — so "leave it alone" would mean
-/// "inherit whatever a past run stored". Writing `System` clears it. This is
-/// safe to do here because eframe reloads that memory *before* it calls the app
-/// creator, which is where this runs; and it runs once per document rather than
-/// once per frame, so it never fights the caller.
+/// `Auto` writes `System` rather than leaving the preference alone, so the
+/// setting is always stated rather than inherited from whatever the context
+/// happened to hold. It runs once per document rather than once per frame, so
+/// it never fights `t`.
 fn apply_theme_preference(ctx: &egui::Context, setting: crate::core::Theme) {
     ctx.set_theme(match setting {
         crate::core::Theme::Dark => egui::ThemePreference::Dark,
@@ -1019,10 +1217,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_file = std::fs::canonicalize(&file_path).unwrap_or_else(|_| {
         std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(&file_path))
     });
-    let base_dir = canonical_file.parent().map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        std::path::Path::to_path_buf,
-    );
+    // A piped document lives in a temp file; its images do not.
+    let base_dir = crate::core::document_base_dir(&canonical_file);
     let raw_markdown = std::fs::read_to_string(&file_path)
         .unwrap_or_else(|e| format!("# Error\nCould not read `{}`: {}", file_path.display(), e));
 
@@ -1036,7 +1232,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let toc_entries = toc::extract_toc(&markdown);
     let (has_preamble, sections) = split_by_headings(&markdown);
 
-    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
+    let watch = crate::core::watcher::watch_file(&file_path)?;
 
     let (icon_rgba, icon_w, icon_h) = crate::core::icon::load_icon_rgba();
 
@@ -1065,7 +1261,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 caches: Vec::new(),
                 file_path,
                 base_dir,
-                watcher_rx,
+                watch,
                 toc_entries,
                 scroll_to_section: None,
                 search_active: false,
@@ -1074,7 +1270,6 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 current_match: 0,
                 toc_visible: true,
                 focus_search: false,
-                at_first_frame: true,
             }))
         }),
     )
@@ -1268,7 +1463,8 @@ struct MdrApp {
     caches: Vec<CommonMarkCache>,
     file_path: PathBuf,
     base_dir: PathBuf,
-    watcher_rx: Receiver<()>,
+    /// Kept for its lifetime, not only its channel: dropping it stops the watch.
+    watch: Watch,
     toc_entries: Vec<TocEntry>,
     scroll_to_section: Option<usize>,
     search_active: bool,
@@ -1279,14 +1475,6 @@ struct MdrApp {
     /// Set when Cmd/Ctrl+F opens the search, so the field takes focus on the
     /// next frame it is shown.
     focus_search: bool,
-    /// Cleared after the first frame, which starts the document at the top.
-    ///
-    /// eframe's `persistence` feature restores egui's memory, and a scroll
-    /// area's offset is part of it — so a window opened on any document came
-    /// up wherever the *previous* run had left the last one. On this README
-    /// that was 3630 points down, past the title and the logo, which read as
-    /// the top of the document simply being missing.
-    at_first_frame: bool,
 }
 
 impl eframe::App for MdrApp {
@@ -1297,8 +1485,8 @@ impl eframe::App for MdrApp {
         ctx.global_style_mut(|s| s.interaction.selectable_labels = true);
 
         // Check for file changes
-        if self.watcher_rx.try_recv().is_ok() {
-            while self.watcher_rx.try_recv().is_ok() {}
+        if self.watch.changes().try_recv().is_ok() {
+            while self.watch.changes().try_recv().is_ok() {}
             if let Ok(content) = std::fs::read_to_string(&self.file_path) {
                 self.markdown = preprocess_mermaid_for_egui(&content);
                 self.markdown = render_simple_html(&self.markdown, &self.base_dir);
@@ -1511,11 +1699,9 @@ impl eframe::App for MdrApp {
         egui::CentralPanel::default().show(root_ui, |ui| {
             let mut area = egui::ScrollArea::vertical();
             // Home / End jump straight to an offset; the scroll area clamps it.
-            // The first frame does the same, to undo a restored offset.
-            if let Some(offset) = scroll_to_offset.or_else(|| self.at_first_frame.then_some(0.0)) {
+            if let Some(offset) = scroll_to_offset {
                 area = area.vertical_scroll_offset(offset);
             }
-            self.at_first_frame = false;
             area.show(ui, |ui| {
                 if scroll_delta != 0.0 {
                     // Negative y moves the content up, i.e. scrolls down.
@@ -1560,15 +1746,7 @@ impl eframe::App for MdrApp {
                                 Segment::Markdown(text) => {
                                     viewer().show(ui, cache, text);
                                 }
-                                Segment::Table(text) => {
-                                    if let Some(table) = MarkdownTable::parse(text) {
-                                        show_table(ui, &table);
-                                    } else {
-                                        // Not a table after all: the viewer
-                                        // renders it rather than nothing.
-                                        viewer().show(ui, cache, text);
-                                    }
-                                }
+                                Segment::Table(table) => show_table(ui, &table),
                             }
                         }
                     });
@@ -1615,17 +1793,65 @@ fn rewrite_image(
     base_dir: &std::path::Path,
     fetch_remote: &dyn Fn(&str) -> Option<String>,
 ) -> String {
+    rewrite_image_sized(alt, src, original, base_dir, None, fetch_remote)
+}
+
+/// Turn a `data:image/svg+xml` URI into a PNG one; leave anything else alone.
+///
+/// A remote badge is usually an SVG, and a document may embed one directly.
+/// Both used to be handed to `egui_extras`' SVG loader, which builds its own
+/// usvg options — so the resolver that refuses an SVG's file references did not
+/// apply to them. Rasterising here means that loader is no longer needed.
+fn raster_data_uri(data_uri: &str, width: Option<f32>) -> String {
+    use base64::Engine;
+
+    let Some(rest) = data_uri.strip_prefix("data:image/svg+xml") else {
+        return data_uri.to_string();
+    };
+    let Some(payload) = rest.strip_prefix(";base64,") else {
+        return data_uri.to_string();
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+        return data_uri.to_string();
+    };
+    let Ok(svg) = String::from_utf8(bytes) else {
+        return data_uri.to_string();
+    };
+    // A drawing that cannot be rasterised is left as it was: it will simply not
+    // be displayed, which is the same outcome as before and never a file read.
+    rasterize_svg_data(&svg, width).unwrap_or_else(|_| data_uri.to_string())
+}
+
+/// [`rewrite_image`], with a width for the vector images that declare one.
+///
+/// The width arrives from HTML, which has one and Markdown does not. It changes
+/// only the size the drawing is rasterised at: every check on the way — remote
+/// or local, inside the image root, a real image of the type its name claims —
+/// is the one an ordinary `![](…)` goes through, and that is the point of
+/// routing it here rather than rasterising it on the side.
+fn rewrite_image_sized(
+    alt: &str,
+    src: &str,
+    original: &str,
+    base_dir: &std::path::Path,
+    width: Option<f32>,
+    fetch_remote: &dyn Fn(&str) -> Option<String>,
+) -> String {
     // #60: remote images are downloaded and inlined as `data:` URIs, which
     // egui_commonmark renders through its own data-URL loader
     // (`egui_commonmark_backend/src/data_url_loader.rs`, pulled in by the
     // `embedded_image` feature).
     if crate::core::net::is_remote_url(src) {
         return match fetch_remote(src) {
-            Some(data_uri) => format!("![{alt}]({data_uri})"),
+            Some(data_uri) => format!("![{alt}]({})", raster_data_uri(&data_uri, width)),
             None => original.to_string(),
         };
     }
-    if src.starts_with("data:") || src.starts_with("file://") {
+    if src.starts_with("data:") {
+        // Including one the document wrote itself.
+        return format!("![{alt}]({})", raster_data_uri(src, width));
+    }
+    if src.starts_with("file://") {
         return original.to_string();
     }
 
@@ -1633,10 +1859,15 @@ fn rewrite_image(
     // #61: images may live anywhere inside the enclosing project, not only next
     // to the Markdown file — but never outside of it.
     if !crate::core::paths::is_within_image_root(&abs_path, base_dir) {
-        return original.to_string();
+        // Refused, and it has to stop being an image link. Leaving the original
+        // in place does not refuse anything here: `egui_commonmark` installs
+        // `egui_extras`' loaders, which prefix a schemeless destination with
+        // `file://` and read it off disk without asking mdr. The refusal is
+        // only a refusal if the path never reaches them.
+        return refused_image(alt, src);
     }
     if !abs_path.exists() {
-        return original.to_string();
+        return refused_image(alt, src);
     }
 
     if let Err(e) = crate::core::image_validation::validate_image_file(&abs_path) {
@@ -1653,15 +1884,13 @@ fn rewrite_image(
         .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
     if is_svg {
         // Try rasterizing SVG to PNG (handles complex SVGs better)
-        if let Ok(data_uri) = rasterize_svg_to_png_data_uri(&abs_path) {
+        if let Ok(data_uri) = rasterize_svg_at(&abs_path, width) {
             return format!("![{alt}]({data_uri})");
         }
-        // Fallback: embed SVG directly as data URI for egui_commonmark's SVG feature
-        if let Ok(data_uri) = file_to_data_uri(&abs_path) {
-            return format!("![{alt}]({data_uri})");
-        }
-        // SVG completely failed — skip it
-        return original.to_string();
+        // No fallback to the file as a `data:image/svg+xml`: nothing renders
+        // SVG in this window any more, on purpose, and a drawing mdr could not
+        // rasterise is one it could not check either.
+        return refused_image(alt, src);
     }
     // All non-SVG images: embed as base64 data URI
     match file_to_data_uri(&abs_path) {
@@ -1702,12 +1931,6 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
 
 /// Rasterize an SVG file to PNG and return as a base64 data URI.
 /// Caps dimensions at 8192px to avoid GPU texture overflow.
-fn rasterize_svg_to_png_data_uri(
-    path: &std::path::Path,
-) -> Result<String, Box<dyn std::error::Error>> {
-    rasterize_svg_at(path, None)
-}
-
 /// Rasterise an SVG, optionally to an exact width in points.
 ///
 /// Without a width the drawing is rendered at twice its own size, which is
@@ -1720,14 +1943,26 @@ fn rasterize_svg_at(
     path: &std::path::Path,
     target_width: Option<f32>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    rasterize_svg_data(&std::fs::read_to_string(path)?, target_width)
+}
+
+/// The same, for an SVG mdr already holds rather than one on disk.
+///
+/// Every SVG reaching the window goes through here, including the ones that
+/// arrive as `data:` URIs — a remote badge, or one written into the document.
+/// They used to be handed to `egui_extras`' SVG loader, which builds its own
+/// usvg options and so did not have the resolver that refuses an SVG's file
+/// references. Turning them into PNG here means that loader is not needed at
+/// all, and mdr decides what every drawing is allowed to reach.
+fn rasterize_svg_data(
+    svg_data: &str,
+    target_width: Option<f32>,
+) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
-    use std::sync::{Arc, OnceLock};
 
     const MAX_DIM: f32 = 8192.0;
 
-    let svg_data = std::fs::read_to_string(path)?;
-
-    // Reject files that aren't actually SVG (e.g. HTML pages saved with .svg extension)
+    // Reject data that isn't actually SVG (e.g. an HTML page saved as `.svg`)
     let trimmed = svg_data.trim_start();
     if (!trimmed.starts_with('<')
         || trimmed.starts_with("<!DOCTYPE html")
@@ -1737,18 +1972,10 @@ fn rasterize_svg_at(
         return Err("File is not a valid SVG (possibly an HTML page)".into());
     }
 
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
-    let tree = usvg::Tree::from_str(&svg_data, &options)?;
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
+    let tree = usvg::Tree::from_str(svg_data, &options)?;
     let size = tree.size();
     let svg_w = size.width();
     let svg_h = size.height();
@@ -1783,38 +2010,110 @@ fn rasterize_svg_at(
 mod tests {
     use super::*;
 
-    /// `apply_style` needs a context, not a window, so the palette and the type
-    /// scale can be checked without opening anything.
-    #[test]
-    fn a_table_row_splits_on_unescaped_pipes_only() {
-        assert_eq!(table_cells("| a | b | c |"), ["a", "b", "c"]);
-        // The outer pipes are optional in GFM.
-        assert_eq!(table_cells("a | b"), ["a", "b"]);
-        // An escaped pipe is a character inside a cell, not a separator.
-        assert_eq!(table_cells(r"| a \| b | c |"), [r"a \| b", "c"]);
+    /// The single table in `section`, as the renderer sees it.
+    fn table_of(section: &str) -> MarkdownTable {
+        for segment in split_tables(section) {
+            if let Segment::Table(table) = segment {
+                return table;
+            }
+        }
+        panic!("no table in {section:?}");
+    }
+
+    /// A cell's text, with the formatting dropped.
+    fn cell_text(cell: &[CellPiece]) -> String {
+        cell.iter().map(|p| p.text.as_str()).collect()
     }
 
     #[test]
-    fn a_delimiter_row_is_told_from_a_content_row() {
-        assert!(is_delimiter_row("|---|---|"));
-        assert!(is_delimiter_row("| :--- | ---: | :---: |"));
-        assert!(!is_delimiter_row("| a | b |"));
-        assert!(!is_delimiter_row("| - a | b |"));
+    fn ordinary_text_in_a_cell_is_left_alone() {
+        // The hand-written scanner this replaced stripped every `_` and every
+        // `*`, so `foo_bar` came out as `foobar` and an escaped `\*literal\*`
+        // was rendered as emphasis. comrak decides what is a marker.
+        let table = table_of("| a | b |\n|---|---|\n| foo_bar | \\*literal\\* |\n");
+        assert_eq!(cell_text(&table.rows[0][0]), "foo_bar");
+        assert_eq!(cell_text(&table.rows[0][1]), "*literal*");
+        assert!(
+            !table.rows[0][1].iter().any(|p| p.emph),
+            "an escaped asterisk is not emphasis"
+        );
     }
 
     #[test]
-    fn a_block_without_a_delimiter_row_is_not_a_table() {
-        assert!(MarkdownTable::parse("| a | b |\n| c | d |\n").is_none());
-        assert!(MarkdownTable::parse("| a | b |\n|---|---|\n| c | d |\n").is_some());
+    fn a_link_keeps_its_label_and_its_destination() {
+        // The old reader cut at the first `)`, so `docs/a(b).md` left `.md)`
+        // showing, and the destination was thrown away entirely.
+        let table = table_of("| a |\n|---|\n| [guide](docs/a(b).md) |\n");
+        let cell = &table.rows[0][0];
+        assert_eq!(cell_text(cell), "guide");
+        assert_eq!(
+            cell.iter().find_map(|p| p.link.clone()),
+            Some("docs/a(b).md".to_string())
+        );
     }
 
     #[test]
-    fn a_short_row_is_padded_rather_than_dropped() {
-        // A malformed table still has to render: the reader can see it is
-        // malformed, which a missing table would not tell them.
-        let table = MarkdownTable::parse("| a | b | c |\n|---|---|---|\n| d |\n").unwrap();
-        assert_eq!(table.columns(), 3);
-        assert_eq!(table.rows.len(), 1);
+    fn an_empty_cell_at_the_edge_of_a_row_is_kept() {
+        // Trimming the outer pipes lost it, which shifted every cell after it
+        // into the wrong column.
+        let table = table_of("| a | b | c |\n|---|---|---|\n| | x | |\n");
+        assert_eq!(table.columns, 3);
+        assert_eq!(cell_text(&table.rows[0][0]), "");
+        assert_eq!(cell_text(&table.rows[0][1]), "x");
+    }
+
+    #[test]
+    fn the_column_count_comes_from_the_header() {
+        // GFM bounds a table to its header: a longer body row is truncated, a
+        // shorter one padded. Taking the longest row instead grew the table.
+        let table = table_of("| a | b |\n|---|---|\n| 1 | 2 | 3 |\n| 4 |\n");
+        assert_eq!(table.columns, 2);
+    }
+
+    #[test]
+    fn the_delimiter_row_alignments_are_kept() {
+        // They were discarded, so a right-aligned column of numbers came out
+        // left-aligned.
+        use comrak::nodes::TableAlignment;
+        let table = table_of("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n");
+        assert_eq!(
+            table.alignments,
+            vec![
+                TableAlignment::Left,
+                TableAlignment::Center,
+                TableAlignment::Right
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cell_keeps_its_strikethrough() {
+        // Losing it changed what a sentence meant: "~~not~~ supported" read as
+        // "not supported".
+        let table = table_of("| a |\n|---|\n| ~~not~~ supported |\n");
+        let cell = &table.rows[0][0];
+        assert_eq!(cell_text(cell), "not supported");
+        assert!(
+            cell.iter().any(|p| p.strikethrough && p.text == "not"),
+            "only the struck run should be struck: {:?}",
+            cell.iter()
+                .map(|p| (&p.text, p.strikethrough))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_cell_keeps_its_inline_code_and_emphasis() {
+        let table = table_of("| a |\n|---|\n| **`gui`** (default) |\n");
+        let cell = &table.rows[0][0];
+        assert_eq!(cell_text(cell), "gui (default)");
+        assert!(
+            cell.iter().any(|p| p.code && p.strong),
+            "the code span is inside the bold: {:?}",
+            cell.iter()
+                .map(|p| (&p.text, p.code, p.strong))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1830,8 +2129,7 @@ mod tests {
     #[test]
     fn a_table_is_split_out_of_the_prose_around_it() {
         let section = "Before\n\n| a | b |\n|---|---|\n| c | d |\n\nAfter\n";
-        let segments = split_tables(section);
-        let kinds: Vec<&str> = segments
+        let kinds: Vec<&str> = split_tables(section)
             .iter()
             .map(|s| match s {
                 Segment::Markdown(_) => "markdown",
@@ -1839,75 +2137,68 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["markdown", "table", "markdown"]);
-        let Segment::Table(text) = &segments[1] else {
-            panic!("expected a table");
-        };
-        assert!(MarkdownTable::parse(text).is_some(), "got {text:?}");
-    }
-
-    #[test]
-    fn a_code_span_in_a_cell_keeps_its_own_font() {
-        // Rendering a cell as plain text would print the backticks at the
-        // reader, which is what the first attempt did.
-        let job = cell_layout("`gui` (default)", false, &crate::core::style::DARK);
-        let fonts: Vec<egui::FontFamily> = job
-            .sections
-            .iter()
-            .map(|s| s.format.font_id.family.clone())
-            .collect();
-        assert!(
-            fonts.contains(&egui::FontFamily::Monospace),
-            "the code span should be monospace: {fonts:?}"
-        );
-        assert!(
-            fonts.contains(&egui::FontFamily::Proportional),
-            "the rest should not be: {fonts:?}"
-        );
-        assert!(
-            !job.text.contains('`'),
-            "backticks should be gone: {:?}",
-            job.text
-        );
-    }
-
-    #[test]
-    fn emphasis_and_links_in_a_cell_lose_their_markers() {
-        // The README's own table has `**`gui`** (default)`, which came out with
-        // its asterisks showing.
-        let job = cell_layout("**`gui`** (default)", false, &crate::core::style::DARK);
-        assert_eq!(job.text, "gui (default)");
-
-        let job = cell_layout(
-            "[the docs](https://example.com)",
-            false,
-            &crate::core::style::DARK,
-        );
-        assert_eq!(job.text, "the docs");
-        let link = egui::Color32::from_rgb(
-            crate::core::style::DARK.link[0],
-            crate::core::style::DARK.link[1],
-            crate::core::style::DARK.link[2],
-        );
-        assert!(
-            job.sections.iter().any(|s| s.format.color == link),
-            "a link should be coloured as one"
-        );
-    }
-
-    #[test]
-    fn emphasis_markers_inside_a_code_span_are_characters() {
-        let job = cell_layout("`a * b`", false, &crate::core::style::DARK);
-        assert_eq!(job.text, "a * b");
-    }
-
-    #[test]
-    fn an_unpaired_backtick_stays_a_character() {
-        let job = cell_layout("a ` b", false, &crate::core::style::DARK);
-        assert_eq!(job.text, "a ` b");
     }
 
     fn html(markdown: &str) -> String {
         render_simple_html(markdown, std::path::Path::new("/nonexistent"))
+    }
+
+    /// A directory holding one real PNG, so an image can actually resolve.
+    ///
+    /// `b.png` exists and `a.png` does not, which is what tells the two apart
+    /// in the tests that check *which* source was read.
+    fn with_one_image() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b.png"),
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00],
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn both_spellings_of_a_heading_get_their_rule() {
+        assert_eq!(
+            underlined_heading("# Title\n\nBody\n"),
+            Some(("# Title", "\nBody\n"))
+        );
+        assert_eq!(
+            underlined_heading("## Title\n\nBody\n"),
+            Some(("## Title", "\nBody\n"))
+        );
+        // Setext: `split_by_headings` opens a section on these too, so leaving
+        // them out gave the same document two kinds of heading.
+        assert_eq!(
+            underlined_heading("Title\n=====\n\nBody\n"),
+            Some(("Title\n=====", "\nBody\n"))
+        );
+        assert_eq!(
+            underlined_heading("Title\n-----\n\nBody\n"),
+            Some(("Title\n-----", "\nBody\n"))
+        );
+    }
+
+    #[test]
+    fn a_fence_that_looks_like_a_setext_heading_is_not_one() {
+        // A line-by-line reader saw "first line, then only dashes" and split
+        // the fence in two, which changed how the code came out.
+        let section = "```text\n---\ncontent\n```\n";
+        assert_eq!(underlined_heading(section), None);
+        // A three-line title is a real Setext heading and the reader missed it.
+        let section = "A long\ntitle\n======\n\nBody\n";
+        let (head, body) = underlined_heading(section).expect("a Setext heading");
+        assert_eq!(head, "A long\ntitle\n======");
+        assert_eq!(body, "\nBody\n");
+    }
+
+    #[test]
+    fn a_deeper_heading_and_a_preamble_get_no_rule() {
+        // The stylesheet only underlines `h1` and `h2`.
+        assert_eq!(underlined_heading("### Title\n\nBody\n"), None);
+        assert_eq!(underlined_heading("Just prose\n\nmore\n"), None);
+        // `#hashtag` is not a heading.
+        assert_eq!(underlined_heading("#nothashtag\n\nBody\n"), None);
     }
 
     #[test]
@@ -1921,9 +2212,11 @@ mod tests {
 
     #[test]
     fn an_html_image_becomes_a_markdown_image() {
-        let out =
-            html("<p align=\"center\">\n  <img src=\"assets/logo.svg\" alt=\"mdr logo\"/>\n</p>\n");
-        assert_eq!(out.trim(), "![mdr logo](assets/logo.svg)");
+        let out = render_simple_html(
+            "<p align=\"center\">\n  <img src=\"b.png\" alt=\"mdr logo\"/>\n</p>\n",
+            with_one_image().path(),
+        );
+        assert!(out.starts_with("![mdr logo](data:image/png"), "got {out}");
     }
 
     #[test]
@@ -1948,18 +2241,251 @@ mod tests {
         assert_eq!(out.trim(), "kept");
     }
 
-    #[test]
-    fn markdown_characters_in_html_text_stay_literal() {
-        // Alt text is HTML, so its `*` and `[` are characters, not markup —
-        // escaping them is what stops an image alt from inventing a link.
-        let out = html("<p><img src=\"a.png\" alt=\"a [b] *c*\"/></p>\n");
-        assert_eq!(out.trim(), r"![a \[b\] \*c\*](a.png)");
+    /// The text comrak finds once the converted Markdown is read back.
+    ///
+    /// The conversion is only half the story: its output is parsed a second
+    /// time, and a test on the intermediate string would miss anything that
+    /// escaping got wrong on that second reading.
+    fn rendered_text(markdown: &str) -> String {
+        use comrak::nodes::NodeValue;
+        use comrak::{Arena, Options, parse_document};
+        let arena = Arena::new();
+        let root = parse_document(&arena, &html(markdown), &Options::default());
+        let mut out = String::new();
+        for node in root.descendants() {
+            match &node.data.borrow().value {
+                NodeValue::Text(text) => out.push_str(text),
+                NodeValue::Code(code) => out.push_str(&code.literal),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every heading comrak finds in the converted Markdown.
+    fn rendered_headings(markdown: &str) -> Vec<u8> {
+        use comrak::nodes::NodeValue;
+        use comrak::{Arena, Options, parse_document};
+        let arena = Arena::new();
+        let root = parse_document(&arena, &html(markdown), &Options::default());
+        root.descendants()
+            .filter_map(|n| match &n.data.borrow().value {
+                NodeValue::Heading(h) => Some(h.level),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn html_entities_are_decoded_once() {
-        let out = html("<p><img src=\"a.png\" alt=\"Tom &amp; Jerry\"/></p>\n");
-        assert!(out.contains("Tom & Jerry"), "got {out}");
+    fn markdown_characters_in_html_text_stay_literal() {
+        // What is between the tags is text. Without escaping, `<p>*a*</p>` came
+        // out as emphasis and a `#` opened a heading.
+        assert_eq!(
+            rendered_text("<p>*not emphasis* and _not either_</p>\n"),
+            "*not emphasis* and _not either_"
+        );
+        assert_eq!(
+            rendered_text("<p>[not a link](nowhere)</p>\n"),
+            "[not a link](nowhere)"
+        );
+    }
+
+    #[test]
+    fn a_hash_in_html_text_does_not_become_a_heading() {
+        // It would also have gone into the table of contents, which is built
+        // from the same converted document.
+        assert_eq!(rendered_text("<p># not a heading</p>\n"), "# not a heading");
+        assert!(rendered_headings("<p># not a heading</p>\n").is_empty());
+        // A real HTML heading still is one.
+        assert_eq!(rendered_headings("<h2>a heading</h2>\n"), vec![2]);
+    }
+
+    #[test]
+    fn an_html_entity_is_decoded_exactly_once() {
+        // `&amp;lt;` is the HTML for the text `&lt;`. Decoding it twice would
+        // show a `<` the author did not write.
+        assert_eq!(rendered_text("<p>&amp;lt;</p>\n"), "&lt;");
+        assert_eq!(rendered_text("<p>Tom &amp; Jerry</p>\n"), "Tom & Jerry");
+    }
+
+    #[test]
+    fn a_number_in_html_text_does_not_open_a_list() {
+        // `<p>1. texte</p>` became an ordered list on the second reading.
+        assert_eq!(rendered_text("<p>1. not a list</p>\n"), "1. not a list");
+        assert_eq!(
+            rendered_text("<p>12) not a list either</p>\n"),
+            "12) not a list either"
+        );
+        // A number in the middle of a sentence is not a marker.
+        assert_eq!(rendered_text("<p>version 1. done</p>\n"), "version 1. done");
+    }
+
+    #[test]
+    fn an_svg_data_uri_becomes_a_raster_one() {
+        // A remote badge is usually an SVG, and a document may embed one. Both
+        // used to be handed to `egui_extras`' SVG loader, which builds its own
+        // usvg options and so never had the resolver that refuses an SVG's file
+        // references.
+        use base64::Engine;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(svg);
+        let out = raster_data_uri(&format!("data:image/svg+xml;base64,{encoded}"), None);
+        assert!(out.starts_with("data:image/png;base64,"), "got {out}");
+    }
+
+    #[test]
+    fn a_raster_data_uri_is_left_as_it_is() {
+        let png = "data:image/png;base64,iVBORw0KGgo=";
+        assert_eq!(raster_data_uri(png, None), png);
+        // And anything that is not a data URI at all.
+        assert_eq!(
+            raster_data_uri("https://example.com/a.svg", None),
+            "https://example.com/a.svg"
+        );
+    }
+
+    #[test]
+    fn a_declared_width_resizes_the_drawing() {
+        // `max_image_width` is a floor, not a cap, so the only way to honour a
+        // width is to rasterise at it. Without this the logo came out at the
+        // SVG's own size, filling the window.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("logo.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600"><rect width="600" height="600" fill="red"/></svg>"#,
+        )
+        .unwrap();
+
+        // The pixels, not the length of the base64: a shorter string would only
+        // suggest a smaller drawing.
+        fn width_of(markdown: &str) -> u32 {
+            use base64::Engine;
+            let start = markdown.find("base64,").expect("a data URI") + "base64,".len();
+            let end = markdown[start..].find(')').expect("a closing paren") + start;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&markdown[start..end])
+                .expect("valid base64");
+            image::load_from_memory(&bytes).expect("a PNG").width()
+        }
+
+        let sized = render_simple_html(
+            r#"<p><img src="logo.svg" alt="l" width="60"/></p>"#,
+            dir.path(),
+        );
+        let natural = render_simple_html(r#"<p><img src="logo.svg" alt="l"/></p>"#, dir.path());
+
+        assert_eq!(
+            width_of(&sized),
+            60,
+            "the declared width should be honoured"
+        );
+        // Without one, the drawing is rendered at twice its own size for a
+        // high-density display.
+        assert_eq!(width_of(&natural), 1200);
+    }
+
+    #[test]
+    fn an_image_in_html_goes_through_the_ordinary_resolver() {
+        // The width branch used to rasterise on the side, skipping the format
+        // check and the image-root check that every `![](…)` goes through.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("not-really.svg"), b"<html>nope</html>").unwrap();
+        let out = render_simple_html(
+            r#"<p><img src="not-really.svg" alt="x" width="180"/></p>"#,
+            dir.path(),
+        );
+        assert!(
+            !out.contains("data:image"),
+            "a file that is not the image it claims must not be embedded: {out}"
+        );
+    }
+
+    #[test]
+    fn an_alt_keeps_the_author_s_words() {
+        // Brackets are escaped, not dropped: the alt is the author's text and
+        // the image is resolved here, so the later pass over `![](…)` never
+        // needs to read it back.
+        let dir = with_one_image();
+        let out = render_simple_html(r#"<p><img src="b.png" alt="a [b] c"/></p>"#, dir.path());
+        assert!(out.starts_with(r"![a \[b\] c]"), "got {out}");
+    }
+
+    #[test]
+    fn a_refused_image_shows_its_alt_once_decoded() {
+        // The alt reaches the refusal already escaped, so escaping it again
+        // showed `&amp;` to a reader whose alt said `&`.
+        let out = render_simple_html(
+            r#"<p><img src="missing.png" alt="Tom &amp; Jerry"/></p>"#,
+            std::path::Path::new("/nonexistent"),
+        );
+        assert!(out.contains("image not shown"), "got {out}");
+        assert_eq!(
+            rendered_text(r#"<p><img src="missing.png" alt="Tom &amp; Jerry"/></p>"#),
+            "[⚠ image not shown: Tom & Jerry]"
+        );
+    }
+
+    #[test]
+    fn html_text_cannot_reopen_a_block() {
+        // A line starting with `>` or `-` would otherwise become a quote or a
+        // list item on the second reading.
+        assert_eq!(rendered_text("<p>&gt; not a quote</p>\n"), "> not a quote");
+        assert_eq!(rendered_text("<p>- not a list</p>\n"), "- not a list");
+    }
+
+    #[test]
+    fn a_custom_element_is_not_mistaken_for_a_known_one() {
+        // Reading the name only as far as the first non-alphanumeric made
+        // `<h1-title>` an `h1` and `<img-icon>` an `img`.
+        let chars: Vec<char> = "<h1-title>".chars().collect();
+        let (tag, _) = parse_tag(&chars).expect("a tag");
+        assert_eq!(tag.name, "h1-title");
+
+        // And through the conversion itself. The `<div>` is what makes comrak
+        // treat this as an HTML *block*: without it the line stays a paragraph
+        // with inline HTML, and `html_to_markdown` is never reached — so the
+        // test would pass whatever `parse_tag` did.
+        let source = "<div><h1-title>not a heading</h1-title></div>\n";
+        assert_eq!(rendered_headings(source), Vec::<u8>::new());
+        assert_eq!(rendered_text(source), "not a heading");
+        assert_eq!(rendered_headings("<h1>a heading</h1>\n"), vec![1]);
+    }
+
+    #[test]
+    fn an_attribute_is_read_as_an_attribute_not_searched_for() {
+        // Looking for the name anywhere in the tag picked `a.png` out of this,
+        // because it appears inside another attribute's value.
+        // `a.png` does not exist and `b.png` does, so reading the wrong one
+        // shows up as a refusal rather than an embedded image.
+        let dir = with_one_image();
+        let out = render_simple_html(
+            r#"<p><img title="old src='a.png'" src="b.png" alt="x"/></p>"#,
+            dir.path(),
+        );
+        assert!(out.contains("data:image/png"), "got {out}");
+    }
+
+    #[test]
+    fn a_greater_than_inside_a_value_does_not_end_the_tag() {
+        // Cutting at the first `>` ended the tag in the middle of the value.
+        let dir = with_one_image();
+        let out = render_simple_html(r#"<p><img alt="a > b" src="b.png"/></p>"#, dir.path());
+        assert!(
+            out.contains("data:image/png"),
+            "the tag should have been read whole: {out}"
+        );
+        assert!(
+            out.starts_with("![a > b]"),
+            "the alt should be intact: {out}"
+        );
+    }
+
+    #[test]
+    fn an_html_block_inside_a_quote_is_left_alone() {
+        // The replacement works on whole lines and cannot carry back the `>`
+        // of the quote, so a nested block is not converted at all.
+        let source = "> <div>quoted</div>\n";
+        assert_eq!(html(source), source);
     }
 
     #[test]
@@ -2254,9 +2780,9 @@ mod tests {
 
     #[test]
     fn auto_hands_the_choice_back_to_the_system() {
-        // `Auto` writes `System` rather than leaving the preference alone: it
-        // lives in the egui memory the `persistence` feature restores, so
-        // leaving it alone would mean silently inheriting a past run's choice.
+        // `Auto` states the setting rather than leaving whatever the context
+        // already held, so a run that asks for `auto` follows the desktop even
+        // if something set a preference before it.
         for system in [egui::Theme::Dark, egui::Theme::Light] {
             let ctx = egui::Context::default();
             // A preference as a previous run could have left it behind.
@@ -2274,6 +2800,8 @@ mod tests {
     }
 
     #[test]
+    /// `apply_style` needs a context, not a window, so the palette and the type
+    /// scale can be checked without opening anything.
     fn the_style_carries_the_shared_palette_into_both_themes() {
         use crate::core::style;
 
@@ -2708,10 +3236,17 @@ mod tests {
         let tmp = project();
         let docs = tmp.path().join("proj/docs");
         let original = "![x](../../secret.png)";
-        assert_eq!(
-            rewrite_image("x", "../../secret.png", original, &docs, &never_fetch),
-            original
+        let out = rewrite_image("x", "../../secret.png", original, &docs, &never_fetch);
+        // Not left as a link: `egui_commonmark` installs loaders that would read
+        // the path off disk regardless of what mdr decided about it, so a
+        // refusal has to stop being an image.
+        assert!(!out.contains("]("), "still a link: {out}");
+        assert!(!out.starts_with("!["), "still an image: {out}");
+        assert!(
+            !out.contains("secret.png"),
+            "the path is still there: {out}"
         );
+        assert!(out.contains("image not shown"), "got {out}");
     }
 
     /// #60: a remote image is downloaded once and inlined as a `data:` URI,

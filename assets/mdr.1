@@ -29,6 +29,14 @@ the document is read from standard input.
 .BR \-b ", " \-\-backend " " \fIBACKEND\fR
 Rendering backend to use:
 .BR auto ", " gui ", " tui " or " web .
+.B auto
+is the default, and chooses among the backends this binary was built with:
+.B tui
+over SSH or with no display, and otherwise the first of
+.B gui
+and
+.B web
+that is compiled in.
 .TP
 .BR \-c ", " \-\-config " " \fIPATH\fR
 Path to the config file. A path given here must exist; without it mdr uses the
@@ -99,7 +107,8 @@ platform:
 .I $XDG_CONFIG_HOME/mdr/config.kdl
 When
 .B XDG_CONFIG_HOME
-is set.
+holds an absolute path. A relative one is ignored with a warning, as the
+specification requires.
 .TP
 .I %APPDATA%\(rsmdr\(rsconfig.kdl
 On Windows.

@@ -354,8 +354,13 @@ Table of contents in the sidebar, stdin/pipe mode, internal navigation between
 ### Still open
 
 - **Directory mode**: `mdr ./docs/` with a sidebar file browser. Not started.
-- **Mermaid.js fallback for unsupported diagram types.** What exists is not
-  this: an unsupported diagram is shown as its own source in a
-  `mermaid-fallback` block, with no JavaScript renderer behind it.
+- **Mermaid.js fallback for unsupported diagram types.** Partly shipped, and
+  only in `web`: a diagram the native renderer refuses becomes a
+  `<pre class="mermaid">` block, and the page then loads the Mermaid library
+  bundled in the binary to draw it. Two limits go with it — the library is
+  included only when the *first* document rendered has such a block, so a
+  fallback that appears after a live reload is not drawn, and the reload does
+  not re-run Mermaid on the new content. `gui` and `tui` have no fallback at
+  all: an unsupported diagram is shown as its source.
 - **CSS custom override for theming.** Not started; the stylesheet is generated
   from `src/core/style.rs` and cannot be replaced from outside.

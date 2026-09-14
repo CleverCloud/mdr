@@ -29,10 +29,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // If canonicalize fails, try current_dir + file_path
         std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(&file_path))
     });
-    let base_dir = canonical_file.parent().map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        std::path::Path::to_path_buf,
-    );
+    // A piped document lives in a temp file; its images do not.
+    let base_dir = crate::core::document_base_dir(&canonical_file);
     let markdown_content = std::fs::read_to_string(&file_path)?;
     vlog!("webview: file_path={}", file_path.display());
     vlog!("webview: base_dir={}", base_dir.display());
@@ -60,7 +58,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let toc_entries = toc::extract_toc(&markdown_content);
     let full_html = build_html(&html_body, &toc_entries);
 
-    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
+    let watch = crate::core::watcher::watch_file(&file_path)?;
 
     let (icon_rgba, icon_w, icon_h) = crate::core::icon::load_icon_rgba();
 
@@ -161,7 +159,7 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .with_navigation_handler(navigation_handler)
         .build(&window)?;
 
-    let mut watcher_rx = watcher_rx;
+    let mut watch = watch;
     let mut watched_file = file_path;
     let mut base_dir = base_dir;
 
@@ -169,8 +167,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         *control_flow = ControlFlow::Wait;
 
         // Check for file changes
-        if watcher_rx.try_recv().is_ok() {
-            while watcher_rx.try_recv().is_ok() {}
+        if watch.changes().try_recv().is_ok() {
+            while watch.changes().try_recv().is_ok() {}
             if let Ok(content) = std::fs::read_to_string(&watched_file) {
                 let _ = webview.evaluate_script(&document_swap_script(&content, &base_dir));
             }
@@ -205,8 +203,10 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
                 base_dir = new_base;
                 watched_file.clone_from(&path);
-                if let Ok(rx) = crate::core::watcher::watch_file(&path) {
-                    watcher_rx = rx;
+                // Assigning drops the watch on the document being left, so
+                // following links does not accumulate one watcher per document.
+                if let Ok(new_watch) = crate::core::watcher::watch_file(&path) {
+                    watch = new_watch;
                 }
                 if let Ok(mut doc) = current_doc.lock() {
                     doc.clone_from(&path);
@@ -497,7 +497,6 @@ fn rasterize_svg_to_png_data_uri(
     path: &std::path::Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
-    use std::sync::{Arc, OnceLock};
 
     let svg_data = std::fs::read_to_string(path)?;
 
@@ -515,17 +514,9 @@ fn rasterize_svg_to_png_data_uri(
     const MAX_DIM: f32 = 8192.0;
 
     // Reuse font database across calls
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
     let tree = usvg::Tree::from_str(&svg_data, &options)?;
     let size = tree.size();
     let svg_w = size.width();
@@ -594,8 +585,8 @@ fn build_html_with_theme(
         String::new()
     };
 
-    // `--theme dark|light` is the same switch Ctrl/Cmd+D flips, set before the
-    // page is first drawn. `auto` leaves the attribute off so the
+    // `--theme dark|light` is the same switch `t` flips, set before the page
+    // is first drawn. `auto` leaves the attribute off so the
     // `prefers-color-scheme` rules below decide, which is what a reader who
     // never passed the flag gets.
     let theme_attr = match theme {
@@ -605,7 +596,7 @@ fn build_html_with_theme(
     };
 
     // Explicit per-theme rules mirroring the prefers-color-scheme blocks, so
-    // Ctrl/Cmd+D can override the system preference.
+    // `t` can override the system preference.
     let theme_overrides = format!(
         "{}{}",
         theme_override_css(&github_css()),
@@ -2345,8 +2336,8 @@ mod tests {
     #[test]
     fn auto_leaves_the_page_to_the_system_scheme() {
         // No attribute, so the `prefers-color-scheme` rules decide — which is
-        // what a reader who passed no flag gets, and what Ctrl/Cmd+D then
-        // toggles away from.
+        // what a reader who passed no flag gets, and what `t` then toggles
+        // away from.
         let page = build_html_with_theme("<p>hi</p>", &[], crate::core::Theme::Auto);
         assert_eq!(html_tag(&page), "<html>");
     }
@@ -2384,7 +2375,7 @@ mod tests {
         // to the media query when there is none.
         //
         // This covers initialisation only. A diagram already drawn is not
-        // recoloured by Ctrl/Cmd+D, and neither is a native SVG produced by
+        // recoloured by `t`, and neither is a native SVG produced by
         // `core::mermaid`, which carries its own colours.
         let page = build_html_with_theme(
             r#"<div class="mermaid">graph TD; A-->B;</div>"#,

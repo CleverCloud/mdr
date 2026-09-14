@@ -1,6 +1,6 @@
 [package]
 name = "mdr"
-version = "0.6.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.95"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
@@ -17,6 +17,7 @@ default = ["egui-backend", "webview-backend", "tui-backend"]
 egui-backend = [
   "dep:eframe",
   "dep:egui_commonmark",
+  "dep:egui_extras",
   "dep:resvg",
   "dep:usvg",
   "dep:tiny-skia",
@@ -64,12 +65,28 @@ base64 = "0.23"
 kdl = "6"
 
 # egui backend
-eframe = { version = "0.36", features = ["persistence"], optional = true }
-egui_commonmark = { version = "0.25", features = [
+# No `persistence`: nothing here asks to be remembered between runs — `MdrApp`
+# has no `save` — and the feature stored the window geometry and egui's memory
+# in one file shared by every document, so a window opened at the size, the
+# place and the scroll offset the *previous* document had been left at.
+eframe = { version = "0.36", optional = true }
+# No `load-images`: it is `egui_extras/image` + `egui_extras/file`, and that
+# file loader reads any path the document names, straight off disk, without
+# passing through mdr's own resolver — so an image refused for being outside the
+# project was still displayed. The decoder is pulled in directly instead, so a
+# local or remote image reaches the page only through mdr's resolver. A `data:`
+# URI written into the document is still shown as the author wrote it.
+# No `svg` either: it is `egui_extras/svg`, whose loader builds its own usvg
+# options and so would not have the resolver that refuses an SVG's file
+# references. mdr rasterises every SVG itself, including the ones that arrive as
+# `data:` URIs, so nothing in the window needs to parse one.
+egui_commonmark = { version = "0.25", default-features = false, features = [
   "better_syntax_highlighting",
-  "load-images",
-  "svg",
+  "pulldown_cmark",
   "embedded_image",
+], optional = true }
+egui_extras = { version = "0.36", default-features = false, features = [
+  "image",
 ], optional = true }
 resvg = { version = "0.48", optional = true }
 usvg = { version = "0.48", optional = true }

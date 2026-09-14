@@ -1,11 +1,45 @@
-use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
+use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+/// A watch on one file, for as long as this value is kept.
+///
+/// The watcher has to outlive the call that created it, and dropping it stops
+/// the watch — so the caller holds it. That is what lets the web backend replace
+/// the watch when a link opens another document instead of accumulating one OS
+/// watch per document visited.
+pub struct Watch {
+    changes: Receiver<()>,
+    /// Held for its `Drop` alone: releasing it is what stops the watch.
+    _debouncer: Option<Debouncer<notify::RecommendedWatcher>>,
+}
+
+impl Watch {
+    /// The channel each change is signalled on.
+    pub fn changes(&self) -> &Receiver<()> {
+        &self.changes
+    }
+
+    /// A watch that never signals, for tests that need the field but no file.
+    #[cfg(all(test, feature = "tui-backend"))]
+    pub fn detached() -> (std::sync::mpsc::Sender<()>, Self) {
+        let (tx, changes) = mpsc::channel();
+        (
+            tx,
+            Self {
+                changes,
+                _debouncer: None,
+            },
+        )
+    }
+}
+
 /// Start watching a file for changes with 300ms debounce.
-/// Returns a Receiver that gets a () signal on each change.
-pub fn watch_file(path: &Path) -> Result<Receiver<()>, Box<dyn std::error::Error>> {
+///
+/// The returned [`Watch`] signals every change on its channel and holds the
+/// watcher alive; drop it to stop watching.
+pub fn watch_file(path: &Path) -> Result<Watch, Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
     let path = path.canonicalize()?;
     let watch_path = path.clone();
@@ -29,11 +63,10 @@ pub fn watch_file(path: &Path) -> Result<Receiver<()>, Box<dyn std::error::Error
         .watcher()
         .watch(parent, notify::RecursiveMode::NonRecursive)?;
 
-    // Leak the debouncer so it lives for the program duration.
-    // Box::leak makes the intent explicit compared to mem::forget.
-    let _ = Box::leak(Box::new(debouncer));
-
-    Ok(rx)
+    Ok(Watch {
+        changes: rx,
+        _debouncer: Some(debouncer),
+    })
 }
 
 #[cfg(test)]
@@ -62,10 +95,9 @@ mod tests {
         let file = dir.path().join("doc.md");
         std::fs::write(&file, "# one\n").unwrap();
 
-        // Nothing below arrives unless the watcher is still alive after
-        // `watch_file` returned, so this covers that too.
-        let rx = watch_file(&file).expect("the file exists, so watching it must work");
-        drain(&rx);
+        let watch = watch_file(&file).expect("the file exists, so watching it must work");
+        let rx = watch.changes();
+        drain(rx);
 
         std::fs::write(&file, "# two\n").unwrap();
         assert_eq!(
@@ -84,8 +116,9 @@ mod tests {
         let file = dir.path().join("doc.md");
         std::fs::write(&file, "# one\n").unwrap();
 
-        let rx = watch_file(&file).unwrap();
-        drain(&rx);
+        let watch = watch_file(&file).unwrap();
+        let rx = watch.changes();
+        drain(rx);
 
         let tmp = dir.path().join("doc.md.new");
         let mut handle = std::fs::File::create(&tmp).unwrap();
@@ -102,7 +135,7 @@ mod tests {
 
         // And the interesting part: reloading has to keep working afterwards,
         // on the file that now sits behind a different inode.
-        drain(&rx);
+        drain(rx);
         std::fs::write(&file, "# edited after the rename\n").unwrap();
         assert_eq!(
             rx.recv_timeout(PATIENCE),
@@ -119,8 +152,9 @@ mod tests {
         let file = dir.path().join("doc.md");
         std::fs::write(&file, "# one\n").unwrap();
 
-        let rx = watch_file(&file).unwrap();
-        drain(&rx);
+        let watch = watch_file(&file).unwrap();
+        let rx = watch.changes();
+        drain(rx);
 
         std::fs::write(dir.path().join("other.md"), "# unrelated\n").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "unrelated\n").unwrap();
@@ -140,6 +174,33 @@ mod tests {
             rx.recv_timeout(PATIENCE),
             Ok(()),
             "the watcher must still be alive after ignoring the neighbours"
+        );
+    }
+
+    #[test]
+    fn a_watch_can_be_replaced_by_another() {
+        // What the web backend does when a link opens another document: it
+        // starts a watch on the new file and drops the old one. Holding the
+        // watcher is what makes that a replacement rather than one more OS
+        // watch left running for every document visited.
+        let dir = tempfile::tempdir().unwrap();
+        let first_file = dir.path().join("first.md");
+        let second_file = dir.path().join("second.md");
+        std::fs::write(&first_file, "# one\n").unwrap();
+        std::fs::write(&second_file, "# one\n").unwrap();
+
+        let first = watch_file(&first_file).unwrap();
+        drain(first.changes());
+
+        let second = watch_file(&second_file).unwrap();
+        drop(first);
+        drain(second.changes());
+
+        std::fs::write(&second_file, "# two\n").unwrap();
+        assert_eq!(
+            second.changes().recv_timeout(PATIENCE),
+            Ok(()),
+            "dropping the previous watch must not have disturbed the new one"
         );
     }
 

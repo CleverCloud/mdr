@@ -1,6 +1,5 @@
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
@@ -17,6 +16,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::core::toc::{self, TocEntry};
+use crate::core::watcher::Watch;
 
 /// One logical line of text together with its wrapped rendering.
 ///
@@ -398,14 +398,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // actually have something to draw.
     let needs_picker = document_needs_picker(&content);
     let rendered = build_content_elements(&content, &file_path, &None);
-    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
+    let watch = crate::core::watcher::watch_file(&file_path)?;
 
     let mut app = TuiApp {
         content,
         rendered,
         toc_entries,
         file_path,
-        watcher_rx,
+        watch,
         picker: None,
         picker_queried: false,
         content_width: 0,
@@ -438,8 +438,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui(f, &mut app))?;
 
         // Check for file changes
-        if app.watcher_rx.try_recv().is_ok() {
-            while app.watcher_rx.try_recv().is_ok() {}
+        if app.watch.changes().try_recv().is_ok() {
+            while app.watch.changes().try_recv().is_ok() {}
             if let Ok(new_content) = std::fs::read_to_string(&app.file_path) {
                 app.toc_entries = toc::extract_toc(&new_content);
                 if document_needs_picker(&new_content) {
@@ -608,7 +608,8 @@ struct TuiApp {
     rendered: Vec<ContentElement>,
     toc_entries: Vec<TocEntry>,
     file_path: PathBuf,
-    watcher_rx: Receiver<()>,
+    /// Kept for its lifetime, not only its channel: dropping it stops the watch.
+    watch: Watch,
     /// The terminal's image protocol, once it has been asked for. `None` means
     /// either "not asked yet" or "the terminal cannot display images"; the
     /// `picker_queried` flag tells the two apart.
@@ -990,9 +991,9 @@ fn build_content_elements(
     let canonical_file = std::fs::canonicalize(file_path).unwrap_or_else(|_| {
         std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(file_path))
     });
-    let base_dir = canonical_file
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    // A piped document lives in a temp file; its images do not.
+    let base_dir = crate::core::document_base_dir(&canonical_file);
+    let base_dir = base_dir.as_path();
 
     let mut elements = Vec::new();
     for item in text_lines {
@@ -1108,18 +1109,39 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(""))));
 }
 
+/// What loading an image yields, however it was reached.
+type LoadedImage = Result<image::DynamicImage, Box<dyn std::error::Error>>;
+
 /// Load an image from a URL, data URI, or local file path.
 /// SVG files are rasterized via resvg/usvg before returning.
 fn load_image(
     url: &str,
     base_dir: &std::path::Path,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    load_image_with(url, base_dir, crate::core::offline(), &load_image_from_http)
+}
+
+/// The body of [`load_image`], with the setting and the fetch passed in.
+///
+/// `--offline` promises that mdr makes no network access at all, and this
+/// backend used to reach for a remote image anyway: `core::offline` was not
+/// even compiled for it. Both are parameters so a test can prove the promise by
+/// counting calls — rather than by pointing at a URL that happens to fail —
+/// without touching the process-wide flag the rest of the suite reads.
+fn load_image_with(
+    url: &str,
+    base_dir: &std::path::Path,
+    offline: bool,
+    fetch: &dyn Fn(&str) -> LoadedImage,
+) -> LoadedImage {
     if url.starts_with("data:") {
         // data: URI - decode base64
         load_image_from_data_uri(url)
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        // HTTP fetch
-        load_image_from_http(url)
+        if offline {
+            return Err("offline: remote images are not fetched".into());
+        }
+        fetch(url)
     } else {
         // Local file path (resolve relative to markdown file's directory)
         let path = if std::path::Path::new(url).is_absolute() {
@@ -1173,19 +1195,9 @@ fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn st
 
 /// Rasterize an SVG string to a `DynamicImage` using resvg/usvg.
 fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
-    use std::sync::{Arc, OnceLock};
-
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
     let tree = usvg::Tree::from_str(svg_data, &options)?;
     let size = tree.size();
     let (svg_w, svg_h) = (size.width(), size.height());
@@ -2058,13 +2070,13 @@ mod tests {
 
     /// Build an app with just enough state to draw a frame.
     fn app_for_drawing(content: &str) -> TuiApp {
-        let (_tx, rx) = std::sync::mpsc::channel();
+        let (_tx, watch) = Watch::detached();
         TuiApp {
             content: content.to_string(),
             rendered: build_content_elements(content, &PathBuf::from("t.md"), &None),
             toc_entries: crate::core::toc::extract_toc(content),
             file_path: PathBuf::from("t.md"),
-            watcher_rx: rx,
+            watch,
             picker: None,
             picker_queried: true,
             content_width: 0,
@@ -2850,6 +2862,56 @@ mod fidelity_tests {
     }
 
     // #59, symptom 2: code blocks have no syntax highlighting.
+    #[test]
+    fn offline_mode_makes_no_request_at_all() {
+        // `--offline` says "never access the network". This backend used to
+        // fetch anyway — `core::offline` was not even compiled for it — so the
+        // documentation promised something the code did not do. Counting the
+        // calls is the only way to show none were made; a URL that fails would
+        // pass either way.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let fetch = |_: &str| -> LoadedImage {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("should never be reached".into())
+        };
+
+        let result = load_image_with(
+            "https://example.com/badge.svg",
+            std::path::Path::new("/"),
+            true,
+            &fetch,
+        );
+
+        assert!(result.is_err(), "a remote image cannot load while offline");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "offline mode must not reach the network"
+        );
+    }
+
+    #[test]
+    fn a_remote_image_is_fetched_when_online() {
+        // The other half of the contract: the refusal above is the flag, not a
+        // backend that never fetches.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let fetch = |_: &str| -> LoadedImage {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("no network in a test".into())
+        };
+
+        let _ = load_image_with(
+            "https://example.com/badge.svg",
+            std::path::Path::new("/"),
+            false,
+            &fetch,
+        );
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the fetch should be used");
+    }
+
     #[test]
     fn only_a_bare_t_flips_the_theme() {
         // `gui` refuses a modifier on this binding, and the terminal has to

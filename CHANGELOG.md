@@ -5,17 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-09-14
+## [Unreleased]
 
 The crate moves to Rust edition 2024, the configuration file finds itself, the
-two graphical backends share the document palette and base font sizes, and the
-backends are renamed.
+`gui` backend is brought much closer to `web`, `--theme` finally reaches every
+backend, and the backends are renamed.
 
 ### Changed
 
 - **Rust edition 2024**, with 1.95 as the minimum supported version — the
-  highest any dependency asks for, checked by building and testing on a pinned
-  1.95 toolchain rather than by reading manifests.
+  highest `rust-version` declared anywhere in the tree, and confirmed by
+  building and testing on a pinned 1.95 toolchain rather than by reading
+  manifests. Many crates declare none at all, which is why the build is the
+  proof and the declaration only the starting point.
 
 - **Dependencies brought up to date**: comrak 0.55, the egui stack at 0.36, wry
   0.57 and tao 0.37, resvg and usvg 0.48, mermaid-rs-renderer 0.3, base64 0.23.
@@ -72,9 +74,10 @@ backends are renamed.
 - **A `LICENSE` file.** MIT was declared in `Cargo.toml`, in the README, in the
   Homebrew formula, in the Scoop manifest and in the Chocolatey `licenseUrl` —
   which pointed at a 404 — but the text was nowhere in the repository, so
-  GitHub reported no licence at all. It now also travels with the software:
-  in the `.deb` and `.rpm`, in the release archives (which is where Homebrew
-  and the AUR package pick it up), and in the Nix build.
+  GitHub reported no licence at all. Every packaging recipe is now configured
+  to install it: the `.deb` and `.rpm`, the release archives (which is where
+  Homebrew and the AUR package pick it up), and the Nix build. None of those
+  formats has been built from this branch.
 
 - `-s, --set-default-backend <BACKEND>` writes the backend into the config
   file and exits. Only that value is replaced — comments and every other
@@ -89,7 +92,7 @@ backends are renamed.
   `--config` and `-l` for `--list-backends`. `--theme` was also missing from the
   man page's option list, though it was already documented as a config key.
 
-- **The `gui` and `web` backends share one palette and one type scale**
+- **The `gui` and `web` backends share one palette, one body size and one h1**
   (`src/core/style.rs`): a 16 px body, headings at 2 / 1.5 / 1.25 / 1 / 0.875 /
   0.85 em, code at 85 %, GitHub colours. `gui` used to run on egui's defaults —
   a 13 pt body with an 18 pt heading, so `h1` through `h6` all landed within
@@ -97,21 +100,22 @@ backends are renamed.
   own sizes, which were a third scale again. The stylesheet is generated from those
   constants, so the palette and the body size stay in step.
 
-  The palette and the body size are shared; the heading *scale* is not, and
-  cannot be. `gui` renders through `egui_commonmark`, which interpolates its own
-  sizes between the heading and body styles and takes no table, so setting those
-  two ends makes `h1` and the body agree while `h2` to `h6` come out larger than
-  the stylesheet's. Fixing that needs a change upstream.
+  `h2` to `h6` are the stylesheet's in `web` only. `gui` renders through
+  `egui_commonmark`, which interpolates its own sizes between the heading and
+  body styles; the API it exposes today takes those two ends and no table, so
+  setting them makes `h1` and the body agree while the levels between come out
+  larger.
 
-  The pairs a reader actually meets are checked against the WCAG 2.2 contrast
-  minimum by unit tests, including muted text on a hovered sidebar entry — which
+  Thirteen named pairs from this palette — the document, the code backgrounds
+  and the sidebar states — are checked against the WCAG 2.2 contrast minimum by
+  unit tests, including muted text on a hovered sidebar entry, which
   GitHub's own `#656d76` misses at 4.4999:1, so the light palette uses `#646c75`.
   egui's default inline-code chip put body text at 3.1:1.
 
 - **`gui` picks the platform's UI and monospace faces** (SF Pro / SF Mono,
   Segoe UI / Cascadia Mono, Cantarell / Noto Sans Mono…), matching the
-  `system-ui` and `ui-monospace` stacks the stylesheet asks for. Every other
-  installed face stays behind them as a fallback for non-Latin scripts.
+  `system-ui` and `ui-monospace` stacks the stylesheet asks for, plus a short,
+  bounded list of fallbacks for the scripts those two do not cover.
 
 - **`**bold**` is visible in `gui` again.** egui has no font weights —
   `strong()` only changes the colour — so bold and body text were drawn
@@ -119,10 +123,9 @@ backends are renamed.
   cannot be equal.
 
 - **The `gui` table of contents follows the `web` sidebar**: a small uppercase
-  muted label instead of a document-sized heading, entries graded by depth, and
-  entries wider than the panel ellipsised rather than dragging it wider. Its
-  scroll area no longer shrinks to its widest entry, which is what put egui's
-  floating scrollbar on top of the text (the rest of #27).
+  muted label instead of a document-sized heading, and entries graded by depth.
+  Its scroll area no longer shrinks to its widest entry, which is what put
+  egui's floating scrollbar on top of the text (the rest of #27).
 
 ### Fixed
 
@@ -130,17 +133,18 @@ backends are renamed.
   accepted everywhere and applied nowhere else: `gui` and `web` followed the
   desktop's colour scheme whatever the flag said, so `--theme light` on a dark
   desktop rendered dark. Both now honour it, and `auto` still asks the
-  environment. The `web` backend's `Ctrl/Cmd+D` continues to flip whatever the
-  window is currently showing.
+  environment. The toggle — see below — continues to flip whatever the window
+  is currently showing, forced theme included.
 
-  Mermaid diagrams follow the setting when the page loads. One already on
-  screen is not recoloured by the toggle, and a diagram rendered natively to
-  SVG carries its own colours either way.
+  Mermaid is the exception. A diagram rendered natively to SVG carries its own
+  colours, whatever the setting; only the `web` fallback, drawn by the bundled
+  Mermaid library, follows it, and only when the page loads — one already on
+  screen is not recoloured by the toggle.
 
 - **The theme toggle is now `t`, and works in all three backends.** It was
-  `Ctrl/Cmd+D` in `web` only — a combination most terminals bind to splitting a
-  pane, and one the other two backends had no equivalent for. `t` is a bare key,
-  so nothing can preempt it.
+  `Ctrl/Cmd+D` in `web` only — the combination Ghostty, iTerm2 and Terminal.app
+  bind to splitting a pane, and one the other two backends had no equivalent
+  for. `t` carries no modifier, which is why it was chosen.
 
   The terminal's bottom bar offers it too. That bar was one fixed string clipped
   to the width it was given, which on an 80-column terminal cut it mid-item and
@@ -156,9 +160,10 @@ backends are renamed.
 
 - **The `gui` backend read every installed font into memory.** It loaded the
   whole of each font file, once per face that file contained, and pushed all of
-  them into both fallback chains — 890 faces across 473 files on the
-  development machine, 4.57 GB of font data retained before egui had built
-  anything out of it, on a document of any size. Faces are now chosen from the
+  them into both fallback chains — 890 faces across 473 files on the machine
+  this was measured on, 4.57 GB of font data retained before egui had built
+  anything out of it, on a document of any size. Another machine has another
+  font collection; the shape of the problem carries over, the number does not. Faces are now chosen from the
   font database's metadata and only the handful selected is read: the body font,
   the code font, and a short list of fallbacks for scripts those two do not
   cover, under a budget of 64 MB and eight faces. The same document now holds
@@ -174,28 +179,91 @@ backends are renamed.
 
 - **`gui` came closer to `web`.** A rule under `h1` and `h2`, as the stylesheet
   draws; code blocks highlighted with the same syntax themes as the terminal;
-  one colour for every table-of-contents entry, graded by size and indent rather
-  than by colour — `RichText::strong()` sets a colour of its own, so the top two
-  levels rendered as plain text and the third as a blue link, in one list — and
-  long entries wrap instead of being cut to an ellipsis.
+  a table of contents graded by size and indent instead of by an accident of
+  styling — `RichText::strong()` sets a colour of its own, so the top two levels
+  rendered as plain text and the third as a blue link, in one list, while the
+  deepest stay deliberately muted — and long entries wrap instead of being cut
+  to an ellipsis.
 
 - **`gui` printed raw HTML at the reader.** `web` hands HTML to a real engine;
   `gui` has none, and `egui_commonmark` passes an HTML block through as text, so
   a README that centres its logo and title with `<p>` and `<h1>` showed its own
-  markup. A short, explicit set of tags — headings, paragraphs, images, line
-  breaks — is now rewritten as the Markdown that means the same thing, so it
-  travels the pipeline that was already there: image paths are resolved, SVGs
-  rasterised, headings listed in the table of contents. A declared `width` is
-  honoured for vector images. Anything outside that set keeps its text and loses
-  its tags. This is not an HTML engine: `align="center"` has no Markdown
-  equivalent and is dropped, so the content comes back but its layout does not.
+  markup. A short, explicit set of tags — headings, paragraphs, images — is now
+  rewritten as the Markdown that means the same thing, so it travels the
+  pipeline that was already there: the image paths are resolved, the file is
+  validated and the SVG rasterised exactly as for `![](…)`, and a heading is
+  listed in the table of contents. A declared `width` is honoured for vector
+  images. Anything outside that set keeps its text and loses its tags, and that
+  text is escaped, so a `*` or a `#` an author wrote inside a tag stays the
+  character it was.
+
+  Only blocks at the top level are converted: the replacement works on whole
+  lines and cannot carry back the `>` of a quote or the indent of a list item.
+  This is not an HTML engine — `align="center"` has no Markdown equivalent and
+  is dropped, `<br>` becomes a space, so the content comes back but its layout
+  does not. A heading written in HTML therefore appears in the `gui` table of
+  contents, where `web` does not list it.
+
+- **A refused image was still read from disk in `gui`.** An image outside the
+  project root was left as it was written rather than inlined, which is not the
+  same as refusing it: `egui_commonmark` enables `egui_extras`' file loader,
+  which gives a schemeless destination a `file://` prefix and reads it, without
+  passing through mdr's resolver at all. Neither that loader nor the HTTP one is
+  built in any more — the decoder is pulled in without them — so no image is
+  read from disk or fetched behind mdr's back: a local or remote one reaches the
+  page only through mdr's own resolver, and a `data:` URI written into the
+  document is still shown as the author wrote it. A refusal also replaces the
+  image with a note, so the path is no longer something a loader could read.
+
+  For the same reason, the four SVG rasterisers now share one set of usvg
+  options that refuses an `xlink:href` pointing at a file. Checking the drawing
+  mdr was asked for said nothing about the files that drawing referenced. (They
+  also had four copies of the system font database between them; there is one.)
+
+  The SVG decoder is gone from the window too. It built its own options, so it
+  had none of this — mdr rasterises every drawing itself instead, including the
+  ones that arrive as `data:` URIs, which is what a remote badge usually is.
+
+- **Searching for "Copy" found one match per code block.** The button sits
+  inside the content so it can be positioned over its block, and the search
+  walked every text node there — so mdr's own control turned up as if it were
+  part of the document, highlight included. The walker skips it now.
+
+- **The copy button said "Copied" when nothing had been copied.** Where the
+  asynchronous clipboard is unavailable, the fallback goes through
+  `execCommand`, which reports a refusal by returning `false` rather than by
+  throwing — so the `try` around it caught nothing and the button claimed
+  success anyway. All three outcomes now reach the state that matches them, and
+  the hidden textarea is removed even when the attempt raises.
+
+- **`--offline` did not hold in the terminal.** The README and the man page
+  promise that it stops every network access; `tui` fetched a remote image
+  anyway, because `core::offline` was not even compiled for it. It now refuses,
+  and a test counts the calls to prove none is made.
+
+- **A piped document could not find its own images.** `cat README.md | mdr`
+  writes the document to a temp file, and every backend then looked for
+  `assets/logo.svg` next to *that* — so a piped README showed a broken image
+  where its logo should be. Relative **image** paths now resolve from the
+  directory mdr was run in. That is a convention, not a deduction: nothing tells
+  mdr where the file handed to `cat` came from.
+
+- **`gui` opened at whatever size the last document had been left at.** eframe's
+  `persistence` feature stores the window geometry and egui's memory in one file
+  shared by every document, and mdr never asked for any of it — `MdrApp` has no
+  `save`. It also explains the two defects above it: the restored scroll offset,
+  and a theme preference outliving the run that set it. The feature is off, and
+  `gui` and `web` now both open at the 1100x900 they have always declared.
 
 - **Tables in `gui` were not laid out as tables.** The viewer draws one as a
   striped grid inside a frame: no cell borders, no padding, and a header row
   drawn exactly like any other, with each box sized to its own content rather
   than to its column. They are now measured and drawn here — bordered, padded
-  cells on a fixed column grid, with the header set apart by its background, and
-  inline code, emphasis and links kept inside a cell.
+  cells on a fixed column grid, every cell of a row the height of the tallest,
+  with the header set apart by its background and the delimiter row's alignments
+  honoured. A cell keeps its inline code, emphasis and links, read from the same
+  comrak parse as the rest of the document rather than from the pipe syntax
+  again.
 
 - **The document column is capped at 900 points in `gui`**, the width the
   stylesheet gives `web`. Prose used to run the full width of the window and a
@@ -213,6 +281,13 @@ backends are renamed.
   WAV and an AVI; the check for the `WEBP` signature that follows it sat inside
   a branch reached only when the file did *not* start with `RIFF`, so it never
   ran.
+
+- **Following a link in `web` left the previous document's watcher running.**
+  The watcher was leaked so that it would outlive the call that started it, so
+  every document opened added an OS watch that nothing could stop; a long
+  browsing session accumulated them. `watch_file` now hands the caller a `Watch`
+  that owns the watcher, and the web backend assigns over it — which drops the
+  one it is leaving.
 
 - **A terminal reporting no rows made the terminal backend panic**, on the
   subtraction that places the bottom bar. `script -q /dev/null mdr --backend
@@ -251,13 +326,23 @@ backends are renamed.
 ### Tests
 
 - The file watcher — live reload, used by all three backends — had no tests at
-  all. It now has four, driven through real edits and through the write-then-
-  rename an editor performs, with a neighbouring file that must stay ignored.
+  all. It now has five, driven through real edits and through the write-then-
+  rename an editor performs, with a neighbouring file that must stay ignored and
+  a watch replaced by another the way following a link replaces it.
 - The terminal backend is driven through a real pseudo-terminal, which is the
   only way to cover starting it, pressing a key and leaving cleanly; that is
   what catches the piped-document defect above.
-- `--set-default-backend`, the config resolution and the WebP check are covered
-  through the command line, not only through their functions.
+- `--set-default-backend` and the config resolution are covered through the
+  command line, not only through their functions. The WebP signature check is
+  covered where it lives, by calling the validator with a `RIFF` container that
+  is a WAV and an AVI.
+- The tables and the HTML `gui` renders itself are covered against what they
+  replaced: a `_` inside a word, an escaped `*`, a link whose destination holds
+  parentheses, an empty cell at the edge of a row, the delimiter row's
+  alignments, and — for HTML — text that would otherwise become a heading, a
+  list or emphasis on the second reading.
+- `--offline` is shown to make no request at all, by counting the calls to an
+  injected fetch rather than by pointing at a URL that would fail anyway.
 
 ### Removed
 

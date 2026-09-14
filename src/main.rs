@@ -125,9 +125,11 @@ fn parse_backend(s: &str) -> Result<String, String> {
 
 /// Auto-detect the best backend for the current environment.
 fn detect_backend() -> &'static str {
-    // If no DISPLAY/WAYLAND and we have a TTY → TUI
-    // If SSH session → TUI
-    // Otherwise → gui (or the web backend when gui is not compiled in)
+    // SSH session → tui. Otherwise a display → gui, or web when gui is not
+    // compiled in. No display and no SSH → tui as well.
+    //
+    // Whether stdin is a terminal is not part of it: mdr reads a document, not
+    // the console, and a piped document is one of the ordinary ways to use it.
     let is_ssh = std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok();
     let has_display = std::env::var("DISPLAY").is_ok()
         || std::env::var("WAYLAND_DISPLAY").is_ok()
@@ -388,6 +390,11 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 
     let from_stdin = |tmp_file: &mut Option<PathBuf>| match read_stdin_to_tmpfile() {
         Ok(path) => {
+            // The document is now a temp file, but its relative image paths
+            // were written against the directory mdr was run from.
+            if let Ok(cwd) = std::env::current_dir() {
+                core::set_document_base(cwd);
+            }
             *tmp_file = Some(path.clone());
             Ok(path)
         }

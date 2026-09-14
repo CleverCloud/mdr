@@ -140,23 +140,14 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
 #[cfg(feature = "egui-backend")]
 fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
-    use std::sync::{Arc, OnceLock};
 
     // Max texture size for egui/GPU — keep well under the 16384 hard limit
     const MAX_TEXTURE_SIZE: u32 = 8192;
 
     // Load system fonts once and reuse across calls
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size();
     let svg_w = size.width();

@@ -609,8 +609,9 @@ backend auto
 // Uncomment to never access the network (remote images are not downloaded)
 // offline #true
 
-// Colour scheme the terminal backend assumes for syntax highlighting:
-// auto (read COLORFGBG, fall back to dark), dark, or light
+// Colour scheme to render with: auto, dark or light. auto asks the
+// environment: gui and web follow the desktop, tui reads COLORFGBG and
+// falls back to dark. In tui the setting picks the code highlighting only.
 // theme \"auto\"
 ";
 

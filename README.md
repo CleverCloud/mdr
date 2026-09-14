@@ -12,10 +12,10 @@
 
 **Built for the LLM era.** AI tools generate Markdown constantly — code documentation, technical specs, analysis reports — packed with diagrams, tables, and structured content. You need a fast way to read them.
 
-Most developers end up previewing Markdown in VS Code, pasting into a browser, or squinting at raw text in the terminal. None of these handle Mermaid diagrams. None are instant. mdr is.
+Most developers end up previewing Markdown in VS Code, pasting into a browser, or squinting at raw text in the terminal. mdr renders Mermaid diagrams itself, and opens the file you give it without a project, a server or an extension.
 
 - **One command** — `mdr file.md` and you're reading, not editing
-- **Native Rust binary** — no Electron, no Node.js, no npm, starts in milliseconds
+- **Native Rust binary** — no Electron, no Node.js, no npm
 - **Mermaid diagrams** — flowcharts, sequence diagrams, pie charts rendered as SVG natively (no headless browser)
 - **Three backends** — a native window (`gui`), the system webview (`web`), or a terminal UI (`tui`) over SSH
 - **Live reload** — edit your file or let your AI tool regenerate it, see changes instantly
@@ -28,9 +28,14 @@ mdr offers multiple rendering backends, selectable at runtime:
 
 | Backend | Stack | Strengths |
 |---------|-------|-----------|
-| **`gui`** (default) | Pure Rust GPU rendering (egui) | Single static binary, fast startup, cross-platform |
+| **`gui`** | Pure Rust GPU rendering (egui) | Native window, no JavaScript engine, cross-platform |
 | **`web`** | OS native WebView (WebKit/WebView2) | GitHub-quality HTML/CSS rendering, full CSS support |
 | **tui** | Terminal UI (ratatui + crossterm) | Works over SSH, no GUI needed, keyboard-driven |
+
+`--backend` and the `backend` key of the config file pick one. The default is
+`auto`, which chooses among the backends this binary was built with: `tui` over
+SSH or with no display, and otherwise the first of `gui` and `web` that is
+compiled in.
 
 ## Install
 
@@ -110,7 +115,7 @@ Download from the [Releases](https://github.com/CleverCloud/mdr/releases) page f
 ## Usage
 
 ```bash
-# Open with the default backend (gui)
+# Open with the backend mdr picks for this session
 mdr README.md
 
 # Open with the web backend
@@ -122,15 +127,16 @@ mdr --backend tui README.md
 # Never touch the network (remote images are left unresolved)
 mdr --offline README.md
 
-# Force the palette used to highlight code in the terminal
+# Render in the light colour scheme
 mdr -t light README.md
 
 # Show help
 mdr --help
 ```
 
-Clicking an `http(s)` link opens it in your system browser; a link to another
-local `.md` file opens that file in mdr.
+In `web`, clicking an `http(s)` link opens it in your system browser, and a
+link to another local `.md` file opens that file in mdr. `gui` and `tui` have
+no such routing.
 
 ### `gui` keybindings
 
@@ -196,10 +202,23 @@ themes stay legible whatever the terminal is set to.
 
 ## Features
 
-- **Full GFM support** — tables, task lists, strikethrough, footnotes, autolinks
-- **One parser for every backend** — the terminal output is derived from the
-  same comrak parse as the HTML, so the three backends cannot disagree on the
-  structure of a document
+- **GFM** — tables, task lists, strikethrough, footnotes, autolinks. `gui` draws
+  tables itself
+- **One parser for the structure** — comrak produces the HTML `web` renders,
+  the lines `tui` draws, and the headings every table of contents is built
+  from. `gui` draws through `egui_commonmark`, which reads the Markdown again
+  with its own parser, so its typography — and, for tables and raw HTML, its
+  rendering — is its own
+- **Raw HTML in a document** — `web` hands it to a real engine. `gui` has none,
+  so a short, explicit set of tags (headings, paragraphs, images) is rewritten
+  as the Markdown that means the same thing, and anything else keeps its text
+  and loses its tags. Only blocks at the top level of the document are
+  converted; one nested in a quote or a list is left as written. Attributes
+  with no Markdown equivalent, such as `align="center"`, are dropped, `<br>`
+  becomes a space, and a declared `width` is honoured for vector images. A
+  heading written in HTML becomes a real heading, so it appears in the `gui`
+  table of contents where `web` does not list it. `tui` shows HTML as the text
+  it is
 - **Syntax highlighting** — code blocks with language detection (via syntect), in
   the terminal too. The palette follows the terminal background when it says what
   it is (`COLORFGBG`), and falls back to a dark one; `--theme dark|light` or
@@ -212,21 +231,30 @@ themes stay legible whatever the terminal is set to.
 - **Dark/Light theme** — follows the OS by default; `--theme dark|light` (or
   `theme` in the config file) settles it. In `gui` and `web` it picks the whole
   palette; in `tui` the terminal owns its own colours, so it selects the syntax
-  highlighting of code blocks and nothing more. The `web` backend also flips the
-  scheme live with `Ctrl/Cmd+D`
+  highlighting of code blocks and nothing more. `t` flips the scheme live in
+  every backend
 - **YAML front matter** — recognised as metadata, so it is neither rendered nor listed in the TOC
 - **Unique heading anchors** — repeated headings get `setup`, `setup-1`, … as GitHub does
 
 ## Images
 
-Images are inlined into the document before rendering, so nothing is fetched
-while you read.
+In `gui` and `web`, images are inlined into the document before rendering, so
+nothing is fetched while you read. `tui` loads an image when it draws it, and
+has its own path for that: no cache, and none of the size ceiling described
+below.
 
 - **Local images** resolve relative to the Markdown file, and may live anywhere
   inside the enclosing project — the nearest ancestor directory holding a
   `.git`, `.hg`, `.svn` or `.jj`. That makes the usual `docs/page.md` →
-  `![](../images/schema.png)` layout work. Outside that root, and above your
-  home directory, images are refused.
+  `![](../images/schema.png)` layout work. The search for that marker stops at
+  your home directory, so a document outside any project is restricted to its
+  own directory. Anything outside the root that comes out of this is refused.
+- **A document read from stdin** has no directory of its own — `cat README.md |
+  mdr` writes it to a temp file — so its relative **image** paths resolve from
+  the directory **mdr** was run in. `cd docs && cat page.md | mdr` therefore
+  resolves them against `docs`, whatever directory `page.md` itself lives in.
+  Links to other local files are not redirected this way: in `web` they are
+  still resolved next to the temp file, so a piped document cannot follow them.
 - **Remote images** (`http`/`https`, typically README badges) are downloaded
   once, cached for the lifetime of the process, and embedded as `data:` URIs.
   Responses larger than 16 MB are ignored.
@@ -263,13 +291,21 @@ If no environment variable names a home directory, mdr says so and reads
 `./.config/mdr/config.kdl` if it happens to exist — but does not create one
 there, rather than leaving a `.config/` behind in whatever directory it was
 started from. A file that is already there is treated like any other config,
-including having an old backend name corrected in it.
+old backend name included.
 
 The file is [KDL v2](https://kdl.dev). Four keys are recognised, each mirroring
 the command line option of the same name:
 
 `mdr -s web` writes the backend into the file for you, leaving comments and
 every other setting alone; it refuses a backend the binary was not built with.
+
+The backends were called `egui` and `webview` before 0.6. A config file holding
+one of the old names is corrected in place the first time it is read — comments
+and every other setting kept — and the run says so once. A file mdr cannot
+write, because it is read-only or a symlink, is left alone with a warning and
+still read with the old name understood. On the command line there is no such
+mapping: `--backend egui` is not a backend any more, and the error lists the
+ones that are.
 
 ```kdl
 backend auto      // auto, gui, tui or web
@@ -342,9 +378,11 @@ Pre-built binaries are available on the [Releases](https://github.com/CleverClou
 - Linux (x86_64 + aarch64)
 - Windows (x86_64)
 
-Each release also updates the Homebrew tap, the Scoop bucket, the Chocolatey
-package, the Snap Store (`edge` channel) and crates.io — see
-[PACKAGING.md](PACKAGING.md) for the publishing setup.
+Each release publishes to crates.io, and updates the Homebrew tap, the Scoop
+bucket, the Chocolatey package and the Snap Store (`edge` channel) for whichever
+of those channels is enabled — each one is gated on its own variable and needs
+its own secret, so a release still succeeds when a channel is not configured.
+See [PACKAGING.md](PACKAGING.md) for the setup.
 
 Release notes are the matching section of [CHANGELOG.md](CHANGELOG.md), so add
 it before pushing the tag.

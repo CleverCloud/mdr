@@ -76,9 +76,9 @@ This triggers the release workflow which:
 4. Publishes to crates.io
 5. Creates a GitHub Release with all artifacts, using the `CHANGELOG.md` section
    of the tag as release notes
-6. Updates Homebrew formula (if enabled)
-7. Updates WinGet manifest (if enabled)
-8. Updates AUR package (if enabled)
+6. Updates the Homebrew formula, the Scoop bucket, the Chocolatey package, the
+   Snap Store, the WinGet manifest and the AUR package — each one enabled by its
+   own `*_ENABLED` variable, and each needing its secret to succeed
 
 ### Release notes
 
@@ -114,6 +114,7 @@ Both packages install, in addition to `/usr/bin/mdr`:
 | `assets/logo-128.png` | `/usr/share/icons/hicolor/128x128/apps/mdr.png` |
 | `assets/mdr.1` | `/usr/share/man/man1/mdr.1` |
 | `README.md` | `/usr/share/doc/mdr/README.md` |
+| `LICENSE` | `/usr/share/doc/mdr/copyright` (`.deb`), `/usr/share/licenses/mdr/LICENSE` (`.rpm`) |
 
 The man page is a hand-written roff file rather than a `clap_mangen` build
 script: the `Cli` struct lives in `src/main.rs` and cannot be reused from a
@@ -222,10 +223,11 @@ cargo metadata --format-version 1 --all-features \
   | sort -V | tail -1
 ```
 
-Note that this is a *declared* floor: 242 of the 821 resolved packages declare
-no `rust-version` at all (including the direct dependencies
-`mermaid-rs-renderer` and `tiny-skia`), so the `msrv` job — not this command —
-is what actually proves the value.
+Note that this is a *declared* floor: many resolved packages declare no
+`rust-version` at all, including the direct dependencies `mermaid-rs-renderer`
+and `tiny-skia`, so the `msrv` job — not this command — is what actually proves
+the value. Counting them here would only date the file; the command above is
+the answer at the moment it is run.
 
 ## crates.io
 
