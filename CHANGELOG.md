@@ -5,6 +5,352 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-14
+
+The crate moves to Rust edition 2024, the configuration file finds itself, the
+`gui` backend is brought much closer to `web`, `--theme` finally reaches every
+backend, and the backends are renamed.
+
+### Changed
+
+- **Rust edition 2024**, with 1.95 as the minimum supported version — the
+  highest `rust-version` declared anywhere in the tree, and confirmed by
+  building and testing on a pinned 1.95 toolchain rather than by reading
+  manifests. Many crates declare none at all, which is why the build is the
+  proof and the declaration only the starting point.
+
+- **Dependencies brought up to date**: comrak 0.55, the egui stack at 0.36, wry
+  0.57 and tao 0.37, resvg and usvg 0.48, mermaid-rs-renderer 0.3, base64 0.23.
+  comrak's `syntect-onig` feature is now selected explicitly: from 0.53 comrak
+  stopped enabling a regex engine on its own, which would have broken a
+  webview-only build.
+
+- **A selected set of clippy lints is enforced in `Cargo.toml`.** They were all
+  fixed across the crate first, so the list is a floor the CI holds rather than
+  a wish. `clippy::pedantic` is deliberately not switched on in bulk: the CI
+  lints on a floating stable toolchain, and a lint added upstream would break
+  unrelated pull requests.
+
+- **The config file is written on first run, and its location is resolved
+  rather than hard-coded.** In order, on every platform: an existing
+  `~/.config/mdr/config.kdl`, then `$XDG_CONFIG_HOME/mdr/config.kdl` when that
+  variable holds an absolute path, then `%APPDATA%\mdr\config.kdl` on Windows,
+  then `~/.config/mdr/config.kdl`. `%USERPROFILE%` gives the home directory on
+  Windows, because Git Bash sets `HOME` to a POSIX path a native binary cannot
+  resolve.
+
+  Putting an existing `~/.config/mdr/config.kdl` ahead of `XDG_CONFIG_HOME` is
+  a deliberate departure from the spec, which says the variable wins: every mdr
+  before this release read that one path and nothing else, so deferring to the
+  variable would silently ignore the config of everyone who has both. A
+  relative `XDG_CONFIG_HOME` is ignored with a warning, as the spec requires. Being unable to write
+  the file is a warning, not a failure: mdr runs on the defaults the file would
+  have carried anyway.
+
+  The generated file selects `backend auto`, which every build has — it used to
+  hard-code `webview`, which a `--no-default-features --features tui-backend`
+  binary cannot run. When nothing names a home directory mdr still reads
+  `./.config/mdr/config.kdl` if it is there — and treats it like any other
+  config, including correcting an old backend name in it — but does not create
+  one, so no `.config/` is left behind in the directory it was started from.
+
+- **The backends are named `gui`, `tui` and `web`.** `egui` and
+  `webview` said which library draws the window, which is not what someone
+  choosing a backend is picking between: a native window, a terminal, or the
+  system webview. `mdr --backend web`, `backend gui` in `config.kdl`.
+
+  A config file written before this release is **corrected in place** the first
+  time it is read: `backend egui` becomes `backend gui`, comments and every
+  other setting are preserved, and the run says so once. A file mdr cannot
+  write — read-only, or a symlink — is left as it is, with a warning, and the
+  run carries on. On the command line there is no such mapping: `--backend egui` is simply not a
+  backend any more, and the error lists the names that are.
+
+  The Cargo features keep the crate names (`egui-backend`, `webview-backend`,
+  `tui-backend`), so documented build commands still work.
+
+### Added
+
+- **A `LICENSE` file.** MIT was declared in `Cargo.toml`, in the README, in the
+  Homebrew formula, in the Scoop manifest and in the Chocolatey `licenseUrl` —
+  which pointed at a 404 — but the text was nowhere in the repository, so
+  GitHub reported no licence at all. Every packaging recipe is now configured
+  to install it: the `.deb` and `.rpm`, the release archives (which is where
+  Homebrew and the AUR package pick it up), and the Nix build. None of those
+  formats has been built from this branch.
+
+- `-s, --set-default-backend <BACKEND>` writes the backend into the config
+  file and exits. Only that value is replaced — comments and every other
+  setting are preserved — and mdr refuses to write a backend this binary was
+  not built with, which would only fail on the next start.
+- The publishing setup documents every channel the release workflow drives:
+  `PACKAGING.md` named four of the seven secrets and three of the six
+  variables, leaving Chocolatey, Scoop and the Snap Store undocumented even
+  though their jobs run. The README gained the `cargo install mdr` /
+  `cargo binstall mdr` route, which was never written down.
+- Short forms for the options that lacked them: `-t` for `--theme`, `-c` for
+  `--config` and `-l` for `--list-backends`. `--theme` was also missing from the
+  man page's option list, though it was already documented as a config key.
+
+- **The `gui` and `web` backends share one palette, one body size and one h1**
+  (`src/core/style.rs`): a 16 px body, headings at 2 / 1.5 / 1.25 / 1 / 0.875 /
+  0.85 em, code at 85 %, GitHub colours. `gui` used to run on egui's defaults —
+  a 13 pt body with an 18 pt heading, so `h1` through `h6` all landed within
+  five points of each other — and `web` rendered `h3` to `h6` at the browser's
+  own sizes, which were a third scale again. The stylesheet is generated from those
+  constants, so the palette and the body size stay in step.
+
+  `h2` to `h6` are the stylesheet's in `web` only. `gui` renders through
+  `egui_commonmark`, which interpolates its own sizes between the heading and
+  body styles; the API it exposes today takes those two ends and no table, so
+  setting them makes `h1` and the body agree while the levels between come out
+  larger.
+
+  Thirteen named pairs from this palette — the document, the code backgrounds
+  and the sidebar states — are checked against the WCAG 2.2 contrast minimum by
+  unit tests, including muted text on a hovered sidebar entry, which
+  GitHub's own `#656d76` misses at 4.4999:1, so the light palette uses `#646c75`.
+  egui's default inline-code chip put body text at 3.1:1.
+
+- **`gui` picks the platform's UI and monospace faces** (SF Pro / SF Mono,
+  Segoe UI / Cascadia Mono, Cantarell / Noto Sans Mono…), matching the
+  `system-ui` and `ui-monospace` stacks the stylesheet asks for, plus a short,
+  bounded list of fallbacks for the scripts those two do not cover.
+
+- **`**bold**` is visible in `gui` again.** egui has no font weights —
+  `strong()` only changes the colour — so bold and body text were drawn
+  identically. Strong text has its own palette entry now, with a test that they
+  cannot be equal.
+
+- **The `gui` table of contents follows the `web` sidebar**: a small uppercase
+  muted label instead of a document-sized heading, and entries graded by depth.
+  Its scroll area no longer shrinks to its widest entry, which is what put
+  egui's floating scrollbar on top of the text (the rest of #27).
+
+### Fixed
+
+- **`--theme dark|light` only ever reached the terminal backend.** It was
+  accepted everywhere and applied nowhere else: `gui` and `web` followed the
+  desktop's colour scheme whatever the flag said, so `--theme light` on a dark
+  desktop rendered dark. Both now honour it, and `auto` still asks the
+  environment. The toggle — see below — continues to flip whatever the window
+  is currently showing, forced theme included.
+
+  Mermaid is the exception. A diagram rendered natively to SVG carries its own
+  colours, whatever the setting; only the `web` fallback, drawn by the bundled
+  Mermaid library, follows it, and only when the page loads — one already on
+  screen is not recoloured by the toggle.
+
+- **The theme toggle is now `t`, and works in all three backends.** It was
+  `Ctrl/Cmd+D` in `web` only — the combination Ghostty, iTerm2 and Terminal.app
+  bind to splitting a pane, and one the other two backends had no equivalent
+  for. `t` carries no modifier, which is why it was chosen.
+
+  The terminal's bottom bar offers it too. That bar was one fixed string clipped
+  to the width it was given, which on an 80-column terminal cut it mid-item and
+  hid everything past the search hint; it now drops whole hints instead, keeping
+  the most useful ones.
+
+- **A light syntax theme was barely legible in the terminal.** syntect picks its
+  foregrounds for its own background, and the terminal's is whatever the reader
+  set, so `--theme light` drew dark text straight onto a dark terminal. Code
+  blocks now paint the theme's background and pad to the frame width, which
+  makes the block self-contained — the same thing `gui` and `web` do with their
+  code background.
+
+- **The `gui` backend read every installed font into memory.** It loaded the
+  whole of each font file, once per face that file contained, and pushed all of
+  them into both fallback chains — 890 faces across 473 files on the machine
+  this was measured on, 4.57 GB of font data retained before egui had built
+  anything out of it, on a document of any size. Another machine has another
+  font collection; the shape of the problem carries over, the number does not. Faces are now chosen from the
+  font database's metadata and only the handful selected is read: the body font,
+  the code font, and a short list of fallbacks for scripts those two do not
+  cover, under a budget of 64 MB and eight faces. The same document now holds
+  three system faces and 13 MB.
+
+  `mdr --verbose` reports what was loaded and what it cost.
+
+- **A document opened wherever the last one had been left.** eframe's
+  `persistence` feature restores egui's memory, and a scroll area's offset is
+  part of it, so the `gui` window came up scrolled — on this repository's README
+  that is 3630 points down, past the logo and the title, which reads as the top
+  of the document simply being absent. Every document now opens at its top.
+
+- **`gui` came closer to `web`.** A rule under `h1` and `h2`, as the stylesheet
+  draws; code blocks highlighted with the same syntax themes as the terminal;
+  a table of contents graded by size and indent instead of by an accident of
+  styling — `RichText::strong()` sets a colour of its own, so the top two levels
+  rendered as plain text and the third as a blue link, in one list, while the
+  deepest stay deliberately muted — and long entries wrap instead of being cut
+  to an ellipsis.
+
+- **`gui` printed raw HTML at the reader.** `web` hands HTML to a real engine;
+  `gui` has none, and `egui_commonmark` passes an HTML block through as text, so
+  a README that centres its logo and title with `<p>` and `<h1>` showed its own
+  markup. A short, explicit set of tags — headings, paragraphs, images — is now
+  rewritten as the Markdown that means the same thing, so it travels the
+  pipeline that was already there: the image paths are resolved, the file is
+  validated and the SVG rasterised exactly as for `![](…)`, and a heading is
+  listed in the table of contents. A declared `width` is honoured for vector
+  images. Anything outside that set keeps its text and loses its tags, and that
+  text is escaped, so a `*` or a `#` an author wrote inside a tag stays the
+  character it was.
+
+  Only blocks at the top level are converted: the replacement works on whole
+  lines and cannot carry back the `>` of a quote or the indent of a list item.
+  This is not an HTML engine — `align="center"` has no Markdown equivalent and
+  is dropped, `<br>` becomes a space, so the content comes back but its layout
+  does not. A heading written in HTML therefore appears in the `gui` table of
+  contents, where `web` does not list it.
+
+- **A refused image was still read from disk in `gui`.** An image outside the
+  project root was left as it was written rather than inlined, which is not the
+  same as refusing it: `egui_commonmark` enables `egui_extras`' file loader,
+  which gives a schemeless destination a `file://` prefix and reads it, without
+  passing through mdr's resolver at all. Neither that loader nor the HTTP one is
+  built in any more — the decoder is pulled in without them — so no image is
+  read from disk or fetched behind mdr's back: a local or remote one reaches the
+  page only through mdr's own resolver, and a `data:` URI written into the
+  document is still shown as the author wrote it. A refusal also replaces the
+  image with a note, so the path is no longer something a loader could read.
+
+  For the same reason, the four SVG rasterisers now share one set of usvg
+  options that refuses an `xlink:href` pointing at a file. Checking the drawing
+  mdr was asked for said nothing about the files that drawing referenced. (They
+  also had four copies of the system font database between them; there is one.)
+
+  The SVG decoder is gone from the window too. It built its own options, so it
+  had none of this — mdr rasterises every drawing itself instead, including the
+  ones that arrive as `data:` URIs, which is what a remote badge usually is.
+
+- **Searching for "Copy" found one match per code block.** The button sits
+  inside the content so it can be positioned over its block, and the search
+  walked every text node there — so mdr's own control turned up as if it were
+  part of the document, highlight included. The walker skips it now.
+
+- **The copy button said "Copied" when nothing had been copied.** Where the
+  asynchronous clipboard is unavailable, the fallback goes through
+  `execCommand`, which reports a refusal by returning `false` rather than by
+  throwing — so the `try` around it caught nothing and the button claimed
+  success anyway. All three outcomes now reach the state that matches them, and
+  the hidden textarea is removed even when the attempt raises.
+
+- **`--offline` did not hold in the terminal.** The README and the man page
+  promise that it stops every network access; `tui` fetched a remote image
+  anyway, because `core::offline` was not even compiled for it. It now refuses,
+  and a test counts the calls to prove none is made.
+
+- **A piped document could not find its own images.** `cat README.md | mdr`
+  writes the document to a temp file, and every backend then looked for
+  `assets/logo.svg` next to *that* — so a piped README showed a broken image
+  where its logo should be. Relative **image** paths now resolve from the
+  directory mdr was run in. That is a convention, not a deduction: nothing tells
+  mdr where the file handed to `cat` came from.
+
+- **`gui` opened at whatever size the last document had been left at.** eframe's
+  `persistence` feature stores the window geometry and egui's memory in one file
+  shared by every document, and mdr never asked for any of it — `MdrApp` has no
+  `save`. It also explains the two defects above it: the restored scroll offset,
+  and a theme preference outliving the run that set it. The feature is off, and
+  `gui` and `web` now both open at the 1100x900 they have always declared.
+
+- **Tables in `gui` were not laid out as tables.** The viewer draws one as a
+  striped grid inside a frame: no cell borders, no padding, and a header row
+  drawn exactly like any other, with each box sized to its own content rather
+  than to its column. They are now measured and drawn here — bordered, padded
+  cells on a fixed column grid, every cell of a row the height of the tallest,
+  with the header set apart by its background and the delimiter row's alignments
+  honoured. A cell keeps its inline code, emphasis and links, read from the same
+  comrak parse as the rest of the document rather than from the pipe syntax
+  again.
+
+- **The document column is capped at 900 points in `gui`**, the width the
+  stylesheet gives `web`. Prose used to run the full width of the window and a
+  code block was stretched to it.
+
+- **`web` code blocks have a copy button**, which `gui` has always had. It
+  survives a live reload, and falls back to a selection where the asynchronous
+  clipboard is unavailable.
+
+- **Every document in `web` opened with an empty band above it.** The content
+  box has padding, so the first element's own top margin could not collapse into
+  it and was added to it instead.
+
+- **A `.webp` file was accepted on its container alone.** `RIFF` also begins a
+  WAV and an AVI; the check for the `WEBP` signature that follows it sat inside
+  a branch reached only when the file did *not* start with `RIFF`, so it never
+  ran.
+
+- **Following a link in `web` left the previous document's watcher running.**
+  The watcher was leaked so that it would outlive the call that started it, so
+  every document opened added an OS watch that nothing could stop; a long
+  browsing session accumulated them. `watch_file` now hands the caller a `Watch`
+  that owns the watcher, and the web backend assigns over it — which drops the
+  one it is leaving.
+
+- **A terminal reporting no rows made the terminal backend panic**, on the
+  subtraction that places the bottom bar. `script -q /dev/null mdr --backend
+  tui` is one way to get there.
+
+- **A failure between entering raw mode and the cleanup left the shell raw**,
+  and on the alternate screen. The restore now happens on every way out,
+  including a panic.
+
+- **`cat doc.md | mdr --backend tui` is usable again.** The document was drawn
+  and the first key press then killed it with "Failed to initialize input
+  reader", leaving the terminal on the alternate screen.
+
+  The cause is specific to macOS. With the document on stdin, crossterm falls
+  back to `/dev/tty` for the keyboard — but that is a *clone* device, and the
+  kernel refuses to register it with kqueue: `EVFILT_READ` returns `EINVAL`.
+  mio's registration fails, the event source is never built, and crossterm
+  swallows the error until the first read. mdr now reopens the real terminal
+  device (`/dev/ttys004` rather than `/dev/tty`) onto stdin before starting, so
+  crossterm takes its ordinary path.
+
+- **A document taller than 65535 rows no longer wraps around.** An element's
+  height was narrowed to `u16` while a wrapped paragraph is as tall as its line
+  count, which nothing bounds to the terminal. Everything derived from it — the
+  document height, search offsets, scrolling — went wrong past that point; a
+  65545-row document reported 9.
+- **The terminal backend caps the SVGs it rasterises**, like the three other
+  rendering paths already did. The size declared by the document decided the
+  buffer to allocate outright, so an SVG claiming 40000x20000 asked for one that
+  size. It is now scaled down to fit 8192 per side, never up.
+- `--help` now lists every value the parsers accept. `--theme` named none at
+  all, and `--backend` left out `auto` — the one the generated config file
+  selects. A test ties both lists to what the parsers take, so they cannot
+  drift apart again.
+
+### Tests
+
+- The file watcher — live reload, used by all three backends — had no tests at
+  all. It now has five, driven through real edits and through the write-then-
+  rename an editor performs, with a neighbouring file that must stay ignored and
+  a watch replaced by another the way following a link replaces it.
+- The terminal backend is driven through a real pseudo-terminal, which is the
+  only way to cover starting it, pressing a key and leaving cleanly; that is
+  what catches the piped-document defect above.
+- `--set-default-backend` and the config resolution are covered through the
+  command line, not only through their functions. The WebP signature check is
+  covered where it lives, by calling the validator with a `RIFF` container that
+  is a WAV and an AVI.
+- The tables and the HTML `gui` renders itself are covered against what they
+  replaced: a `_` inside a word, an escaped `*`, a link whose destination holds
+  parentheses, an empty cell at the edge of a row, the delimiter row's
+  alignments, and — for HTML — text that would otherwise become a heading, a
+  list or emphasis on the second reading.
+- `--offline` is shown to make no request at all, by counting the calls to an
+  injected fetch rather than by pointing at a URL that would fail anyway.
+
+### Removed
+
+- **`--init`.** The config file is created at startup, so the flag had nothing
+  left to do. A file the program can write for itself is not worth an option,
+  and needing to run it first was the only thing keeping new users from
+  discovering that mdr is configurable at all.
+
 ## [0.5.1] - 2026-09-07
 
 Both of these come from finally looking at the 0.5.0 rendering in an actual

@@ -1,13 +1,12 @@
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -17,6 +16,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::core::toc::{self, TocEntry};
+use crate::core::watcher::Watch;
 
 /// One logical line of text together with its wrapped rendering.
 ///
@@ -56,7 +56,7 @@ impl WrappedText {
 }
 
 /// Represents a single line element in the rendered content.
-/// Lines can be either text (rendered as ratatui Lines) or images (rendered as StatefulImage).
+/// Lines can be either text (rendered as ratatui Lines) or images (rendered as `StatefulImage`).
 enum ContentElement {
     TextLine(WrappedText),
     /// An image element that spans a number of rows in the terminal.
@@ -75,12 +75,18 @@ enum ContentElement {
 
 impl ContentElement {
     /// Returns the number of terminal rows this element occupies.
-    fn row_height(&self) -> u16 {
+    /// How many rows this element occupies in the document.
+    ///
+    /// In `usize`, deliberately: a wrapped paragraph is as tall as its line
+    /// count, which nothing bounds to the height of the terminal. Narrowing
+    /// here used to wrap around silently past 65535 rows and corrupt the row
+    /// arithmetic — the total height, the search offsets and the scrolling all
+    /// derive from this. The conversion to `u16` belongs where a value has
+    /// already been clipped to the viewport.
+    fn row_height(&self) -> usize {
         match self {
-            ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) => {
-                text.height() as u16
-            }
-            ContentElement::Image { height, .. } => *height,
+            Self::TextLine(text) | Self::ImagePlaceholder(text) => text.height(),
+            Self::Image { height, .. } => usize::from(*height),
         }
     }
 }
@@ -133,7 +139,7 @@ fn continuation_prefix(line: &Line<'_>) -> Span<'static> {
     if rest.starts_with(GUTTER) {
         // Keep the gutter, and its colour, on every folded row.
         let style = line.spans.first().map(|s| s.style).unwrap_or_default();
-        return Span::styled(format!("{}{}", indent, GUTTER), style);
+        return Span::styled(format!("{indent}{GUTTER}"), style);
     }
 
     const MARKERS: &[&str] = &["• ", "☑ ", "☐ ", "▎ ", "- ", "* "];
@@ -255,8 +261,7 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
                 let idx = remaining
                     .char_indices()
                     .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len());
+                    .map_or(remaining.len(), |(i, _)| i);
                 remaining.split_at(idx)
             } else {
                 (head, tail)
@@ -291,6 +296,71 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Point stdin back at the terminal when the document arrived through a pipe.
+///
+/// macOS only, because the defect is: with the document on stdin, crossterm
+/// falls back to `/dev/tty` for the keyboard, and `/dev/tty` is a *clone*
+/// device the kernel refuses to register with kqueue — `EVFILT_READ` returns
+/// `EINVAL`. mio's registration fails, `UnixInternalEventSource::new` returns
+/// an error crossterm swallows, and the first key read reports "Failed to
+/// initialize input reader", after the document has already been drawn.
+/// Opening the real device instead (`/dev/ttys004`) registers fine.
+///
+/// Linux is deliberately left alone: `/dev/tty` works with epoll there, and
+/// this swap would replace the process's *controlling* terminal with whatever
+/// terminal stdout happens to point at — not necessarily the same one.
+///
+/// Scope: this leaks the old descriptor 0 rather than restoring it, which is
+/// fine for mdr — the piped document has already been read into a file, one
+/// backend runs, and the process exits after it. It is not a routine something
+/// else should call.
+#[cfg(target_os = "macos")]
+fn reattach_stdin_to_terminal() {
+    use std::io::IsTerminal;
+
+    if io::stdin().is_terminal() {
+        return;
+    }
+
+    // `ttyname_r` rather than `ttyname`: POSIX does not require the latter to be
+    // thread-safe, and it returns a pointer into a static buffer.
+    let mut buffer = [0_i8; libc::PATH_MAX as usize];
+    // SAFETY: the buffer is owned here and its real length is passed, so
+    // `ttyname_r` cannot write past it.
+    let rc = unsafe {
+        libc::ttyname_r(
+            libc::STDOUT_FILENO,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if rc != 0 {
+        crate::vlog!("stdin not reattached: no terminal on stdout (ttyname_r: {rc})");
+        return;
+    }
+
+    // SAFETY: `ttyname_r` returned success, so the buffer holds a NUL-terminated
+    // path; the descriptor is closed unless it becomes stdin.
+    unsafe {
+        let fd = libc::open(buffer.as_ptr().cast(), libc::O_RDWR);
+        if fd < 0 {
+            crate::vlog!("stdin not reattached: {}", std::io::Error::last_os_error());
+            return;
+        }
+        if libc::dup2(fd, libc::STDIN_FILENO) < 0 {
+            crate::vlog!("stdin not reattached: {}", std::io::Error::last_os_error());
+        } else {
+            crate::vlog!(
+                "stdin reattached to {}",
+                std::ffi::CStr::from_ptr(buffer.as_ptr().cast()).to_string_lossy()
+            );
+        }
+        if fd != libc::STDIN_FILENO {
+            libc::close(fd);
+        }
+    }
+}
+
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&file_path)?;
     let toc_entries = toc::extract_toc(&content);
@@ -302,8 +372,20 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         return Err("tui backend requires a terminal (stdout is not a TTY)".into());
     }
 
-    // Setup terminal
+    // `cat doc.md | mdr --backend tui` leaves stdin on the pipe, and the keys
+    // have to come from somewhere else.
+    #[cfg(target_os = "macos")]
+    reattach_stdin_to_terminal();
+
+    // Setup terminal. Everything past this point runs with the terminal in raw
+    // mode and on the alternate screen, so the restore has to happen on every
+    // way out — including an early `?` and a panic, which a plain cleanup at the
+    // end of the function misses. A failure to read an event used to leave the
+    // user's shell raw and stuck on the alternate screen.
     enable_raw_mode()?;
+    // Armed here, not after the `execute!` below: that call can fail, and it
+    // would leave the terminal raw with nothing to put it back.
+    let _restore = TerminalRestore;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -316,14 +398,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // actually have something to draw.
     let needs_picker = document_needs_picker(&content);
     let rendered = build_content_elements(&content, &file_path, &None);
-    let watcher_rx = crate::core::watcher::watch_file(&file_path)?;
+    let watch = crate::core::watcher::watch_file(&file_path)?;
 
     let mut app = TuiApp {
         content,
         rendered,
         toc_entries,
         file_path,
-        watcher_rx,
+        watch,
         picker: None,
         picker_queried: false,
         content_width: 0,
@@ -356,8 +438,8 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui(f, &mut app))?;
 
         // Check for file changes
-        if app.watcher_rx.try_recv().is_ok() {
-            while app.watcher_rx.try_recv().is_ok() {}
+        if app.watch.changes().try_recv().is_ok() {
+            while app.watch.changes().try_recv().is_ok() {}
             if let Ok(new_content) = std::fs::read_to_string(&app.file_path) {
                 app.toc_entries = toc::extract_toc(&new_content);
                 if document_needs_picker(&new_content) {
@@ -412,6 +494,14 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                        KeyCode::Char('t') if is_theme_toggle(key.code, key.modifiers) => {
+                            // The terminal owns its background, so a theme here
+                            // is the colours code blocks are highlighted in.
+                            // They are baked into the spans when the document
+                            // is built, so the flip has to rebuild it.
+                            toggle_syntax_theme();
+                            rebuild_rendered(&mut app);
+                        }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.should_quit = true;
                         }
@@ -490,15 +580,27 @@ pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
+    // The terminal is restored by `_restore` going out of scope, here and on
+    // every early return above it.
     Ok(())
+}
+
+/// Puts the terminal back the way it was found, whatever happens on the way out.
+struct TerminalRestore;
+
+impl Drop for TerminalRestore {
+    fn drop(&mut self) {
+        // Nothing useful can be done about a failure here: the process is on its
+        // way out, and the message would land on a terminal that may still be
+        // raw. Each step is attempted regardless of the previous one's outcome.
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+    }
 }
 
 struct TuiApp {
@@ -506,7 +608,8 @@ struct TuiApp {
     rendered: Vec<ContentElement>,
     toc_entries: Vec<TocEntry>,
     file_path: PathBuf,
-    watcher_rx: Receiver<()>,
+    /// Kept for its lifetime, not only its channel: dropping it stops the watch.
+    watch: Watch,
     /// The terminal's image protocol, once it has been asked for. `None` means
     /// either "not asked yet" or "the terminal cannot display images"; the
     /// `picker_queried` flag tells the two apart.
@@ -558,12 +661,12 @@ fn compute_search_matches(elements: &[ContentElement], query: &str) -> Vec<usize
     let query_lower = query.to_lowercase();
     let mut row_offset: usize = 0;
     for element in elements {
-        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
-            if text.text().to_lowercase().contains(&query_lower) {
-                matches.push(row_offset);
-            }
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element
+            && text.text().to_lowercase().contains(&query_lower)
+        {
+            matches.push(row_offset);
         }
-        row_offset += element.row_height() as usize;
+        row_offset += element.row_height();
     }
     matches
 }
@@ -579,7 +682,7 @@ fn update_search_matches(app: &mut TuiApp) {
 
 /// Calculate the total number of terminal rows occupied by all content elements.
 fn total_content_rows(elements: &[ContentElement]) -> usize {
-    elements.iter().map(|e| e.row_height() as usize).sum()
+    elements.iter().map(ContentElement::row_height).sum()
 }
 
 fn ui(f: &mut Frame, app: &mut TuiApp) {
@@ -708,29 +811,43 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             app.search_matches.len()
         )
     } else {
-        " q: quit | Tab: switch focus | j/k: scroll | /: search | Space/PgDn: page down "
-            .to_string()
+        help_bar(usize::from(content_area.width.saturating_sub(2)))
     };
 
-    let help_area = Rect {
-        x: content_area.x + 1,
-        y: content_area.y + content_area.height - 1,
-        width: content_area
-            .width
-            .saturating_sub(2)
-            .min(bar_text.len() as u16),
-        height: 1,
-    };
+    // The bar is one row inside the content area's borders, so it needs both a
+    // row to sit on and a column to occupy: `y + height - 1` used to underflow
+    // and panic on a terminal reporting a height of zero, and `x + 1` lands
+    // outside an area no wider than its own borders.
+    //
+    // The width is a column count, so the bar is measured in columns rather
+    // than in `str::len` bytes, which overstate anything outside ASCII. That is
+    // visible, not merely pedantic: an accented search query used to give the
+    // bar two cells per character more than it draws, and its background was
+    // painted over them.
+    let available = content_area.width.saturating_sub(2);
+    if content_area.height > 0 && available > 0 {
+        // Clipped to the available columns while still `usize`, so the result
+        // is known to fit and the conversion cannot fail or saturate.
+        let wanted = Line::from(bar_text.as_str()).width();
+        let width = u16::try_from(wanted.min(usize::from(available)))
+            .expect("clipped to a u16 above, so it fits");
+        let help_area = Rect {
+            x: content_area.x + 1,
+            y: content_area.bottom() - 1,
+            width,
+            height: 1,
+        };
 
-    let bar_style = if app.search_mode {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::Rgb(40, 40, 40))
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let help_widget = Paragraph::new(bar_text).style(bar_style);
-    f.render_widget(help_widget, help_area);
+        let bar_style = if app.search_mode {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Rgb(40, 40, 40))
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let help_widget = Paragraph::new(bar_text).style(bar_style);
+        f.render_widget(help_widget, help_area);
+    }
 }
 
 /// Render content elements into the given area, handling scroll offset.
@@ -756,7 +873,7 @@ fn render_content_elements(
             break;
         }
 
-        let elem_height = element.row_height() as usize;
+        let elem_height = element.row_height();
         let current_absolute_row = absolute_row;
         absolute_row += elem_height;
 
@@ -853,12 +970,12 @@ fn find_heading_row(
     let mut row_offset: usize = 0;
 
     for element in elements {
-        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element {
-            if text.text().contains(search_text) {
-                return Some(row_offset);
-            }
+        if let ContentElement::TextLine(text) | ContentElement::ImagePlaceholder(text) = element
+            && text.text().contains(search_text)
+        {
+            return Some(row_offset);
         }
-        row_offset += element.row_height() as usize;
+        row_offset += element.row_height();
     }
 
     None
@@ -872,13 +989,11 @@ fn build_content_elements(
 ) -> Vec<ContentElement> {
     let text_lines = markdown_to_lines_with_images(content);
     let canonical_file = std::fs::canonicalize(file_path).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(file_path))
-            .unwrap_or_else(|_| file_path.clone())
+        std::env::current_dir().map_or_else(|_| file_path.clone(), |cwd| cwd.join(file_path))
     });
-    let base_dir = canonical_file
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    // A piped document lives in a temp file; its images do not.
+    let base_dir = crate::core::document_base_dir(&canonical_file);
+    let base_dir = base_dir.as_path();
 
     let mut elements = Vec::new();
     for item in text_lines {
@@ -892,12 +1007,12 @@ fn build_content_elements(
                     Ok(svg) => {
                         match rasterize_svg(&svg) {
                             Ok(dyn_img) => {
-                                if let Some(ref picker) = picker {
+                                if let Some(picker) = picker {
                                     let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
-                                    let aspect = img_h as f64 / img_w as f64;
+                                    let aspect = f64::from(img_h) / f64::from(img_w);
                                     let target_cols = 100u16;
                                     let target_rows =
-                                        ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                                        (f64::from(target_cols) * aspect / 2.0).ceil() as u16;
                                     let height = target_rows.clamp(4, 40);
 
                                     let protocol = Box::new(picker.new_resize_protocol(dyn_img));
@@ -922,15 +1037,15 @@ fn build_content_elements(
                 }
             }
             ParsedLine::ImageRef { alt, url } => {
-                if let Some(ref picker) = picker {
+                if let Some(picker) = picker {
                     match load_image(&url, base_dir) {
                         Ok(dyn_img) => {
                             // Calculate image height in rows. Use a reasonable default:
                             // Fill terminal width for readable images.
                             let (img_w, img_h) = (dyn_img.width(), dyn_img.height());
-                            let aspect = img_h as f64 / img_w as f64;
+                            let aspect = f64::from(img_h) / f64::from(img_w);
                             let target_cols = 100u16;
-                            let target_rows = ((target_cols as f64) * aspect / 2.0).ceil() as u16;
+                            let target_rows = (f64::from(target_cols) * aspect / 2.0).ceil() as u16;
                             let height = target_rows.clamp(4, 40);
 
                             let protocol = Box::new(picker.new_resize_protocol(dyn_img));
@@ -948,7 +1063,7 @@ fn build_content_elements(
                             };
                             elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
                                 Line::from(Span::styled(
-                                    format!("[Image: {}]", label),
+                                    format!("[Image: {label}]"),
                                     Style::default().fg(Color::Magenta).italic(),
                                 )),
                             )));
@@ -963,7 +1078,7 @@ fn build_content_elements(
                     };
                     elements.push(ContentElement::ImagePlaceholder(WrappedText::new(
                         Line::from(Span::styled(
-                            format!("[Image: {}]", label),
+                            format!("[Image: {label}]"),
                             Style::default().fg(Color::Magenta).italic(),
                         )),
                     )));
@@ -985,7 +1100,7 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
     ))));
     for line in source.lines() {
         elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
-            Span::styled(format!("│ {}", line), Style::default().fg(Color::Green)),
+            Span::styled(format!("│ {line}"), Style::default().fg(Color::Green)),
         ))));
     }
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(
@@ -994,18 +1109,39 @@ fn push_mermaid_fallback_code(elements: &mut Vec<ContentElement>, source: &str) 
     elements.push(ContentElement::TextLine(WrappedText::new(Line::from(""))));
 }
 
+/// What loading an image yields, however it was reached.
+type LoadedImage = Result<image::DynamicImage, Box<dyn std::error::Error>>;
+
 /// Load an image from a URL, data URI, or local file path.
 /// SVG files are rasterized via resvg/usvg before returning.
 fn load_image(
     url: &str,
     base_dir: &std::path::Path,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    load_image_with(url, base_dir, crate::core::offline(), &load_image_from_http)
+}
+
+/// The body of [`load_image`], with the setting and the fetch passed in.
+///
+/// `--offline` promises that mdr makes no network access at all, and this
+/// backend used to reach for a remote image anyway: `core::offline` was not
+/// even compiled for it. Both are parameters so a test can prove the promise by
+/// counting calls — rather than by pointing at a URL that happens to fail —
+/// without touching the process-wide flag the rest of the suite reads.
+fn load_image_with(
+    url: &str,
+    base_dir: &std::path::Path,
+    offline: bool,
+    fetch: &dyn Fn(&str) -> LoadedImage,
+) -> LoadedImage {
     if url.starts_with("data:") {
         // data: URI - decode base64
         load_image_from_data_uri(url)
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        // HTTP fetch
-        load_image_from_http(url)
+        if offline {
+            return Err("offline: remote images are not fetched".into());
+        }
+        fetch(url)
     } else {
         // Local file path (resolve relative to markdown file's directory)
         let path = if std::path::Path::new(url).is_absolute() {
@@ -1020,7 +1156,7 @@ fn load_image(
             return Err("path traversal blocked: image path escapes the project directory".into());
         }
         crate::core::image_validation::validate_image_file(&path)
-            .map_err(|e| format!("invalid image file: {}", e))?;
+            .map_err(|e| format!("invalid image file: {e}"))?;
         // SVG files need rasterization
         if path.extension().and_then(|e| e.to_str()) == Some("svg") {
             let svg_data = std::fs::read_to_string(&path)?;
@@ -1057,32 +1193,42 @@ fn load_image_from_data_uri(uri: &str) -> Result<image::DynamicImage, Box<dyn st
     Ok(img)
 }
 
-/// Rasterize an SVG string to a DynamicImage using resvg/usvg.
+/// Rasterize an SVG string to a `DynamicImage` using resvg/usvg.
 fn rasterize_svg(svg_data: &str) -> Result<image::DynamicImage, Box<dyn std::error::Error>> {
-    use std::sync::{Arc, OnceLock};
-
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
     let tree = usvg::Tree::from_str(svg_data, &options)?;
     let size = tree.size();
-    let width = size.width() as u32;
-    let height = size.height() as u32;
+    let (svg_w, svg_h) = (size.width(), size.height());
+
+    // The document being rendered is untrusted, and its declared size decided
+    // how large a buffer to allocate: an SVG claiming 100000x100000 asked for
+    // forty gigabytes. The three other rasterisation paths already cap a side at
+    // MAX_TEXTURE_SIZE; this one did not, and the terminal is the backend most
+    // likely to be pointed at a file someone else wrote.
+    const MAX_TEXTURE_SIZE: u32 = 8192;
+    let scale = if svg_w > MAX_TEXTURE_SIZE as f32 || svg_h > MAX_TEXTURE_SIZE as f32 {
+        let scale_w = MAX_TEXTURE_SIZE as f32 / svg_w;
+        let scale_h = MAX_TEXTURE_SIZE as f32 / svg_h;
+        scale_w.min(scale_h).min(1.0) // never scale up, only down
+    } else {
+        1.0
+    };
+
+    let width = (svg_w * scale) as u32;
+    let height = (svg_h * scale) as u32;
 
     if width == 0 || height == 0 {
         return Err("SVG has zero dimensions".into());
     }
 
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("Failed to create pixmap")?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
 
     // Convert RGBA pixmap to DynamicImage
     let img = image::RgbaImage::from_raw(width, height, pixmap.data().to_vec())
@@ -1114,7 +1260,7 @@ enum ParsedLine {
         alt: String,
         url: String,
     },
-    /// A mermaid diagram source extracted from a ```mermaid code block.
+    /// A mermaid diagram source extracted from a fenced `mermaid` code block.
     MermaidRef {
         source: String,
     },
@@ -1136,7 +1282,56 @@ fn document_needs_picker(content: &str) -> bool {
     })
 }
 
-/// Convert markdown content to a mix of styled text lines and image references.
+/// Whether a key press is the bare `t` that flips the theme.
+///
+/// Bare means bare: `Ctrl+T` and `Alt+T` are other people's shortcuts, and the
+/// other two backends already refuse them. Shift is not tested because `T` is a
+/// different `KeyCode::Char` and never reaches here.
+fn is_theme_toggle(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Char('t')
+        && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+/// Shortcut hints for the bottom bar, most worth showing first.
+///
+/// The bar is drawn inside the content area, which the table of contents and
+/// the borders leave about 32 columns narrower than the terminal — so on a
+/// standard 80-column terminal there is room for four of these, not all six.
+const HELP_HINTS: &[&str] = &[
+    "q: quit",
+    "j/k: scroll",
+    "/: search",
+    "t: theme",
+    "Tab: focus",
+    "Space/PgDn: page",
+];
+
+/// As many hints as fit in `columns`, joined.
+///
+/// Whole hints are dropped rather than the line being cut: the bar used to be
+/// one fixed string clipped to the available width, which on an 80-column
+/// terminal ended mid-item and hid everything after it — the theme toggle
+/// included.
+fn help_bar(columns: usize) -> String {
+    let mut bar = String::new();
+    for hint in HELP_HINTS {
+        let separator = if bar.is_empty() { 0 } else { 3 };
+        // The finished bar is padded with one space at each end.
+        if str_width(&bar) + separator + str_width(hint) + 2 > columns {
+            break;
+        }
+        if !bar.is_empty() {
+            bar.push_str(" | ");
+        }
+        bar.push_str(hint);
+    }
+    if bar.is_empty() {
+        bar
+    } else {
+        format!(" {bar} ")
+    }
+}
+
 /// The bottom edge of a code block frame.
 const CODE_FRAME_BOTTOM: &str = "└─────────────────────────────────────────┘";
 
@@ -1144,7 +1339,7 @@ const CODE_FRAME_BOTTOM: &str = "└──────────────�
 /// A named language used to leave the box open on the right.
 fn code_frame_top(label: &str) -> String {
     let inner = str_width(CODE_FRAME_BOTTOM).saturating_sub(2);
-    let opening = format!("─ {} ", label);
+    let opening = format!("─ {label} ");
     let fill = inner.saturating_sub(str_width(&opening));
     format!("┌{}{}┐", opening, "─".repeat(fill))
 }
@@ -1175,58 +1370,138 @@ fn terminal_background_is_light(colorfgbg: Option<&str>) -> Option<bool> {
 /// An explicit setting always wins; `auto` asks the terminal and falls back to
 /// dark, which is what the overwhelming majority of terminals running a pager
 /// actually are.
-fn syntax_theme_name(setting: crate::core::Theme, colorfgbg: Option<&str>) -> &'static str {
-    let light = match setting {
+/// Whether code blocks should be highlighted for a light background.
+fn syntax_prefers_light(setting: crate::core::Theme, colorfgbg: Option<&str>) -> bool {
+    match setting {
         crate::core::Theme::Light => true,
         crate::core::Theme::Dark => false,
         crate::core::Theme::Auto => terminal_background_is_light(colorfgbg).unwrap_or(false),
-    };
-    if light {
-        "InspiredGitHub"
-    } else {
-        "base16-ocean.dark"
     }
+}
+
+const LIGHT_SYNTAX_THEME: &str = "InspiredGitHub";
+const DARK_SYNTAX_THEME: &str = "base16-ocean.dark";
+
+/// Which of the two syntax themes is in use right now.
+///
+/// Resolved once from `--theme` and the terminal background, then flipped by
+/// `t`. It is a global because [`highlight_code`] runs deep inside the document
+/// builder, which carries no application state — the same reason the assets
+/// below are one.
+fn syntax_is_light() -> &'static std::sync::atomic::AtomicBool {
+    use std::sync::OnceLock;
+    static CURRENT: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    CURRENT.get_or_init(|| {
+        std::sync::atomic::AtomicBool::new(syntax_prefers_light(
+            crate::core::theme(),
+            std::env::var("COLORFGBG").ok().as_deref(),
+        ))
+    })
+}
+
+/// Flip the syntax theme, and report the one now in use.
+///
+/// The terminal owns its own background, so this is the whole of what a theme
+/// means here: the colours code blocks are highlighted in. The caller has to
+/// rebuild the document, because the colours are baked into the spans when it
+/// is built.
+fn toggle_syntax_theme() -> bool {
+    flip(syntax_is_light())
+}
+
+/// Flip a flag and return its new value.
+///
+/// Takes the flag rather than reaching for the global one, so a test can
+/// exercise it without changing what every other test in the binary is
+/// highlighting with.
+fn flip(flag: &std::sync::atomic::AtomicBool) -> bool {
+    use std::sync::atomic::Ordering;
+    let flipped = !flag.load(Ordering::Relaxed);
+    flag.store(flipped, Ordering::Relaxed);
+    flipped
 }
 
 /// Syntax highlighting assets, built once. `SyntaxSet` parsing is the expensive
 /// part, so it is shared across every code block of every reload.
-fn syntax_assets() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::Theme) {
+fn syntax_assets() -> &'static SyntaxAssets {
     use std::sync::OnceLock;
-    static ASSETS: OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::Theme)> =
-        OnceLock::new();
+    static ASSETS: OnceLock<SyntaxAssets> = OnceLock::new();
     ASSETS.get_or_init(|| {
         let syntaxes = syntect::parsing::SyntaxSet::load_defaults_newlines();
         let mut themes = syntect::highlighting::ThemeSet::load_defaults();
-        let wanted = syntax_theme_name(
-            crate::core::theme(),
-            std::env::var("COLORFGBG").ok().as_deref(),
-        );
-        let theme = themes
+        // Both are kept, not just the one wanted at startup: `t` switches
+        // between them, and reloading the set to do that would cost as much as
+        // the parse this cache exists to avoid.
+        let dark = themes.themes.remove(DARK_SYNTAX_THEME).unwrap_or_default();
+        let light = themes
             .themes
-            .remove(wanted)
-            .or_else(|| themes.themes.remove("base16-ocean.dark"))
-            .unwrap_or_default();
-        (syntaxes, theme)
+            .remove(LIGHT_SYNTAX_THEME)
+            .unwrap_or_else(|| dark.clone());
+        SyntaxAssets {
+            syntaxes,
+            light,
+            dark,
+        }
     })
+}
+
+struct SyntaxAssets {
+    syntaxes: syntect::parsing::SyntaxSet,
+    light: syntect::highlighting::Theme,
+    dark: syntect::highlighting::Theme,
+}
+
+impl SyntaxAssets {
+    /// The theme for the colour scheme currently in use.
+    fn theme(&self) -> &syntect::highlighting::Theme {
+        if syntax_is_light().load(std::sync::atomic::Ordering::Relaxed) {
+            &self.light
+        } else {
+            &self.dark
+        }
+    }
+}
+
+/// The background a code block paints behind itself.
+///
+/// A syntect theme picks its foregrounds for its own background, and the
+/// terminal's is whatever the reader set. Without this the light theme is dark
+/// text on a dark terminal — legible only by accident — and the dark theme has
+/// the mirror problem on a light terminal. Painting the theme's own background
+/// makes the block self-contained, which is also what `gui` and `web` do with
+/// their `code_bg`.
+fn syntax_background() -> Option<Color> {
+    let bg = syntax_assets().theme().settings.background?;
+    Some(Color::Rgb(bg.r, bg.g, bg.b))
+}
+
+/// The colour a code block draws text in when syntect has nothing to say about
+/// it — an unlabelled fence, an unknown language, a highlighting failure.
+fn syntax_foreground() -> Option<Color> {
+    let fg = syntax_assets().theme().settings.foreground?;
+    Some(Color::Rgb(fg.r, fg.g, fg.b))
 }
 
 /// Colour one code block, one `Vec<Span>` per source line (#59).
 ///
-/// Falls back to a single uncoloured span per line when the language is unknown
-/// or highlighting fails, so an exotic fence never costs more than colour.
+/// Falls back to a single span per line when the language is unknown or
+/// highlighting fails, so an exotic fence never costs more than colour. That
+/// fallback still takes the theme's own colours: a fence with no language is
+/// the ordinary case, not an exotic one, and leaving it on the terminal's
+/// colours would put unpainted text inside a painted block.
 fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
     let plain = |code: &str| -> Vec<Vec<Span<'static>>> {
+        let mut style = Style::default().fg(syntax_foreground().unwrap_or(Color::Green));
+        if let Some(bg) = syntax_background() {
+            style = style.bg(bg);
+        }
         code.lines()
-            .map(|l| {
-                vec![Span::styled(
-                    l.to_string(),
-                    Style::default().fg(Color::Green),
-                )]
-            })
+            .map(|l| vec![Span::styled(l.to_string(), style)])
             .collect()
     };
 
-    let (syntaxes, theme) = syntax_assets();
+    let assets = syntax_assets();
+    let (syntaxes, theme) = (&assets.syntaxes, assets.theme());
     let Some(syntax) = syntaxes
         .find_syntax_by_token(lang)
         .or_else(|| syntaxes.find_syntax_by_extension(lang))
@@ -1234,21 +1509,23 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Vec<Span<'static>>> {
         return plain(code);
     };
 
+    let background = syntax_background();
     let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
     let mut out = Vec::new();
     for line in code.lines() {
         // `load_defaults_newlines` expects the newline to be present.
-        let with_newline = format!("{}\n", line);
+        let with_newline = format!("{line}\n");
         match highlighter.highlight_line(&with_newline, syntaxes) {
             Ok(ranges) => out.push(
                 ranges
                     .into_iter()
                     .map(|(style, text)| {
                         let c = style.foreground;
-                        Span::styled(
-                            text.trim_end_matches('\n').to_string(),
-                            Style::default().fg(Color::Rgb(c.r, c.g, c.b)),
-                        )
+                        let mut span_style = Style::default().fg(Color::Rgb(c.r, c.g, c.b));
+                        if let Some(bg) = background {
+                            span_style = span_style.bg(bg);
+                        }
+                        Span::styled(text.trim_end_matches('\n').to_string(), span_style)
                     })
                     .filter(|s| !s.content.is_empty())
                     .collect(),
@@ -1265,7 +1542,7 @@ struct BlockCtx {
     indent: usize,
     quote: usize,
     /// Inside a tight list, paragraphs must not be separated by a blank line —
-    /// that is what "tight" means in CommonMark.
+    /// that is what "tight" means in `CommonMark`.
     tight: bool,
 }
 
@@ -1407,12 +1684,29 @@ impl MdRenderer {
                     });
                     return;
                 }
-                let gutter = Style::default().fg(Color::DarkGray);
+                // The block paints the syntax theme's own background, so the
+                // frame and every line have to carry it too — otherwise the
+                // panel is a ragged strip of colour behind the text only.
+                let background = syntax_background();
+                let mut gutter = Style::default().fg(Color::DarkGray);
+                if let Some(bg) = background {
+                    gutter = gutter.bg(bg);
+                }
+                let width = str_width(CODE_FRAME_BOTTOM);
                 let label = if lang.is_empty() { "code" } else { &lang };
                 self.push(ctx, vec![Span::styled(code_frame_top(label), gutter)]);
                 for mut spans in highlight_code(code.literal.trim_end_matches('\n'), &lang) {
                     let mut line = vec![Span::styled("│ ", gutter)];
                     line.append(&mut spans);
+                    // Pad to the frame width so the background forms a
+                    // rectangle. A line longer than the frame is left alone:
+                    // truncating it would hide code.
+                    let drawn: usize = line.iter().map(|s| str_width(&s.content)).sum();
+                    if let Some(missing) = width.checked_sub(drawn)
+                        && missing > 0
+                    {
+                        line.push(Span::styled(" ".repeat(missing), gutter));
+                    }
                     self.push(ctx, line);
                 }
                 self.push(ctx, vec![Span::styled(CODE_FRAME_BOTTOM, gutter)]);
@@ -1459,9 +1753,9 @@ impl MdRenderer {
             NodeValue::Table(table) => self.table(node, ctx, &table.alignments),
 
             NodeValue::FootnoteDefinition(def) => {
-                let mut sub = MdRenderer::new();
+                let mut sub = Self::new();
                 sub.children(node, BlockCtx::default());
-                self.footnotes.push((def.name.clone(), sub.out));
+                self.footnotes.push((def.name, sub.out));
             }
 
             NodeValue::HtmlBlock(html) => {
@@ -1540,7 +1834,7 @@ impl MdRenderer {
         let mut widths = vec![0usize; columns];
         for (_, cells) in &rows {
             for (i, cell) in cells.iter().enumerate() {
-                let w: usize = cell.iter().map(|s| s.width()).sum();
+                let w: usize = cell.iter().map(ratatui::prelude::Span::width).sum();
                 widths[i] = widths[i].max(w);
             }
         }
@@ -1554,7 +1848,7 @@ impl MdRenderer {
                 }
                 let empty = Vec::new();
                 let cell = cells.get(col).unwrap_or(&empty);
-                let used: usize = cell.iter().map(|s| s.width()).sum();
+                let used: usize = cell.iter().map(ratatui::prelude::Span::width).sum();
                 let pad = width.saturating_sub(used);
                 let align = alignments
                     .get(col)
@@ -1607,7 +1901,7 @@ impl MdRenderer {
                 let mut body = body.into_iter();
                 if let Some(ParsedLine::Text(first)) = body.next() {
                     let mut spans = vec![Span::styled(
-                        format!("[{}] ", name),
+                        format!("[{name}] "),
                         Style::default().fg(Color::Yellow).bold(),
                     )];
                     spans.extend(first.spans);
@@ -1706,7 +2000,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
     match value {
         NodeValue::Text(text) => out.push(Span::styled(text.to_string(), style)),
         NodeValue::Code(code) => out.push(Span::styled(
-            code.literal.clone(),
+            code.literal,
             style.fg(Color::Green).bg(Color::Rgb(40, 40, 40)),
         )),
         NodeValue::Emph => descend(node, style.italic(), out),
@@ -1725,7 +2019,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
                 alt
             };
             out.push(Span::styled(
-                format!("[{}]", label),
+                format!("[{label}]"),
                 style.fg(Color::Magenta).italic(),
             ));
         }
@@ -1734,7 +2028,7 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
             style.fg(Color::Yellow),
         )),
         NodeValue::HtmlInline(html) => {
-            out.push(Span::styled(html.clone(), style.fg(Color::DarkGray)))
+            out.push(Span::styled(html, style.fg(Color::DarkGray)));
         }
         NodeValue::Escaped => descend(node, style, out),
         _ => descend(node, style, out),
@@ -1753,7 +2047,7 @@ fn descend<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'static>>
 /// terminal, the table of contents and the two graphical backends agree on the
 /// structure of the document (#59).
 fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
-    use comrak::{parse_document, Arena, Options};
+    use comrak::{Arena, Options, parse_document};
 
     let arena = Arena::new();
     let mut options = Options::default();
@@ -1773,6 +2067,115 @@ fn markdown_to_lines_with_images(content: &str) -> Vec<ParsedLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an app with just enough state to draw a frame.
+    fn app_for_drawing(content: &str) -> TuiApp {
+        let (_tx, watch) = Watch::detached();
+        TuiApp {
+            content: content.to_string(),
+            rendered: build_content_elements(content, &PathBuf::from("t.md"), &None),
+            toc_entries: crate::core::toc::extract_toc(content),
+            file_path: PathBuf::from("t.md"),
+            watch,
+            picker: None,
+            picker_queried: true,
+            content_width: 0,
+            scroll_offset: 0,
+            toc_selected: 0,
+            focus_toc: false,
+            should_quit: false,
+            search_mode: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_idx: 0,
+        }
+    }
+
+    /// How many cells on the bottom row carry the search bar's background.
+    fn search_bar_width(query: &str) -> usize {
+        let mut app = app_for_drawing("# Titre\n\nDu texte.\n");
+        app.search_mode = true;
+        app.search_query = query.to_string();
+
+        let backend = ratatui::backend::TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom = buffer.area.height - 1;
+        (0..buffer.area.width)
+            .filter(|x| buffer[(*x, bottom)].style().bg == Some(Color::Rgb(40, 40, 40)))
+            .count()
+    }
+
+    #[test]
+    fn an_oversized_svg_is_scaled_down_before_it_is_rasterised() {
+        // The declared size used to decide the buffer size outright, so a
+        // document could ask for an allocation of any size it liked.
+        let huge = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40000" height="20000"><rect width="10" height="10"/></svg>"#;
+        let img = rasterize_svg(huge).expect("an oversized SVG must still render");
+        assert!(
+            img.width() <= 8192 && img.height() <= 8192,
+            "expected a capped surface, got {}x{}",
+            img.width(),
+            img.height()
+        );
+        assert!(
+            img.width() > 0 && img.height() > 0,
+            "the aspect ratio must survive the scaling"
+        );
+
+        // A small one is untouched: the cap only ever scales down.
+        let small = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="10" height="10"/></svg>"#;
+        let img = rasterize_svg(small).expect("a small SVG must render");
+        assert_eq!((img.width(), img.height()), (40, 20));
+    }
+
+    #[test]
+    fn a_document_taller_than_u16_keeps_its_real_height() {
+        // A wrapped paragraph is as tall as its line count, which nothing bounds
+        // to the terminal. `row_height` used to narrow that to `u16`, so a very
+        // long document wrapped around past 65535 rows and every offset derived
+        // from it — total height, search matches, scrolling — went wrong.
+        let tall = u16::MAX as usize + 10;
+        let mut text = WrappedText::new(Line::from("x"));
+        text.lines = vec![Line::from("x"); tall];
+        let elements = vec![ContentElement::TextLine(text)];
+
+        assert_eq!(elements[0].row_height(), tall);
+        assert_eq!(
+            total_content_rows(&elements),
+            tall,
+            "the document's height must survive being taller than a u16"
+        );
+    }
+
+    #[test]
+    fn the_bottom_bar_is_measured_in_columns_not_bytes() {
+        // Two queries of the same length on screen, one outside ASCII. The bar
+        // used to be sized from `str::len`, so the accented one claimed two
+        // extra cells per character and painted its background over them.
+        let ascii = search_bar_width("aa");
+        let accented = search_bar_width("éé");
+        assert!(ascii > 0, "the search bar should be drawn at all");
+        assert_eq!(
+            ascii, accented,
+            "two queries that are the same width on screen must fill the same cells"
+        );
+    }
+
+    #[test]
+    fn drawing_into_a_terminal_with_no_rows_does_not_panic() {
+        // A pty that reports 0x0 — `script -q /dev/null mdr --backend tui f.md`
+        // on macOS is one — used to underflow the bottom bar's row and abort.
+        let mut app = app_for_drawing("# Title\n\nText.\n");
+        for (w, h) in [(0, 0), (1, 0), (0, 1), (1, 1), (2, 1), (2, 2), (3, 1)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| ui(f, &mut app)).unwrap();
+        }
+    }
+
     use std::io::Write;
 
     #[test]
@@ -1844,7 +2247,7 @@ mod tests {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><circle cx="25" cy="25" r="20" fill="blue"/></svg>"#;
         let b64 =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg.as_bytes());
-        let data_uri = format!("data:image/svg+xml;base64,{}", b64);
+        let data_uri = format!("data:image/svg+xml;base64,{b64}");
 
         let result = load_image(&data_uri, std::path::Path::new("."));
         assert!(
@@ -1880,8 +2283,7 @@ mod tests {
             .expect("Should have a MermaidRef");
         assert!(
             mermaid_source.contains("graph LR"),
-            "MermaidRef should contain the mermaid source, got: {}",
-            mermaid_source
+            "MermaidRef should contain the mermaid source, got: {mermaid_source}"
         );
         assert!(
             mermaid_source.contains("A-->B"),
@@ -2011,13 +2413,11 @@ mod tests {
         let line = Line::from("alpha beta gamma");
         for width in 0..6 {
             let out = wrap_line(&line, width);
-            assert!(!out.is_empty(), "width {} produced no line at all", width);
+            assert!(!out.is_empty(), "width {width} produced no line at all");
             let joined: String = out.iter().map(|l| plain_text(l)).collect();
             assert!(
                 joined.replace(' ', "").contains("alphabetagamma"),
-                "width {} lost text: {:?}",
-                width,
-                joined
+                "width {width} lost text: {joined:?}"
             );
         }
     }
@@ -2034,13 +2434,11 @@ mod tests {
         let second = plain_text(&out[1]);
         assert!(
             second.starts_with("    "),
-            "continuation must line up under the item text, got {:?}",
-            second
+            "continuation must line up under the item text, got {second:?}"
         );
         assert!(
             !second.contains('\u{2022}'),
-            "the bullet must not be repeated: {:?}",
-            second
+            "the bullet must not be repeated: {second:?}"
         );
     }
 
@@ -2069,9 +2467,7 @@ mod tests {
         let wrapped = total_content_rows(&elements);
         assert!(
             wrapped > unwrapped,
-            "wrapping must be reflected in the scroll height ({} -> {})",
-            unwrapped,
-            wrapped
+            "wrapping must be reflected in the scroll height ({unwrapped} -> {wrapped})"
         );
     }
 
@@ -2089,18 +2485,17 @@ mod tests {
         // above it, otherwise jumping to a match scrolls to the wrong place.
         let mut expected = 0usize;
         for element in &elements {
-            if let ContentElement::TextLine(text) = element {
-                if text.text().contains("needle") {
-                    break;
-                }
+            if let ContentElement::TextLine(text) = element
+                && text.text().contains("needle")
+            {
+                break;
             }
-            expected += element.row_height() as usize;
+            expected += element.row_height();
         }
         assert_eq!(matches[0], expected);
         assert!(
             expected >= 4,
-            "the wrapped paragraph should push the match down, got {}",
-            expected
+            "the wrapped paragraph should push the match down, got {expected}"
         );
     }
 
@@ -2256,19 +2651,15 @@ mod fidelity_tests {
             "a-very-long-language-name-indeed",
         ] {
             let top = code_frame_top(label);
-            assert!(top.starts_with('┌'), "{:?}", top);
+            assert!(top.starts_with('┌'), "{top:?}");
             assert!(
                 top.ends_with('┐'),
-                "top edge left open for {:?}: {:?}",
-                label,
-                top
+                "top edge left open for {label:?}: {top:?}"
             );
             assert_eq!(
                 str_width(&top),
                 str_width(CODE_FRAME_BOTTOM),
-                "top and bottom edges must line up for {:?}: {:?}",
-                label,
-                top
+                "top and bottom edges must line up for {label:?}: {top:?}"
             );
         }
     }
@@ -2303,30 +2694,54 @@ mod fidelity_tests {
     fn an_explicit_theme_always_wins_over_the_terminal() {
         use crate::core::Theme;
         // A light terminal, overridden to dark, and the other way round.
-        assert_eq!(
-            syntax_theme_name(Theme::Dark, Some("0;15")),
-            "base16-ocean.dark"
+        assert!(
+            !syntax_prefers_light(Theme::Dark, Some("0;15")),
+            "an explicit dark theme must not follow a light terminal"
         );
-        assert_eq!(
-            syntax_theme_name(Theme::Light, Some("15;0")),
-            "InspiredGitHub"
+        assert!(
+            syntax_prefers_light(Theme::Light, Some("15;0")),
+            "an explicit light theme must not follow a dark terminal"
         );
     }
 
     #[test]
     fn auto_follows_the_terminal_and_falls_back_to_dark() {
         use crate::core::Theme;
-        assert_eq!(
-            syntax_theme_name(Theme::Auto, Some("0;15")),
-            "InspiredGitHub"
-        );
-        assert_eq!(
-            syntax_theme_name(Theme::Auto, Some("15;0")),
-            "base16-ocean.dark"
-        );
+        assert!(syntax_prefers_light(Theme::Auto, Some("0;15")));
+        assert!(!syntax_prefers_light(Theme::Auto, Some("15;0")));
         // A terminal that says nothing must not cost a query, and dark is the
         // safe assumption for a pager.
-        assert_eq!(syntax_theme_name(Theme::Auto, None), "base16-ocean.dark");
+        assert!(!syntax_prefers_light(Theme::Auto, None));
+    }
+
+    #[test]
+    fn the_theme_toggle_flips_and_reports_the_one_in_use() {
+        // `t` has to change something in the terminal too, or the shortcut
+        // would be listed and do nothing. What it changes is the syntax
+        // highlighting: the terminal owns the rest of its colours.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for start in [true, false] {
+            let flag = AtomicBool::new(start);
+            assert_eq!(flip(&flag), !start, "each press must flip the theme");
+            assert_eq!(
+                flag.load(Ordering::Relaxed),
+                !start,
+                "the reported theme must be the one actually stored"
+            );
+            assert_eq!(flip(&flag), start, "a second press must come back");
+        }
+    }
+
+    #[test]
+    fn the_two_syntax_themes_are_both_kept_in_the_cache() {
+        // Only one used to be loaded, chosen at startup. Switching would have
+        // meant reloading the set, which is the parse this cache exists to
+        // avoid — so both are resolved once and picked between.
+        let assets = syntax_assets();
+        assert_ne!(
+            assets.light.name, assets.dark.name,
+            "the light and dark themes must be two different themes"
+        );
     }
 
     /// Both theme names must exist in syntect's defaults, or highlighting would
@@ -2334,7 +2749,7 @@ mod fidelity_tests {
     #[test]
     fn both_themes_exist_in_syntect_defaults() {
         let themes = syntect::highlighting::ThemeSet::load_defaults();
-        for name in ["base16-ocean.dark", "InspiredGitHub"] {
+        for name in [DARK_SYNTAX_THEME, LIGHT_SYNTAX_THEME] {
             assert!(
                 themes.themes.contains_key(name),
                 "syntect has no theme {:?}; available: {:?}",
@@ -2346,7 +2761,7 @@ mod fidelity_tests {
 
     // --- regressions found while writing the AST renderer ---
 
-    /// CommonMark "tight" vs "loose": a list written without blank lines
+    /// `CommonMark` "tight" vs "loose": a list written without blank lines
     /// between its items must not gain any, and one written with them must
     /// keep them. Both directions broke at different points of the rewrite.
     #[test]
@@ -2355,17 +2770,12 @@ mod fidelity_tests {
         let blanks = tight.iter().filter(|l| l.trim().is_empty()).count();
         assert_eq!(
             blanks, 0,
-            "a tight list must not gain blank lines: {:?}",
-            tight
+            "a tight list must not gain blank lines: {tight:?}"
         );
 
         let loose = rendered("- un\n\n- deux\n\n- trois\n");
         let blanks = loose.iter().filter(|l| l.trim().is_empty()).count();
-        assert!(
-            blanks >= 2,
-            "a loose list must keep its spacing: {:?}",
-            loose
-        );
+        assert!(blanks >= 2, "a loose list must keep its spacing: {loose:?}");
     }
 
     /// A list nested inside a tight list must not add spacing of its own.
@@ -2374,15 +2784,13 @@ mod fidelity_tests {
         let lines = rendered("- un\n- deux\n  - imbriqué\n- trois\n");
         assert!(
             !lines.iter().any(|l| l.trim().is_empty()),
-            "no blank line belongs inside a tight list: {:?}",
-            lines
+            "no blank line belongs inside a tight list: {lines:?}"
         );
         assert!(
             lines
                 .iter()
                 .any(|l| l.starts_with("  ") && l.contains("imbriqué")),
-            "the nested item must keep its indent: {:?}",
-            lines
+            "the nested item must keep its indent: {lines:?}"
         );
     }
 
@@ -2411,18 +2819,11 @@ mod fidelity_tests {
         for raw in ["**", "~~", "`", "](", "http://x"] {
             assert!(
                 !joined.contains(raw),
-                "raw {:?} reached the screen: {:?}",
-                raw,
-                joined
+                "raw {raw:?} reached the screen: {joined:?}"
             );
         }
         for word in ["b", "c", "d", "e", "f", "end"] {
-            assert!(
-                joined.contains(word),
-                "{:?} was dropped: {:?}",
-                word,
-                joined
-            );
+            assert!(joined.contains(word), "{word:?} was dropped: {joined:?}");
         }
     }
 
@@ -2435,7 +2836,7 @@ mod fidelity_tests {
             .find(|l| l.matches('x').count() == 3)
             .expect("body row");
         let cells: Vec<&str> = body.split('│').collect();
-        assert_eq!(cells.len(), 3, "expected three cells: {:?}", body);
+        assert_eq!(cells.len(), 3, "expected three cells: {body:?}");
         assert!(cells[0].starts_with('x'), "left column: {:?}", cells[0]);
         assert!(
             cells[2].trim_start().ends_with('x'),
@@ -2451,27 +2852,235 @@ mod fidelity_tests {
             let lines = rendered(md);
             assert!(
                 lines.iter().any(|l| l.trim() == title),
-                "expected a line holding just {:?}, got {:?}",
-                title,
-                lines
+                "expected a line holding just {title:?}, got {lines:?}"
             );
             assert!(
                 !lines.iter().any(|l| l.contains('#')),
-                "the hashes must not reach the screen, got {:?}",
-                lines
+                "the hashes must not reach the screen, got {lines:?}"
             );
         }
     }
 
     // #59, symptom 2: code blocks have no syntax highlighting.
     #[test]
+    fn offline_mode_makes_no_request_at_all() {
+        // `--offline` says "never access the network". This backend used to
+        // fetch anyway — `core::offline` was not even compiled for it — so the
+        // documentation promised something the code did not do. Counting the
+        // calls is the only way to show none were made; a URL that fails would
+        // pass either way.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let fetch = |_: &str| -> LoadedImage {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("should never be reached".into())
+        };
+
+        let result = load_image_with(
+            "https://example.com/badge.svg",
+            std::path::Path::new("/"),
+            true,
+            &fetch,
+        );
+
+        assert!(result.is_err(), "a remote image cannot load while offline");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "offline mode must not reach the network"
+        );
+    }
+
+    #[test]
+    fn a_remote_image_is_fetched_when_online() {
+        // The other half of the contract: the refusal above is the flag, not a
+        // backend that never fetches.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let fetch = |_: &str| -> LoadedImage {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err("no network in a test".into())
+        };
+
+        let _ = load_image_with(
+            "https://example.com/badge.svg",
+            std::path::Path::new("/"),
+            false,
+            &fetch,
+        );
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the fetch should be used");
+    }
+
+    #[test]
+    fn only_a_bare_t_flips_the_theme() {
+        // `gui` refuses a modifier on this binding, and the terminal has to
+        // agree: Ctrl+T and Alt+T belong to whoever else wants them.
+        assert!(is_theme_toggle(KeyCode::Char('t'), KeyModifiers::NONE));
+        for modifier in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        ] {
+            assert!(
+                !is_theme_toggle(KeyCode::Char('t'), modifier),
+                "{modifier:?}+t must not flip the theme"
+            );
+        }
+        assert!(!is_theme_toggle(KeyCode::Char('q'), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn an_unlabelled_fence_is_painted_like_a_highlighted_one() {
+        // The fallback used to be a bare green with no background, so the most
+        // ordinary block of all — a fence with no language — sat unpainted
+        // inside a painted frame.
+        for code in ["plain text\n", "some code\n"] {
+            for lang in ["", "wharrgarbl"] {
+                for line in highlight_code(code, lang) {
+                    for span in line {
+                        assert!(
+                            span.style.bg.is_some(),
+                            "a {lang:?} fence must be painted like any other"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_bar_offers_the_theme_toggle_on_a_standard_terminal() {
+        // 80 columns of terminal leave the bar about 48. A fixed string of all
+        // six hints is 78, so the toggle used to be clipped away exactly where
+        // most people would have looked for it.
+        let bar = help_bar(48);
+        assert!(
+            bar.contains("t: theme"),
+            "the theme toggle must survive a standard terminal: {bar:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_bar_drops_whole_hints_and_never_overflows() {
+        for columns in 0..100 {
+            let bar = help_bar(columns);
+            assert!(
+                str_width(&bar) <= columns,
+                "{columns} columns produced a bar of {}: {bar:?}",
+                str_width(&bar)
+            );
+            // Whole hints only: anything shown must be shown in full.
+            for hint in HELP_HINTS {
+                let shown = bar.contains(hint);
+                let partial = !shown
+                    && hint
+                        .split_once(':')
+                        .is_some_and(|(key, _)| bar.contains(&format!("{key}:")));
+                assert!(!partial, "{hint:?} is cut short in {bar:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_terminal_gets_every_hint() {
+        let bar = help_bar(200);
+        for hint in HELP_HINTS {
+            assert!(bar.contains(hint), "{hint:?} missing from {bar:?}");
+        }
+    }
+
+    #[test]
+    fn a_code_block_paints_a_rectangular_panel_at_the_frame_width() {
+        // A syntect theme picks its foregrounds for its own background. Without
+        // one painted behind them, `--theme light` is dark text on whatever the
+        // terminal happens to be — which on a dark terminal is barely legible.
+        //
+        // The rectangle is only claimed at the frame's own width, which is what
+        // this checks: the lines as built. A viewport narrower than the frame
+        // folds them like any other line, and a source line longer than the
+        // frame is deliberately left wider rather than truncated. What survives
+        // both is the painting, which is the part that matters — see the test
+        // below.
+        let md = "```rust\nfn main() {\n    let x: u32 = 42;\n}\n```\n";
+        let block: Vec<Line<'static>> = markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => Some(line),
+                _ => None,
+            })
+            .filter(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.starts_with('┌') || text.starts_with('│') || text.starts_with('└')
+            })
+            .collect();
+        assert!(
+            block.len() >= 5,
+            "expected a frame and three code lines, got {}",
+            block.len()
+        );
+
+        let expected = str_width(CODE_FRAME_BOTTOM);
+        for line in &block {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(
+                str_width(&text),
+                expected,
+                "every line of the block must be the frame's width, got {text:?}"
+            );
+            for span in &line.spans {
+                assert!(
+                    span.style.bg.is_some(),
+                    "every span of the block must be painted, bare one in {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_stays_painted_once_the_lines_are_folded() {
+        // The panel is built at the frame's width, but it is drawn through
+        // `wrap_line`. Folding must not hand a line back to the terminal's own
+        // colours, or a narrow window would undo the legibility the painting is
+        // there for.
+        let md = "```rust\nfn main() { let a_rather_long_identifier = 42; }\n```\n";
+        let block: Vec<Line<'static>> = markdown_to_lines_with_images(md)
+            .into_iter()
+            .filter_map(|item| match item {
+                ParsedLine::Text(line) => Some(line),
+                _ => None,
+            })
+            .filter(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.starts_with('│')
+            })
+            .collect();
+        assert!(!block.is_empty(), "expected at least one code line");
+
+        for width in [20, 30, 43] {
+            for line in &block {
+                let folded = wrap_line(line, width);
+                assert!(folded.len() > 1 || line.width() <= width, "expected a fold");
+                for piece in folded {
+                    for span in piece.spans {
+                        assert!(
+                            span.content.trim().is_empty() || span.style.bg.is_some(),
+                            "a fold at {width} columns lost the painting: {:?}",
+                            span.content
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_code_block_is_syntax_highlighted() {
         let md = "```rust\nfn main() { let x: u32 = 1; }\n```\n";
         let used = colours(md);
         assert!(
             used.len() > 3,
-            "a highlighted Rust block should use more than a couple of colours, got {:?}",
-            used
+            "a highlighted Rust block should use more than a couple of colours, got {used:?}"
         );
     }
 
@@ -2485,8 +3094,7 @@ mod fidelity_tests {
             .collect();
         assert!(
             lines.len() >= 2,
-            "expected header and body rows, got {:?}",
-            lines
+            "expected header and body rows, got {lines:?}"
         );
         // Deliberately not trimmed: the trailing padding *is* the alignment.
         let widths: std::collections::BTreeSet<usize> =
@@ -2494,8 +3102,7 @@ mod fidelity_tests {
         assert_eq!(
             widths.len(),
             1,
-            "every row of a table must be the same width once padded, got {:?}",
-            lines
+            "every row of a table must be the same width once padded, got {lines:?}"
         );
     }
 
@@ -2508,13 +3115,11 @@ mod fidelity_tests {
         let lines = rendered(md);
         assert!(
             lines.iter().any(|l| l.contains("The note itself")),
-            "the footnote body must appear, got {:?}",
-            lines
+            "the footnote body must appear, got {lines:?}"
         );
         assert!(
             !lines.iter().any(|l| l.contains("[^1]")),
-            "the raw footnote syntax must not reach the screen, got {:?}",
-            lines
+            "the raw footnote syntax must not reach the screen, got {lines:?}"
         );
     }
 }

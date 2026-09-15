@@ -4,6 +4,28 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 /// Helper to get the path to the mdr binary built by cargo test.
+/// Point a child at a config directory of its own.
+///
+/// Without this a spawned mdr resolves the *developer's* config: since the file
+/// is created on first run and an old backend name is corrected in place, a test
+/// run would create or rewrite the real `~/.config/mdr/config.kdl`. Every
+/// variable the resolver consults has to be set, not just `HOME`.
+fn isolate_config<'a>(cmd: &'a mut Command, home: &std::path::Path) -> &'a mut Command {
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join("xdg"))
+        .env("APPDATA", home.join("appdata"))
+}
+
+/// A directory of this test's own.
+///
+/// A fixed name under the system temp directory is shared with every other run
+/// of the suite: two at once delete each other's fixtures. The `TempDir` also
+/// takes the cleanup off each test's hands.
+fn sandbox() -> tempfile::TempDir {
+    tempfile::tempdir().expect("a temp directory")
+}
+
 fn mdr_bin() -> std::path::PathBuf {
     // cargo test builds the binary in the same target directory
     let mut path = std::env::current_exe().unwrap();
@@ -16,7 +38,9 @@ fn mdr_bin() -> std::path::PathBuf {
 #[test]
 fn stdin_pipe_with_list_backends_exits_successfully() {
     // --list-backends exits before backend runs, proving CLI accepts piped stdin
-    let mut child = Command::new(mdr_bin())
+    let sandbox = sandbox();
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, sandbox.path())
         .arg("--list-backends")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -36,11 +60,28 @@ fn stdin_pipe_with_list_backends_exits_successfully() {
 }
 
 #[test]
-fn stdin_dash_argument_does_not_error_file_not_found() {
-    let mut child = Command::new(mdr_bin())
+fn a_dash_argument_reads_the_document_from_stdin() {
+    // `-` names stdin, not a file called "-". Asserting only that an error
+    // message is absent would pass on a crash, so this checks the positive
+    // outcome instead: the piped bytes reach the temporary file the backends
+    // are handed.
+    let sandbox = sandbox();
+    let tmp = sandbox.path().join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let home = sandbox.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    const DOC: &[u8] = b"# From stdin, via a dash\n";
+
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, &home)
         .arg("-")
         .arg("-b")
         .arg("tui")
+        .arg("-v")
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -48,19 +89,29 @@ fn stdin_dash_argument_does_not_error_file_not_found() {
         .expect("failed to spawn mdr");
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(b"# Test from stdin dash\n").unwrap();
+        stdin.write_all(DOC).unwrap();
     }
 
-    // The TUI backend may fail without a real terminal, so give it a moment
-    // then kill it. The key assertion is that it does NOT fail with "file '-' not found".
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = child.kill();
+    // The tui backend refuses a non-TTY stdout, so this exits on its own rather
+    // than needing to be killed — and the exit is the ordinary error path, not
+    // a crash.
     let output = child.wait_with_output().expect("failed to wait");
     let stderr = String::from_utf8_lossy(&output.stderr);
+
     assert!(
         !stderr.contains("file '-' not found"),
-        "mdr should read from stdin when '-' is passed, got stderr: {}",
-        stderr
+        "'-' must not be taken for a filename, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("requires a terminal"),
+        "the expected exit is the TTY refusal, not something else, got: {stderr}"
+    );
+
+    // The temporary is removed on the way out — another test covers that — so
+    // the evidence that stdin was read is the trace mdr leaves under `-v`.
+    assert!(
+        stderr.contains("piped input stored in"),
+        "the piped document should have been stored, got: {stderr}"
     );
 }
 
@@ -83,7 +134,8 @@ fn stdin_temp_files(mdr_dir: &Path) -> Vec<PathBuf> {
 /// Run `mdr` with `content` piped on stdin and an isolated TMPDIR, and return
 /// (exit success, stderr).
 fn run_piped(tmpdir: &Path, args: &[&str], content: &[u8]) -> (bool, String) {
-    let mut child = Command::new(mdr_bin())
+    let mut cmd = Command::new(mdr_bin());
+    let mut child = isolate_config(&mut cmd, tmpdir)
         .args(args)
         // `std::env::temp_dir()` reads TMPDIR on Unix but TMP then TEMP on
         // Windows, so all three have to be set or the child writes to the real
@@ -118,26 +170,25 @@ fn stdin_pipe_temp_file_is_created_then_removed_on_exit() {
     let path: PathBuf = stderr
         .lines()
         .find_map(|l| l.split_once("piped input stored in "))
-        .map(|(_, p)| PathBuf::from(p.trim()))
-        .unwrap_or_else(|| panic!("mdr -v should report the stdin temp file, got: {}", stderr));
+        .map_or_else(
+            || panic!("mdr -v should report the stdin temp file, got: {stderr}"),
+            |(_, p)| PathBuf::from(p.trim()),
+        );
 
     let mdr_dir = tmp.path().join("mdr");
     assert_eq!(
         path.parent(),
         Some(mdr_dir.as_path()),
-        "temp file should live in <tmpdir>/mdr, got {:?}",
-        path
+        "temp file should live in <tmpdir>/mdr, got {path:?}"
     );
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
         name.starts_with("stdin-") && name.ends_with(".md"),
-        "unexpected temp file name: {}",
-        name
+        "unexpected temp file name: {name}"
     );
     assert!(
         !path.exists(),
-        "temp file {:?} should be removed when mdr exits",
-        path
+        "temp file {path:?} should be removed when mdr exits"
     );
     assert!(
         stdin_temp_files(&mdr_dir).is_empty(),
@@ -159,8 +210,7 @@ fn temp_dir_is_created_with_owner_only_permissions() {
     let mode = std::fs::metadata(&mdr_dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o700,
-        "<tmpdir>/mdr should be created with mode 0700, got {:o}",
-        mode
+        "<tmpdir>/mdr should be created with mode 0700, got {mode:o}"
     );
 }
 
@@ -217,8 +267,7 @@ fn temp_dir_occupied_by_a_regular_file_is_an_error() {
     assert!(!ok, "mdr should fail when <tmpdir>/mdr is not a directory");
     assert!(
         stderr.contains("temp"),
-        "error should mention the temp directory, got: {}",
-        stderr
+        "error should mention the temp directory, got: {stderr}"
     );
 }
 
@@ -241,7 +290,9 @@ fn temp_dir_symlink_is_not_followed() {
 
 #[test]
 fn nonexistent_file_shows_error() {
-    let output = Command::new(mdr_bin())
+    let sandbox = sandbox();
+    let mut cmd = Command::new(mdr_bin());
+    let output = isolate_config(&mut cmd, sandbox.path())
         .arg("this_file_does_not_exist.md")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -253,7 +304,6 @@ fn nonexistent_file_shows_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not found"),
-        "should show file not found error, got stderr: {}",
-        stderr
+        "should show file not found error, got stderr: {stderr}"
     );
 }

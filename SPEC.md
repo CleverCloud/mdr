@@ -1,5 +1,11 @@
 # MDR — Markdown Reader
 
+> **This is the design document written before mdr existed**, kept for its
+> reasoning and its Architecture Decision Records. It is not a description of
+> the current program: for that, read `README.md`, `mdr --help` and the man
+> page, and `CHANGELOG.md` for the history. Where this file states versions or
+> behaviour, treat the code as the authority.
+
 ## Pitch (Shape Up Format)
 
 ### Problem
@@ -22,8 +28,8 @@ There is no `mdr file.md` command that opens a lightweight native window with li
 
 A single Rust binary (`mdr`) with **two rendering backends** that the user can choose:
 
-1. **`--backend egui`** (default) — Pure Rust GPU rendering via egui/eframe. Zero JS, zero WebView, single static binary.
-2. **`--backend webview`** — OS-native WebView (WebKit on macOS) for GitHub-quality HTML/CSS rendering. Still a Rust binary, but uses the OS's built-in browser engine.
+1. **`--backend gui`** (default) — Pure Rust GPU rendering via egui/eframe. Zero JS, zero WebView, single static binary.
+2. **`--backend web`** — OS-native WebView (WebKit on macOS) for GitHub-quality HTML/CSS rendering. Still a Rust binary, but uses the OS's built-in browser engine.
 
 Both backends share the same core pipeline:
 1. Takes a Markdown file path as argument
@@ -65,12 +71,12 @@ fichier.md
   │
   └→ Backend (user choice via --backend flag)
         │
-        ├─ egui (default)
+        ├─ gui (default)
         │    ├→ egui_commonmark (MD → egui widgets)
         │    ├→ resvg (SVG → texture for Mermaid)
         │    └→ eframe window (GPU rendered)
         │
-        └─ webview
+        └─ web
              ├→ comrak (MD → HTML)
              ├→ CSS (GitHub-like, OS theme aware)
              ├→ SVG inline (Mermaid diagrams)
@@ -81,51 +87,61 @@ The core logic (file watching, Markdown parsing, Mermaid rendering, syntax highl
 
 ### Crate Dependencies
 
-#### Core (shared by both backends)
+#### Core (shared by every backend)
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `comrak` | GFM Markdown parser | 0.38+ |
+| `comrak` | GFM Markdown parser | 0.55 |
 | `syntect` | Syntax highlighting | 5.x |
-| `mermaid-rs-renderer` | Mermaid → SVG (native Rust) | latest |
+| `mermaid-rs-renderer` | Mermaid → SVG (native Rust) | 0.3 |
 | `notify` | Filesystem watching (FSEvents on macOS) | 8.x |
 | `image` | Image decoding (PNG, JPEG, etc.) | 0.25+ |
-| `resvg` | SVG → raster | 0.45+ |
+| `resvg` | SVG → raster | 0.48 |
 | `clap` | CLI argument parsing | 4.x |
 
-#### egui backend
+#### `gui` backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `eframe` | Native window + egui integration | 0.33 |
-| `egui_commonmark` | Markdown → egui widgets | 0.22 |
+| `eframe` | Native window + egui integration | 0.36 |
+| `egui_commonmark` | Markdown → egui widgets | 0.25 |
 
-#### WebView backend
+#### `web` backend
 
 | Crate | Purpose | Version |
 |-------|---------|---------|
-| `wry` | OS-native WebView | 0.50+ |
-| `tao` | Window management | 0.33+ |
+| `wry` | OS-native WebView | 0.57 |
+| `tao` | Window management | 0.37 |
+| `muda` | Native menus | 0.20 |
+
+#### `tui` backend
+
+| Crate | Purpose | Version |
+|-------|---------|---------|
+| `ratatui` | Terminal UI | 0.30 |
+| `crossterm` | Terminal control | 0.29 |
+| `ratatui-image` | Images in the terminal | 11.0 |
 
 ### Cargo Features
 
-Both backends are compiled by default. Users can opt out via feature flags:
+All three backends are compiled by default. Users can opt out via feature
+flags, whose names keep the crate that draws rather than the backend name:
 
 ```toml
 [features]
-default = ["egui-backend", "webview-backend"]
-egui-backend = ["eframe", "egui_commonmark"]
-webview-backend = ["wry", "tao"]
+default = ["egui-backend", "webview-backend", "tui-backend"]
+egui-backend = ["eframe", "egui_commonmark", ...]
+webview-backend = ["wry", "tao", "muda", ...]
+tui-backend = ["ratatui", "crossterm", "ratatui-image", ...]
 ```
 
 ### egui_commonmark Features
 
 ```toml
-egui_commonmark = { version = "0.22", features = [
+egui_commonmark = { version = "0.25", features = [
     "better_syntax_highlighting",  # syntect-based highlighting
     "load-images",                 # local image loading
     "svg",                         # SVG rendering
-    "fetch",                       # remote URL image fetching
     "embedded_image",              # base64 inline images
 ] }
 ```
@@ -140,14 +156,14 @@ ARGS:
     <FILE>    Path to a Markdown file to view
 
 OPTIONS:
-    -b, --backend <BACKEND>    Rendering backend [default: egui] [possible: egui, webview]
+    -b, --backend <BACKEND>    Rendering backend [default: auto] [possible: auto, gui, tui, web]
     -h, --help                 Print help information
     -V, --version              Print version information
 
 EXAMPLES:
-    mdr README.md                          # egui backend (default)
-    mdr --backend webview README.md        # WebView backend
-    mdr -b webview docs/architecture.md    # short form
+    mdr README.md                          # auto-detected backend
+    mdr --backend web README.md            # system webview
+    mdr -b web docs/architecture.md        # short form
 ```
 
 ### User Stories & Acceptance Criteria
@@ -231,9 +247,12 @@ EXAMPLES:
 
 ### ADR-001: Dual backend architecture (egui + WebView)
 
+**Superseded in part:** a third backend, `tui`, was added later. The reasoning
+below is kept as the record of the original two-way decision.
+
 **Context:** We need a window to display rendered Markdown. Options: egui (pure Rust GPU rendering), wry (OS native WebView), terminal TUI (ratatui). Both egui and WebView were prototyped and compared visually.
 
-**Decision:** Support both backends, selectable via `--backend` CLI flag. Default to egui.
+**Decision:** Support both backends, selectable via `--backend` CLI flag. Default to `gui`.
 
 **Rationale:**
 - **egui** (default): Zero JavaScript, zero WebView = true single binary with no runtime deps. GPU-accelerated. egui_commonmark provides production-ready Markdown rendering. Trade-off: less visually polished, no accessibility.
@@ -307,7 +326,7 @@ EXAMPLES:
 
 ```
 mdr --benchmark bench/medium.md              # benchmark default backend
-mdr --benchmark --backend webview bench/medium.md  # benchmark webview
+mdr --benchmark --backend web bench/medium.md      # benchmark the webview
 ```
 
 Output: startup_ms, render_ms, memory_mb, binary_size_mb
@@ -316,28 +335,32 @@ Output: startup_ms, render_ms, memory_mb, binary_size_mb
 
 ## Roadmap
 
-### MVP (v0.1 — 3-4 weeks)
+Kept for the record. The MVP and v0.2 lists below are what was planned before
+any of it existed; the state of each item is now the truth of the repository,
+not of this file. `CHANGELOG.md` is the record of what actually shipped.
 
-- [x] ~~Prototype validated (egui vs WebView comparison)~~
-- [ ] Project bootstrap (`cargo init`, CI, README)
-- [ ] Single file mode: `mdr file.md`
-- [ ] GFM Markdown rendering (egui_commonmark + comrak)
-- [ ] Syntax highlighting (syntect)
-- [ ] Image support (local + URL + base64)
-- [ ] Mermaid → SVG → egui image (mmdr integration)
-- [ ] Mermaid error handling (inline error + source code)
-- [ ] File watching + live reload (notify, 300ms debounce)
-- [ ] Scroll position preservation on reload
-- [ ] OS dark/light theme support
-- [ ] Release build + binary distribution
+### MVP (v0.1) — shipped
 
-### v0.2 — Post-MVP
+Project bootstrap, single file mode, GFM rendering, syntax highlighting, images
+(local, URL and base64), Mermaid to SVG, Mermaid error handling showing the
+source, file watching with live reload, scroll preservation, OS theme support,
+and binary distribution.
 
-- [ ] Directory mode: `mdr ./docs/` with sidebar file browser
-- [ ] Table of Contents in sidebar (auto-generated from headings)
-- [ ] stdin/pipe mode: `cat file.md | mdr`
-- [ ] Internal navigation for .md links
-- [ ] Mermaid.js fallback for unsupported diagram types
-- [ ] Homebrew formula
-- [ ] CSS custom override for theming
-- [ ] Linux + Windows support
+### v0.2 — shipped
+
+Table of contents in the sidebar, stdin/pipe mode, internal navigation between
+`.md` files, the Homebrew formula, and Linux plus Windows support.
+
+### Still open
+
+- **Directory mode**: `mdr ./docs/` with a sidebar file browser. Not started.
+- **Mermaid.js fallback for unsupported diagram types.** Partly shipped, and
+  only in `web`: a diagram the native renderer refuses becomes a
+  `<pre class="mermaid">` block, and the page then loads the Mermaid library
+  bundled in the binary to draw it. Two limits go with it — the library is
+  included only when the *first* document rendered has such a block, so a
+  fallback that appears after a live reload is not drawn, and the reload does
+  not re-run Mermaid on the new content. `gui` and `tui` have no fallback at
+  all: an unsupported diagram is shown as its source.
+- **CSS custom override for theming.** Not started; the stylesheet is generated
+  from `src/core/style.rs` and cannot be replaced from outside.

@@ -61,7 +61,7 @@ impl SlugGenerator {
         let mut count = last;
         loop {
             count += 1;
-            let candidate = format!("{}-{}", base, count);
+            let candidate = format!("{base}-{count}");
             if !self.seen.contains_key(&candidate) {
                 self.seen.insert(base, count);
                 self.seen.insert(candidate.clone(), 0);
@@ -87,39 +87,39 @@ mod tests {
 
     #[test]
     fn first_occurrence_keeps_the_plain_slug() {
-        let mut gen = SlugGenerator::new();
-        assert_eq!(gen.generate("Setup"), "setup");
+        let mut slugs = SlugGenerator::new();
+        assert_eq!(slugs.generate("Setup"), "setup");
     }
 
     #[test]
     fn duplicate_headings_get_distinct_anchors() {
-        let mut gen = SlugGenerator::new();
-        assert_eq!(gen.generate("Setup"), "setup");
-        assert_eq!(gen.generate("Setup"), "setup-1");
-        assert_eq!(gen.generate("Setup"), "setup-2");
+        let mut slugs = SlugGenerator::new();
+        assert_eq!(slugs.generate("Setup"), "setup");
+        assert_eq!(slugs.generate("Setup"), "setup-1");
+        assert_eq!(slugs.generate("Setup"), "setup-2");
     }
 
     #[test]
     fn suffix_collision_with_an_explicit_heading_is_avoided() {
-        let mut gen = SlugGenerator::new();
-        assert_eq!(gen.generate("Setup"), "setup");
-        assert_eq!(gen.generate("Setup 1"), "setup-1");
+        let mut slugs = SlugGenerator::new();
+        assert_eq!(slugs.generate("Setup"), "setup");
+        assert_eq!(slugs.generate("Setup 1"), "setup-1");
         // `setup-1` is taken by the explicit heading, so the duplicate skips it.
-        assert_eq!(gen.generate("Setup"), "setup-2");
+        assert_eq!(slugs.generate("Setup"), "setup-2");
     }
 
     #[test]
     fn headings_with_no_slugifiable_text_still_get_anchors() {
-        let mut gen = SlugGenerator::new();
-        assert_eq!(gen.generate("!!!"), "section");
-        assert_eq!(gen.generate("???"), "section-1");
+        let mut slugs = SlugGenerator::new();
+        assert_eq!(slugs.generate("!!!"), "section");
+        assert_eq!(slugs.generate("???"), "section-1");
     }
 
     #[test]
     fn different_headings_do_not_interfere() {
-        let mut gen = SlugGenerator::new();
-        assert_eq!(gen.generate("Install"), "install");
-        assert_eq!(gen.generate("Usage"), "usage");
-        assert_eq!(gen.generate("Install"), "install-1");
+        let mut slugs = SlugGenerator::new();
+        assert_eq!(slugs.generate("Install"), "install");
+        assert_eq!(slugs.generate("Usage"), "usage");
+        assert_eq!(slugs.generate("Install"), "install-1");
     }
 }

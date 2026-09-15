@@ -17,33 +17,66 @@ struct Cli {
     /// Markdown file to render (use '-' or pipe via stdin)
     file: Option<PathBuf>,
 
-    /// Rendering backend to use: egui (native GUI), webview (HTML), tui (terminal)
+    // Declared in alphabetical order, which is the order clap prints them in;
+    // `--help` and `--version` are appended after these by clap itself.
+    /// Rendering backend: auto, gui, tui, web
     #[arg(short, long, value_parser = parse_backend)]
     backend: Option<String>,
 
-    /// Enable verbose logging (image resolution, mermaid rendering, etc.)
+    /// Path to the config file (must exist; -v prints the one in use)
+    #[arg(short, long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// List available backends and exit
     #[arg(short, long)]
-    verbose: bool,
+    list_backends: bool,
 
     /// Never access the network: remote images are not downloaded
     #[arg(long)]
     offline: bool,
 
-    /// Colour scheme to assume for syntax highlighting in the terminal backend
-    #[arg(long, value_name = "THEME", value_parser = parse_theme)]
+    /// Write the backend to use into the config file and exit
+    #[arg(short, long, value_name = "BACKEND", value_parser = parse_backend)]
+    set_default_backend: Option<String>,
+
+    /// Colour scheme to render with: auto, dark, light
+    #[arg(short, long, value_name = "THEME", value_parser = parse_theme)]
     theme: Option<String>,
 
-    /// Path to config file [default: ~/.config/mdr/config.kdl]
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
+    /// Enable verbose logging (image resolution, mermaid rendering, etc.)
+    #[arg(short, long)]
+    verbose: bool,
+}
 
-    /// List available backends and exit
-    #[arg(long)]
-    list_backends: bool,
+/// Whether this binary was built with the backend `name` (`auto` always is).
+fn backend_is_compiled(name: &str) -> bool {
+    // Written as a chain rather than a `match`: every arm is a `cfg!`, which
+    // collapses to a literal per build, and in an all-features build they all
+    // collapse to `true` — which is exactly when clippy mistakes this for a
+    // `matches!`. It is not one: in a single-backend build the arms differ.
+    if name == "auto" {
+        return true;
+    }
+    if name == "gui" {
+        return cfg!(feature = "egui-backend");
+    }
+    if name == "tui" {
+        return cfg!(feature = "tui-backend");
+    }
+    if name == "web" {
+        return cfg!(feature = "webview-backend");
+    }
+    false
+}
 
-    /// Create a default config file and exit
-    #[arg(long)]
-    init: bool,
+/// The Cargo feature that builds the backend `name`.
+fn backend_feature(name: &str) -> &'static str {
+    match name {
+        "gui" => "egui-backend",
+        "tui" => "tui-backend",
+        "web" => "webview-backend",
+        _ => "",
+    }
 }
 
 fn print_backends() {
@@ -56,16 +89,16 @@ fn print_backends() {
     }
     eprintln!("Available backends:");
     eprintln!(
-        "  egui      Native GUI window (OpenGL)            [{}]",
-        status(cfg!(feature = "egui-backend"))
+        "  gui       Native window (OpenGL)                [{}]",
+        status(backend_is_compiled("gui"))
     );
     eprintln!(
-        "  webview   System webview (WebKit/WebView2)      [{}]",
-        status(cfg!(feature = "webview-backend"))
+        "  tui       Terminal UI with image support        [{}]",
+        status(backend_is_compiled("tui"))
     );
     eprintln!(
-        "  tui       Terminal UI with image support         [{}]",
-        status(cfg!(feature = "tui-backend"))
+        "  web       System webview (WebKit/WebView2)      [{}]",
+        status(backend_is_compiled("web"))
     );
     eprintln!("  auto      Auto-detect best available (default)");
 }
@@ -74,27 +107,29 @@ fn parse_theme(s: &str) -> Result<String, String> {
     match core::Theme::parse(s) {
         Some(_) => Ok(s.to_string()),
         None => Err(format!(
-            "unknown theme '{}', expected 'auto', 'dark' or 'light'",
-            s
+            "unknown theme '{s}', expected 'auto', 'dark' or 'light'"
         )),
     }
 }
 
 fn parse_backend(s: &str) -> Result<String, String> {
-    match s {
-        "auto" | "egui" | "webview" | "tui" => Ok(s.to_string()),
-        _ => Err(format!(
-            "unknown backend '{}', expected 'auto', 'egui', 'webview', or 'tui'",
-            s
-        )),
+    if core::config::is_valid_backend(s) {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "unknown backend '{s}', expected one of: {}",
+            core::config::BACKENDS.join(", ")
+        ))
     }
 }
 
 /// Auto-detect the best backend for the current environment.
 fn detect_backend() -> &'static str {
-    // If no DISPLAY/WAYLAND and we have a TTY → TUI
-    // If SSH session → TUI
-    // Otherwise → egui (or first available GUI backend)
+    // SSH session → tui. Otherwise a display → gui, or web when gui is not
+    // compiled in. No display and no SSH → tui as well.
+    //
+    // Whether stdin is a terminal is not part of it: mdr reads a document, not
+    // the console, and a piped document is one of the ordinary ways to use it.
     let is_ssh = std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok();
     let has_display = std::env::var("DISPLAY").is_ok()
         || std::env::var("WAYLAND_DISPLAY").is_ok()
@@ -108,9 +143,9 @@ fn detect_backend() -> &'static str {
 
     if has_display {
         #[cfg(feature = "egui-backend")]
-        return "egui";
+        return "gui";
         #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
-        return "webview";
+        return "web";
     }
 
     #[cfg(feature = "tui-backend")]
@@ -119,9 +154,9 @@ fn detect_backend() -> &'static str {
     #[cfg(not(feature = "tui-backend"))]
     {
         #[cfg(feature = "egui-backend")]
-        return "egui";
+        return "gui";
         #[cfg(all(not(feature = "egui-backend"), feature = "webview-backend"))]
-        return "webview";
+        return "web";
         #[cfg(not(any(feature = "egui-backend", feature = "webview-backend")))]
         {
             eprintln!("Error: no backend compiled");
@@ -240,7 +275,7 @@ fn read_stdin_to_tmpfile() -> Result<PathBuf, String> {
     io::stdin()
         .lock()
         .read_to_string(&mut content)
-        .map_err(|e| format!("failed to read from stdin: {}", e))?;
+        .map_err(|e| format!("failed to read from stdin: {e}"))?;
 
     let dir = stdin_tmp_dir();
     ensure_tmp_dir(&dir)
@@ -274,28 +309,58 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
         return 0;
     }
 
-    if cli.init {
-        let path = cli
-            .config
-            .clone()
-            .unwrap_or_else(core::config::default_path);
-        return match core::config::write_default(&path) {
+    // Load config. An explicit `--config` must exist — a typo in a path the user
+    // just typed is a mistake, not an invitation to create a file there. The
+    // default path is created on first run instead, so the settings are
+    // discoverable without a flag to run first.
+    let (default_path, may_create) = if cli.config.is_none() {
+        let (path, confident) = core::config::default_location();
+        (Some(path), confident)
+    } else {
+        (None, false)
+    };
+    let cfg_path = cli.config.clone().or(default_path).unwrap_or_default();
+    let mut created_config = false;
+    if may_create {
+        match core::config::ensure_exists(&cfg_path) {
+            // Verbosity is not known yet — it partly comes from the very file
+            // being created — so the log waits until `set_verbose` below.
+            Ok(true) => created_config = true,
+            Ok(false) => {}
+            // Not being able to write it costs nothing at this point: mdr runs
+            // on its defaults, which is what the file would have said anyway.
+            Err(e) => eprintln!(
+                "mdr: warning: could not create '{}': {e}",
+                cfg_path.display()
+            ),
+        }
+    }
+    if let Some(backend) = &cli.set_default_backend {
+        // Writing a backend this binary cannot run would produce a config that
+        // fails on the next start, which is not what "set the default" means.
+        if !backend_is_compiled(backend) {
+            eprintln!(
+                "Error: {backend} backend not compiled. Rebuild with --features {}",
+                backend_feature(backend)
+            );
+            return 1;
+        }
+        if !cfg_path.exists() {
+            eprintln!("Error: config file '{}' not found", cfg_path.display());
+            return 1;
+        }
+        return match core::config::set_backend(&cfg_path, backend) {
             Ok(()) => {
-                eprintln!("Created config file: {}", path.display());
+                eprintln!("Set backend to {backend} in {}", cfg_path.display());
                 0
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 1
             }
         };
     }
 
-    // Load config (explicit path errors if missing; default path is optional)
-    let cfg_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(core::config::default_path);
     let cfg = if cli.config.is_some() && !cfg_path.exists() {
         eprintln!("Error: config file '{}' not found", cfg_path.display());
         return 1;
@@ -307,6 +372,13 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
     };
 
     core::set_verbose(cli.verbose || cfg.verbose.unwrap_or(false));
+    if created_config {
+        vlog!("created config file: {}", cfg_path.display());
+    } else if cfg_path.exists() {
+        vlog!("config file: {}", cfg_path.display());
+    } else {
+        vlog!("no config file at {}", cfg_path.display());
+    }
     core::set_offline(cli.offline || cfg.offline.unwrap_or(false));
     core::set_theme(
         cli.theme
@@ -318,11 +390,16 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 
     let from_stdin = |tmp_file: &mut Option<PathBuf>| match read_stdin_to_tmpfile() {
         Ok(path) => {
+            // The document is now a temp file, but its relative image paths
+            // were written against the directory mdr was run from.
+            if let Ok(cwd) = std::env::current_dir() {
+                core::set_document_base(cwd);
+            }
             *tmp_file = Some(path.clone());
             Ok(path)
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             Err(1)
         }
     };
@@ -366,22 +443,20 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
 
     let result = match backend {
         #[cfg(feature = "egui-backend")]
-        "egui" => backend::egui::run(file),
+        "gui" => backend::egui::run(file),
 
         #[cfg(not(feature = "egui-backend"))]
-        "egui" => {
-            eprintln!("Error: egui backend not compiled. Rebuild with --features egui-backend");
+        "gui" => {
+            eprintln!("Error: gui backend not compiled. Rebuild with --features egui-backend");
             return 1;
         }
 
         #[cfg(feature = "webview-backend")]
-        "webview" => backend::webview::run(file),
+        "web" => backend::webview::run(file),
 
         #[cfg(not(feature = "webview-backend"))]
-        "webview" => {
-            eprintln!(
-                "Error: webview backend not compiled. Rebuild with --features webview-backend"
-            );
+        "web" => {
+            eprintln!("Error: web backend not compiled. Rebuild with --features webview-backend");
             return 1;
         }
 
@@ -394,11 +469,19 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
             return 1;
         }
 
-        _ => unreachable!(),
+        // Both sources of a backend name are validated against
+        // `core::config::BACKENDS`, so this is unreachable in practice — but a
+        // belt-and-braces arm beats aborting the process if that ever slips.
+        // `return 1` rather than `process::exit`, so `main` still removes the
+        // temporary file a piped document was written to.
+        other => {
+            eprintln!("Error: unknown backend '{other}'");
+            return 1;
+        }
     };
 
     if let Err(e) = result {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         return 1;
     }
     0
@@ -409,14 +492,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_backend_name_maps_to_a_cargo_feature() {
+        // `backend_feature` returning "" would make the "not compiled" error
+        // read "Rebuild with --features " — so adding a backend to `BACKENDS`
+        // without teaching that table has to fail here.
+        for name in core::config::BACKENDS {
+            if *name == "auto" {
+                continue;
+            }
+            assert!(
+                !backend_feature(name).is_empty(),
+                "backend '{name}' has no Cargo feature"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_lists_every_value_the_parsers_accept() {
+        // Per argument, not across the whole help text: `auto` belongs to both
+        // `--backend` and `--theme`, so searching the rendered help as one
+        // string would let either of them hide the other's omission.
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let help_for = |long: &str| {
+            command
+                .get_arguments()
+                .find(|a| a.get_long() == Some(long))
+                .unwrap_or_else(|| panic!("no --{long} argument"))
+                .get_help()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        };
+
+        let backend_help = help_for("backend");
+        for backend in core::config::BACKENDS {
+            assert!(
+                backend_help.contains(backend),
+                "--backend accepts '{backend}' but its help does not say so: {backend_help}"
+            );
+        }
+        let set_default_help = help_for("set-default-backend");
+        assert!(
+            !set_default_help.is_empty(),
+            "--set-default-backend should describe itself"
+        );
+
+        let theme_help = help_for("theme");
+        for theme in ["auto", "dark", "light"] {
+            assert!(
+                core::Theme::parse(theme).is_some(),
+                "'{theme}' should be a theme"
+            );
+            assert!(
+                theme_help.contains(theme),
+                "--theme accepts '{theme}' but its help does not say so: {theme_help}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_long_option_has_its_short_form() {
+        // The short forms are the documented spelling in the man page, so a
+        // rename that drops one has to fail here rather than in someone's shell.
+        let long = Cli::try_parse_from(["mdr", "--theme", "light", "--config", "c.kdl", "f.md"])
+            .expect("long forms parse");
+        let short = Cli::try_parse_from(["mdr", "-t", "light", "-c", "c.kdl", "f.md"])
+            .expect("short forms parse");
+        assert_eq!(long.theme, short.theme);
+        assert_eq!(long.config, short.config);
+
+        assert!(Cli::try_parse_from(["mdr", "-l"]).unwrap().list_backends);
+        assert_eq!(
+            Cli::try_parse_from(["mdr", "-s", "tui"])
+                .unwrap()
+                .set_default_backend
+                .as_deref(),
+            Some("tui")
+        );
+        assert_eq!(
+            Cli::try_parse_from(["mdr", "-b", "web", "f.md"])
+                .unwrap()
+                .backend
+                .as_deref(),
+            Some("web")
+        );
+        assert!(Cli::try_parse_from(["mdr", "-v", "f.md"]).unwrap().verbose);
+    }
+
+    #[test]
     fn cli_parses_and_validates_the_theme_flag() {
         let cli = Cli::try_parse_from(["mdr", "--theme", "light", "f.md"]).unwrap();
         assert_eq!(cli.theme.as_deref(), Some("light"));
         assert!(Cli::try_parse_from(["mdr", "--theme", "neon", "f.md"]).is_err());
-        assert!(Cli::try_parse_from(["mdr", "f.md"])
-            .unwrap()
-            .theme
-            .is_none());
+        assert!(
+            Cli::try_parse_from(["mdr", "f.md"])
+                .unwrap()
+                .theme
+                .is_none()
+        );
     }
 
     #[test]
@@ -450,7 +623,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_stdin_tmp_file(dir.path(), "secret").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
     }
 
     #[cfg(unix)]
@@ -462,7 +635,7 @@ mod tests {
         let dir = base.path().join("mdr");
         ensure_tmp_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 
     #[cfg(unix)]
@@ -477,7 +650,7 @@ mod tests {
 
         ensure_tmp_dir(&dir).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0700, got {:o}", mode);
+        assert_eq!(mode, 0o700, "expected 0700, got {mode:o}");
     }
 
     #[cfg(unix)]

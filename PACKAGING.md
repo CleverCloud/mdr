@@ -10,6 +10,9 @@ Configure these in **GitHub repo → Settings → Secrets and variables → Acti
 |--------|--------------|---------|
 | `CARGO_REGISTRY_TOKEN` | crates.io → Settings → Tokens → New Token (publish-update) | crates.io publish |
 | `HOMEBREW_TAP_TOKEN` | GitHub PAT with write access to `CleverCloud/homebrew-misc` | Homebrew formula update |
+| `CHOCOLATEY_API_KEY` | community.chocolatey.org → My Account → API Key | Chocolatey package push |
+| `SCOOP_BUCKET_TOKEN` | GitHub PAT with write access to `CleverCloud/scoop-bucket` | Scoop manifest update |
+| `SNAPCRAFT_STORE_CREDENTIALS` | `snapcraft export-login --snaps mdr-markdown-renderer --acls package_push,package_update -` | Snap Store publish |
 | `WINGET_TOKEN` | GitHub classic PAT with `public_repo` scope | WinGet package update |
 | `AUR_SSH_PRIVATE_KEY` | SSH key registered on aur.archlinux.org | AUR package update |
 
@@ -20,8 +23,14 @@ Configure in **GitHub repo → Settings → Secrets and variables → Actions �
 | Variable | Value | Purpose |
 |----------|-------|---------|
 | `HOMEBREW_TAP_ENABLED` | `true` | Enable Homebrew tap updates on release |
+| `CHOCOLATEY_ENABLED` | `true` | Enable Chocolatey publishing on release |
+| `SCOOP_ENABLED` | `true` | Enable Scoop bucket updates on release |
+| `SNAP_ENABLED` | `true` | Enable Snap Store publishing on release |
 | `WINGET_ENABLED` | `true` | Enable WinGet package updates on release |
 | `AUR_ENABLED` | `true` | Enable AUR package updates on release |
+
+Each job is skipped when its variable is not `true`, so a release still succeeds
+when a channel is not configured.
 
 ## Repos to Create
 
@@ -31,7 +40,16 @@ Homebrew tap for Clever Cloud tools.
 
 1. Create the repo `CleverCloud/homebrew-misc` on GitHub
 2. Initialize with a `Formula/` directory
-3. Users install with: `brew tap CleverCloud/misc && brew install mdr`
+3. Users install with: `brew install CleverCloud/misc/mdr`
+
+### `CleverCloud/scoop-bucket`
+
+Scoop bucket for Clever Cloud tools.
+
+1. Create the repo `CleverCloud/scoop-bucket` on GitHub
+2. The release workflow writes `bucket/mdr.json` into it
+3. Users install with:
+   `scoop bucket add clevercloud https://github.com/CleverCloud/scoop-bucket && scoop install mdr`
 
 ## Setting Up Homebrew Tap Token
 
@@ -58,9 +76,9 @@ This triggers the release workflow which:
 4. Publishes to crates.io
 5. Creates a GitHub Release with all artifacts, using the `CHANGELOG.md` section
    of the tag as release notes
-6. Updates Homebrew formula (if enabled)
-7. Updates WinGet manifest (if enabled)
-8. Updates AUR package (if enabled)
+6. Updates the Homebrew formula, the Scoop bucket, the Chocolatey package, the
+   Snap Store, the WinGet manifest and the AUR package — each one enabled by its
+   own `*_ENABLED` variable, and each needing its secret to succeed
 
 ### Release notes
 
@@ -96,6 +114,7 @@ Both packages install, in addition to `/usr/bin/mdr`:
 | `assets/logo-128.png` | `/usr/share/icons/hicolor/128x128/apps/mdr.png` |
 | `assets/mdr.1` | `/usr/share/man/man1/mdr.1` |
 | `README.md` | `/usr/share/doc/mdr/README.md` |
+| `LICENSE` | `/usr/share/doc/mdr/copyright` (`.deb`), `/usr/share/licenses/mdr/LICENSE` (`.rpm`) |
 
 The man page is a hand-written roff file rather than a `clap_mangen` build
 script: the `Cli` struct lives in `src/main.rs` and cannot be reused from a
@@ -191,10 +210,9 @@ CI jobs relate to it:
 - `msrv` pins that toolchain and runs `cargo check --all-features --all-targets`
   plus `cargo test --all-features`. Both jobs are blocking.
 
-1.95 is the highest `rust-version` declared in the dependency tree (`kdl` 6.7.1;
-next highest is 1.92 for the egui/epaint family, then 1.88 for `ratatui` 0.30
-and `image` 0.25, then 1.85 for `clap` 4 / `comrak` 0.52 / `ureq` 3). It was
-confirmed by an actual build: `cargo check --all-features --all-targets` on a
+1.95 is the highest `rust-version` declared in the dependency tree. The ranking
+below it is not written down here: it moves with every dependency bump, and a
+stale list is worse than none. It was confirmed by an actual build: `cargo check --all-features --all-targets` on a
 1.95.0 toolchain exits 0.
 
 Recompute the floor after a dependency bump with:
@@ -205,10 +223,11 @@ cargo metadata --format-version 1 --all-features \
   | sort -V | tail -1
 ```
 
-Note that this is a *declared* floor: 242 of the 821 resolved packages declare
-no `rust-version` at all (including the direct dependencies
-`mermaid-rs-renderer` and `tiny-skia`), so the `msrv` job — not this command —
-is what actually proves the value.
+Note that this is a *declared* floor: many resolved packages declare no
+`rust-version` at all, including the direct dependencies `mermaid-rs-renderer`
+and `tiny-skia`, so the `msrv` job — not this command — is what actually proves
+the value. Counting them here would only date the file; the command above is
+the answer at the moment it is run.
 
 ## crates.io
 

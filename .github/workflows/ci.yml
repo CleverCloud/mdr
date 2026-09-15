@@ -10,10 +10,10 @@ env:
   CARGO_TERM_COLOR: always
   # Minimum supported Rust version, kept in sync with `rust-version` in Cargo.toml.
   #
-  # 1.95 is the highest `rust-version` declared in the dependency tree
-  # (kdl 6.7.1; the next highest is 1.92 for the egui/epaint family), and it was
-  # verified by an actual compilation: `cargo check --all-features --all-targets`
-  # on a 1.95.0 toolchain exits 0.
+  # 1.95 is the highest `rust-version` declared in the dependency tree, and it
+  # is verified by an actual compilation rather than by reading manifests: the
+  # job below runs `cargo check --all-features --all-targets` and the test suite
+  # on a pinned 1.95 toolchain.
   MSRV: "1.95"
 
 jobs:
@@ -78,10 +78,10 @@ jobs:
       - name: Build (all features)
         run: cargo build --release
 
-      - name: Build (egui only)
+      - name: Build (gui only)
         run: cargo build --release --no-default-features --features egui-backend
 
-      - name: Build (webview only)
+      - name: Build (web only)
         run: cargo build --release --no-default-features --features webview-backend
 
       - name: Build (tui only)

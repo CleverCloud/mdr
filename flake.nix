@@ -38,6 +38,12 @@
             libGL
           ];
 
+          # rustPlatform's cargo install hook copies the binaries and libraries
+          # and nothing else, so the licence text is installed explicitly.
+          postInstall = ''
+            install -Dm644 LICENSE "$out/share/licenses/mdr/LICENSE"
+          '';
+
           meta = with lib; {
             description = cargoToml.package.description;
             homepage = cargoToml.package.homepage;

@@ -1,7 +1,7 @@
 [package]
 name = "mdr"
-version = "0.5.1"
-edition = "2021"
+version = "0.6.0"
+edition = "2024"
 rust-version = "1.95"
 description = "A lightweight Markdown viewer with live reload and multiple rendering backends"
 license = "MIT"
@@ -17,6 +17,7 @@ default = ["egui-backend", "webview-backend", "tui-backend"]
 egui-backend = [
   "dep:eframe",
   "dep:egui_commonmark",
+  "dep:egui_extras",
   "dep:resvg",
   "dep:usvg",
   "dep:tiny-skia",
@@ -49,32 +50,53 @@ tui-backend = [
 [dependencies]
 # Core
 clap = { version = "4", features = ["derive"] }
-comrak = { version = "0.52", default-features = false, features = ["syntect"] }
+# `syntect-onig` rather than `syntect`: from 0.53 comrak stopped enabling a regex
+# engine for syntect on its own, and a webview-only build (where the terminal
+# backend's own syntect dependency is absent) would no longer link.
+comrak = { version = "0.55", default-features = false, features = [
+  "syntect-onig",
+] }
 notify = "8"
 notify-debouncer-mini = "0.7"
-mermaid-rs-renderer = { version = "0.2", default-features = false }
+mermaid-rs-renderer = { version = "0.3", default-features = false }
 regex = "1"
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 kdl = "6"
 
 # egui backend
-eframe = { version = "0.34", features = ["persistence"], optional = true }
-egui_commonmark = { version = "0.23", features = [
+# No `persistence`: nothing here asks to be remembered between runs — `MdrApp`
+# has no `save` — and the feature stored the window geometry and egui's memory
+# in one file shared by every document, so a window opened at the size, the
+# place and the scroll offset the *previous* document had been left at.
+eframe = { version = "0.36", optional = true }
+# No `load-images`: it is `egui_extras/image` + `egui_extras/file`, and that
+# file loader reads any path the document names, straight off disk, without
+# passing through mdr's own resolver — so an image refused for being outside the
+# project was still displayed. The decoder is pulled in directly instead, so a
+# local or remote image reaches the page only through mdr's resolver. A `data:`
+# URI written into the document is still shown as the author wrote it.
+# No `svg` either: it is `egui_extras/svg`, whose loader builds its own usvg
+# options and so would not have the resolver that refuses an SVG's file
+# references. mdr rasterises every SVG itself, including the ones that arrive as
+# `data:` URIs, so nothing in the window needs to parse one.
+egui_commonmark = { version = "0.25", default-features = false, features = [
   "better_syntax_highlighting",
-  "load-images",
-  "svg",
+  "pulldown_cmark",
   "embedded_image",
 ], optional = true }
-resvg = { version = "0.47", optional = true }
-usvg = { version = "0.47", optional = true }
+egui_extras = { version = "0.36", default-features = false, features = [
+  "image",
+], optional = true }
+resvg = { version = "0.48", optional = true }
+usvg = { version = "0.48", optional = true }
 tiny-skia = { version = "0.12", optional = true }
-fontdb = { version = "0.23", optional = true }
+fontdb = { version = "0.24", optional = true }
 
-# webview backend
-wry = { version = "0.55", optional = true }
-tao = { version = "0.35", optional = true }
-muda = { version = "0.19", optional = true }
+# web backend (wry/tao)
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", optional = true }
+muda = { version = "0.20", optional = true }
 
 # tui backend
 ratatui = { version = "0.30", optional = true }
@@ -100,8 +122,44 @@ tempfile = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Selected lints above clippy's default set, enforced by the CI through
+# `-D warnings`. Every one was fixed across the crate before being listed, so
+# this is a floor rather than a wish.
+#
+# They are named one by one instead of switching on `clippy::pedantic`: the CI
+# lints on a floating stable toolchain, and naming them keeps a future release
+# from enabling new pedantic lints on unrelated pull requests. It is not a
+# guarantee of stability — existing lints and clippy's own default set still
+# move with stable.
+#
+# The rest of `pedantic` was reviewed and deliberately left off, mostly numeric
+# conversions in the renderers and suggestions that read worse than the code
+# they replace. Where ownership or readability warrants it, prefer a narrow
+# `#[allow]` with a reason over dropping a lint from this list.
+[lints.clippy]
+assigning_clones = "warn"
+cast_lossless = "warn"
+doc_markdown = "warn"
+manual_string_new = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+needless_raw_string_hashes = "warn"
+or_fun_call = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
+use_self = "warn"
+
 [package.metadata.deb]
 section = "text"
+# cargo-deb always writes /usr/share/doc/mdr/copyright, but it only copies the
+# licence text in when a `license-file` names it: it does not pick up a LICENSE
+# sitting at the root of the crate. Without this the file holds the metadata
+# alone. "0" is the number of header lines to skip in LICENSE — it starts on the
+# licence itself.
+license-file = ["LICENSE", "0"]
 # `$auto` covers everything the binary links directly (GTK 3, WebKitGTK, libxdo,
 # glib…). libGL/libEGL are opened with dlopen() at runtime by x11-dl and
 # khronos-egl, so `ldd` cannot see them and they must be listed by hand.
@@ -119,7 +177,7 @@ assets = [
   ["assets/mdr.1", "/usr/share/man/man1/mdr.1", "644"],
   ["README.md", "/usr/share/doc/mdr/README.md", "644"],
 ]
-extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (egui, webview, TUI)."
+extended-description = "A lightweight Markdown viewer with Mermaid diagram support, live reload, and multiple rendering backends (gui, tui, web)."
 
 [package.metadata.generate-rpm]
 assets = [
@@ -128,6 +186,11 @@ assets = [
   { source = "assets/logo-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/mdr.png", mode = "0644" },
   { source = "assets/mdr.1", dest = "/usr/share/man/man1/mdr.1", mode = "0644", doc = true },
   { source = "README.md", dest = "/usr/share/doc/mdr/README.md", mode = "0644", doc = true },
+  # cargo-generate-rpm installs the assets listed here and nothing else, so the
+  # licence needs its own entry. It is deliberately not marked `doc = true`:
+  # the crate cannot emit RPM's %license marker, and %doc files are the ones
+  # `rpm --excludedocs` drops — which is exactly what a licence must never be.
+  { source = "LICENSE", dest = "/usr/share/licenses/mdr/LICENSE", mode = "0644" },
 ]
 # auto-req is left at its default ("auto"), which detects the shared libraries
 # the binary links against — that is where `libxdo.so.3()(64bit)`,

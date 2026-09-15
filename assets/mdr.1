@@ -10,12 +10,12 @@ mdr \- lightweight Markdown viewer with live reload
 renders a Markdown file with Mermaid diagram support and reloads it
 automatically whenever the file changes on disk.
 .PP
-Three rendering backends are available: a native GUI window
-.RB ( egui ),
-a system webview
-.RB ( webview ),
-and a terminal UI with image support
-.RB ( tui ).
+Three rendering backends are available: a native window
+.RB ( gui ),
+a terminal UI with image support
+.RB ( tui ),
+and the system webview
+.RB ( web ).
 When no backend is requested, the best available one is auto\-detected for the
 current environment.
 .PP
@@ -28,10 +28,23 @@ the document is read from standard input.
 .TP
 .BR \-b ", " \-\-backend " " \fIBACKEND\fR
 Rendering backend to use:
-.BR auto ", " egui ", " webview " or " tui .
+.BR auto ", " gui ", " tui " or " web .
+.B auto
+is the default, and chooses among the backends this binary was built with:
+.B tui
+over SSH or with no display, and otherwise the first of
+.B gui
+and
+.B web
+that is compiled in.
 .TP
-.BR \-v ", " \-\-verbose
-Enable verbose logging (image resolution, mermaid rendering, etc.).
+.BR \-c ", " \-\-config " " \fIPATH\fR
+Path to the config file. A path given here must exist; without it mdr uses the
+per\-platform location described under
+.BR FILES .
+.TP
+.BR \-l ", " \-\-list\-backends
+List available backends and exit.
 .TP
 .B \-\-offline
 Never access the network: remote images are not downloaded. Can also be set in
@@ -40,15 +53,46 @@ the config file with
 The flag only turns the mode on: it cannot re\-enable network access when the
 config file already disables it.
 .TP
-.BR \-\-config " " \fIPATH\fR
-Path to the config file. Defaults to
-.IR ~/.config/mdr/config.kdl .
+.BR \-s ", " \-\-set\-default\-backend " " \fIBACKEND\fR
+Write
+.I BACKEND
+into the config file's
+.B backend
+entry and exit. Only that value is replaced: comments and every other setting
+are kept. mdr refuses to write a backend this binary was not built with, since
+the result would fail on the next start.
 .TP
-.B \-\-list\-backends
-List available backends and exit.
+.BR \-t ", " \-\-theme " " \fITHEME\fR
+Colour scheme to render with:
+.BR auto ", " dark " or " light .
+.B auto
+asks the environment: the
+.B tui
+backend reads
+.B COLORFGBG
+and falls back to dark, while
+.B gui
+and
+.B web
+follow the desktop setting.
+.B dark
+and
+.B light
+settle it: in
+.B gui
+and
+.B web
+they pick the whole palette, while in
+.B tui
+the terminal owns its own colours and the setting selects the syntax
+highlighting of code blocks only. Every backend also flips between the two at
+runtime with
+.BR t .
+Can also be set in the config file with
+.BR "theme \(dqlight\(dq" .
 .TP
-.B \-\-init
-Create a default config file and exit.
+.BR \-v ", " \-\-verbose
+Enable verbose logging (image resolution, mermaid rendering, etc.).
 .TP
 .BR \-h ", " \-\-help
 Print help.
@@ -56,25 +100,56 @@ Print help.
 .BR \-V ", " \-\-version
 Print version.
 .SH FILES
+The configuration file is in KDL format and is created with mdr's defaults the
+first time mdr runs, unless it already exists. Its location follows the
+platform:
+.TP
+.I $XDG_CONFIG_HOME/mdr/config.kdl
+When
+.B XDG_CONFIG_HOME
+holds an absolute path. A relative one is ignored with a warning, as the
+specification requires.
+.TP
+.I %APPDATA%\(rsmdr\(rsconfig.kdl
+On Windows.
 .TP
 .I ~/.config/mdr/config.kdl
-Default configuration file, in KDL format. Create it with
-.BR "mdr \-\-init" ,
-or point elsewhere with
-.BR \-\-config .
+Everywhere else. An existing file here keeps precedence over
+.BR XDG_CONFIG_HOME ,
+so setting that variable later does not orphan a config that is already in use.
+On Windows the home directory is taken from
+.BR %USERPROFILE% ,
+since
+.B HOME
+may hold a POSIX path a native binary cannot resolve.
+.TP
+.I ./.config/mdr/config.kdl
+Last resort, when no environment variable names a home directory. mdr reads
+this file if it is there, and treats it like any other config, but does not
+create one, so no
+.I .config
+directory is left behind in the directory mdr was started from.
 .PP
-Three keys are recognised, each mirroring the command line option of the same
+Use
+.B \-\-config
+to point somewhere else; a path given there must already exist.
+.PP
+Four keys are recognised, each mirroring the command line option of the same
 name:
 .TP
 .B backend
 Backend to start with:
-.BR auto ", " egui ", " webview " or " tui .
+.BR auto ", " gui ", " tui " or " web .
 .TP
 .B verbose
 Boolean, enables verbose logging by default.
 .TP
 .B offline
 Boolean, never access the network.
+.TP
+.B theme
+Colour scheme to render with:
+.BR auto ", " dark " or " light .
 .PP
 Booleans use the KDL syntax
 .RB ( "verbose #true" ", " "offline #false" );
@@ -84,7 +159,7 @@ on its own means true. Example:
 .PP
 .RS
 .EX
-backend webview
+backend web
 offline #true
 .EE
 .RE

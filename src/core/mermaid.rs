@@ -37,17 +37,14 @@ pub fn render_mermaid_to_svg(source: &str) -> Result<String, String> {
 
     // Try with preprocessed source first (fixes common syntax issues)
     let preprocessed = preprocess_mermaid_source(source);
-    let preprocessed_clone = preprocessed.clone();
-    if let Ok(Ok(svg)) =
-        std::panic::catch_unwind(|| mermaid_rs_renderer::render(&preprocessed_clone))
-    {
+    if let Ok(Ok(svg)) = std::panic::catch_unwind(|| mermaid_rs_renderer::render(&preprocessed)) {
         return Ok(svg);
     }
     // Fall back to original source (in case preprocessing made things worse)
     let source = source.to_string();
     match std::panic::catch_unwind(|| mermaid_rs_renderer::render(&source)) {
         Ok(Ok(svg)) => Ok(svg),
-        Ok(Err(e)) => Err(format!("{}", e)),
+        Ok(Err(e)) => Err(format!("{e}")),
         Err(_) => Err("mermaid renderer panicked (unsupported diagram syntax)".to_string()),
     }
 }
@@ -106,14 +103,14 @@ pub fn process_mermaid_blocks(html: &str) -> String {
     re.replace_all(html, |caps: &regex::Captures| {
         let source = html_decode(&caps[1]);
         match render_mermaid_to_svg(&source) {
-            Ok(svg) => format!(r#"<div class="mermaid-diagram">{}</div>"#, svg),
+            Ok(svg) => format!(r#"<div class="mermaid-diagram">{svg}</div>"#),
             Err(_) => format!(r#"<pre class="mermaid">{}</pre>"#, html_encode(&source)),
         }
     })
     .to_string()
 }
 
-/// Pre-process markdown for egui: find ```mermaid blocks, render to SVG,
+/// Pre-process markdown for egui: find fenced `mermaid` blocks, render to SVG,
 /// convert to base64 PNG data URI, replace block with image reference.
 #[cfg(feature = "egui-backend")]
 pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
@@ -125,15 +122,13 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
         let source = &caps[1];
         match render_mermaid_to_svg(source) {
             Ok(svg) => match svg_to_png_base64(&svg) {
-                Ok(b64) => format!("![mermaid diagram](data:image/png;base64,{})", b64),
+                Ok(b64) => format!("![mermaid diagram](data:image/png;base64,{b64})"),
                 Err(_) => format!(
-                    "> **◇ Mermaid Diagram** *(SVG to PNG conversion failed)*\n\n```\n{}```",
-                    source
+                    "> **◇ Mermaid Diagram** *(SVG to PNG conversion failed)*\n\n```\n{source}```"
                 ),
             },
             Err(_) => format!(
-                "> **◇ Mermaid Diagram** *(unsupported by native renderer)*\n\n```\n{}```",
-                source
+                "> **◇ Mermaid Diagram** *(unsupported by native renderer)*\n\n```\n{source}```"
             ),
         }
     })
@@ -145,23 +140,14 @@ pub fn preprocess_mermaid_for_egui(markdown: &str) -> String {
 #[cfg(feature = "egui-backend")]
 fn svg_to_png_base64(svg: &str) -> Result<String, Box<dyn std::error::Error>> {
     use base64::Engine;
-    use std::sync::{Arc, OnceLock};
 
     // Max texture size for egui/GPU — keep well under the 16384 hard limit
     const MAX_TEXTURE_SIZE: u32 = 8192;
 
     // Load system fonts once and reuse across calls
-    static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    let fontdb = FONTDB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        Arc::new(db)
-    });
-
-    let options = usvg::Options {
-        fontdb: Arc::clone(fontdb),
-        ..Default::default()
-    };
+    // Shared, so the resolver that refuses an SVG's own file
+    // references is the one every rasteriser uses.
+    let options = crate::core::svg::options();
     let tree = usvg::Tree::from_str(svg, &options)?;
     let size = tree.size();
     let svg_w = size.width();
@@ -280,30 +266,62 @@ mod tests {
 
     #[test]
     fn render_mermaid_valid_diagram() {
-        let source = "graph LR\n  A-->B";
-        let result = render_mermaid_to_svg(source);
-        // Should either succeed with SVG or fail with a descriptive error
-        // (depends on mermaid-rs-renderer capabilities at runtime)
-        match result {
-            Ok(svg) => {
-                assert!(
-                    svg.contains("<svg") || svg.contains("<SVG"),
-                    "Expected SVG output, got: {}",
-                    svg
-                );
-            }
-            Err(e) => {
-                // If it errors, the error should be descriptive
-                assert!(!e.is_empty(), "Error message should not be empty");
-            }
-        }
+        // An ordinary flowchart has to render. Accepting an error here — which
+        // this test used to do — meant a renderer that had stopped working
+        // altogether still passed.
+        let svg =
+            render_mermaid_to_svg("graph LR\n  A-->B").expect("a plain flowchart must render");
+        assert!(svg.contains("<svg"), "expected an SVG document, got: {svg}");
+        assert!(
+            svg.contains("</svg>"),
+            "expected a closed SVG document, got: {svg}"
+        );
+    }
+
+    #[test]
+    fn render_mermaid_renders_subgraphs_and_sequence_diagrams() {
+        // Two shapes the renderer reworked in 0.3; both must produce a diagram,
+        // not merely avoid panicking.
+        let subgraph = "graph TB\n  subgraph one\n    A-->B\n  end\n  B-->C";
+        let svg = render_mermaid_to_svg(subgraph).expect("a subgraph must render");
+        assert!(svg.contains("<svg"), "expected an SVG document, got: {svg}");
+
+        let sequence = "sequenceDiagram\n  Alice->>Bob: Hello\n  Bob-->>Alice: Hi";
+        let svg = render_mermaid_to_svg(sequence).expect("a sequence diagram must render");
+        assert!(svg.contains("<svg"), "expected an SVG document, got: {svg}");
+    }
+
+    #[cfg(feature = "egui-backend")]
+    #[test]
+    fn a_rendered_diagram_rasterises_to_a_real_png() {
+        // The SVG only matters if it survives the usvg/tiny-skia pass the egui
+        // backend puts it through, so go all the way to the pixels.
+        let svg = render_mermaid_to_svg("graph LR\n  A-->B").expect("diagram must render");
+        let b64 = svg_to_png_base64(&svg).expect("SVG must rasterise");
+
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .expect("output must be valid base64");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "expected a PNG header");
+
+        let image = image::load_from_memory(&png).expect("PNG must decode");
+        assert!(
+            image.width() > 0 && image.height() > 0,
+            "rasterised diagram must have a surface, got {}x{}",
+            image.width(),
+            image.height()
+        );
     }
 
     #[test]
     fn render_mermaid_empty_input() {
-        let result = render_mermaid_to_svg("");
-        // Empty input should produce an error, not panic
-        assert!(result.is_err() || result.is_ok());
+        // `is_err() || is_ok()` is what this used to assert, which is every
+        // possible outcome. Empty input has nothing to draw.
+        assert!(
+            render_mermaid_to_svg("").is_err(),
+            "empty input must not produce a diagram"
+        );
     }
 
     #[test]
@@ -318,11 +336,14 @@ mod tests {
     }
 
     #[test]
-    fn render_mermaid_panic_safety() {
-        // Test that catch_unwind works - even bizarre input doesn't crash
-        let result = render_mermaid_to_svg("\0\0\0");
-        // Must not panic
-        let _ = result;
+    fn unusual_input_does_not_panic() {
+        // Named for what it establishes. It does NOT prove the `catch_unwind`
+        // fires: nothing here makes the renderer panic, so the guard is not
+        // shown to be doing anything. What it rules out is this input taking
+        // the process down, whichever path it goes through.
+        let _ = render_mermaid_to_svg("\0\0\0");
+        let _ = render_mermaid_to_svg("");
+        let _ = render_mermaid_to_svg("graph");
     }
 
     // --- process_mermaid_blocks tests ---
@@ -342,16 +363,14 @@ mod tests {
         // The mermaid code block should be replaced
         assert!(
             !result.contains(r#"class="language-mermaid""#),
-            "Mermaid code block should be replaced, got: {}",
-            result
+            "Mermaid code block should be replaced, got: {result}"
         );
         // Should contain either a rendered diagram or an error
         assert!(
             result.contains("mermaid-diagram")
                 || result.contains("mermaid-error")
                 || result.contains("mermaid-fallback"),
-            "Should contain diagram or fallback div, got: {}",
-            result
+            "Should contain diagram or fallback div, got: {result}"
         );
         // Surrounding content should be preserved
         assert!(result.contains("<p>Before</p>"));
@@ -399,8 +418,7 @@ mod tests {
             // The mermaid block should be replaced with either an image or error message
             assert!(
                 !result.contains("```mermaid"),
-                "Mermaid block should be replaced, got: {}",
-                result
+                "Mermaid block should be replaced, got: {result}"
             );
             assert!(result.contains("Before"));
             assert!(result.contains("After"));
