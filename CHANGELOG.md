@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-15
+
+### Security
+
+- `rustls` is updated from 0.23.43 to 0.23.45, which closes
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285):
+  TLS 1.3 handshake messages were accepted across encryption level boundaries
+  (CVSS 5.3). It reaches mdr through `ureq`, which is what fetches remote
+  images over HTTPS, so it sits on the only network path mdr has.
+
+  The advisory was published on 2026-09-14, the day the 0.6.0 pull request was
+  opened, so no dependency update made before the release could have carried
+  the fix. Binaries are statically linked: 0.6.0 ships the vulnerable version,
+  and only a new release moves users off it.
+
+- `clap` is updated from 4.6.6 to 4.6.7 in passing.
+
+Lockfile only — no manifest change, and the resolver stays within versions
+compatible with the declared MSRV of 1.95.
+
 ## [0.6.0] - 2026-09-14
 
 The crate moves to Rust edition 2024, the configuration file finds itself, the
