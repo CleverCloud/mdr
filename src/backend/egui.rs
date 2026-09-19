@@ -882,6 +882,77 @@ fn cell_width(ui: &egui::Ui, cell: &[CellPiece], palette: &crate::core::style::P
     galley.size().x + 2.0 * CELL_PADDING_X
 }
 
+/// The narrowest a column may be drawn: the padding, plus room for a few
+/// characters. A column squeezed below this wraps one letter per line, which is
+/// unreadable rather than merely tight.
+const MIN_TEXT_WIDTH: f32 = 24.0;
+
+/// Fit the natural column widths into the width actually available.
+///
+/// The content pane scrolls vertically only, so anything wider than
+/// `available` is clipped and simply lost — the sum of the returned widths must
+/// therefore never exceed it.
+///
+/// Room is taken the way a browser takes it: only from the columns that have
+/// some to spare. A cap is lowered until the total fits; every column wider
+/// than the cap is trimmed to it, every column narrower keeps its natural
+/// width. Scaling every column by the same ratio instead — what this used to
+/// do — shrank the already narrow columns just as hard, down to a text area of
+/// one pixel where a word wraps one letter per line (#72).
+fn fit_column_widths(natural: &[f32], available: f32) -> Vec<f32> {
+    if natural.is_empty() {
+        return Vec::new();
+    }
+    // Nothing can be drawn in no space at all. Negative widths would be worse
+    // than none, so zeroes are as close to "the sum fits" as we can get here.
+    if available <= 0.0 {
+        return vec![0.0; natural.len()];
+    }
+    let total: f32 = natural.iter().sum();
+    if total <= available {
+        return natural.to_vec();
+    }
+
+    // Serve the narrowest column first: either it fits in its equal share of
+    // what is left — and hands the surplus back to the wider columns behind it
+    // — or it does not, and then none of those wider columns does either, so
+    // they all settle on that same share, which is the cap. Splitting the
+    // remainder evenly at each step is what makes the cap fall out without
+    // having to search for it, and it degrades to an even split when there is
+    // not even room for the minimum everywhere.
+    let mut order: Vec<usize> = (0..natural.len()).collect();
+    order.sort_by(|&a, &b| natural[a].total_cmp(&natural[b]));
+
+    let mut widths = vec![0.0; natural.len()];
+    let mut remaining = available;
+    for (served, &column) in order.iter().enumerate() {
+        let share = remaining / (natural.len() - served) as f32;
+        // Not `clamp`, which panics on a NaN bound: a measurement that came out
+        // NaN must cost a column its width, never the whole frame.
+        let width = natural[column].min(share).max(0.0);
+        widths[column] = width;
+        remaining -= width;
+    }
+
+    // The point of taking only from what is wide: as long as the pane can
+    // afford every column its padding and a few characters, no column may come
+    // out of the shrinking below that. Only a pane too small for even that is
+    // allowed to go under — the cap is then the same for everyone.
+    debug_assert!(
+        {
+            let readable = 2.0 * CELL_PADDING_X + MIN_TEXT_WIDTH;
+            let wanted: f32 = natural.iter().map(|n| n.min(readable)).sum();
+            wanted > available
+                || widths
+                    .iter()
+                    .zip(natural)
+                    .all(|(width, n)| *width + 0.5 >= n.min(readable))
+        },
+        "a column was squeezed below what can be read in {available}px: {widths:?}"
+    );
+    widths
+}
+
 /// Draw a whole table: bordered, padded cells on a fixed column grid.
 ///
 /// `egui::Grid` sizes a cell to its content rather than to its column, so the
@@ -905,7 +976,7 @@ fn show_table(ui: &mut egui::Ui, table: &MarkdownTable) {
         row.get(column).map_or(&[][..], Vec::as_slice)
     }
 
-    let mut widths: Vec<f32> = (0..columns)
+    let natural: Vec<f32> = (0..columns)
         .map(|column| {
             std::iter::once(cell_at(&table.header, column))
                 .chain(table.rows.iter().map(|row| cell_at(row, column)))
@@ -913,19 +984,7 @@ fn show_table(ui: &mut egui::Ui, table: &MarkdownTable) {
                 .fold(0.0_f32, f32::max)
         })
         .collect();
-
-    // A table wider than the column is scaled to fit rather than clipped: the
-    // text inside a cell then wraps, as it does in `web`. No column is allowed
-    // below its own padding, or the text would have nowhere to go.
-    let floor = 2.0 * CELL_PADDING_X + 1.0;
-    let total: f32 = widths.iter().sum();
-    let available = ui.available_width();
-    if total > available && total > 0.0 {
-        let ratio = available / total;
-        for width in &mut widths {
-            *width = (*width * ratio).max(floor);
-        }
-    }
+    let widths = fit_column_widths(&natural, ui.available_width());
 
     let stroke = egui::Stroke::new(1.0, colour(palette.border));
     let row_ui = |ui: &mut egui::Ui, row: &[Cell], header: bool| {
@@ -2114,6 +2173,133 @@ mod tests {
                 .map(|p| (&p.text, p.code, p.strong))
                 .collect::<Vec<_>>()
         );
+    }
+
+    // --- table column widths (#72) ---
+
+    /// The natural widths of the table reported in #72: nine columns, two of
+    /// them holding a long sentence, the rest a handful of characters.
+    fn issue_72_widths() -> Vec<f32> {
+        vec![61.0, 66.0, 74.0, 111.0, 86.0, 586.0, 536.0, 61.0, 61.0]
+    }
+
+    /// The content pane scrolls vertically only, so whatever is wider than the
+    /// pane is clipped and lost — which is how #72 loses its last two columns.
+    #[test]
+    fn column_widths_never_exceed_the_space_available() {
+        for (natural, available) in [
+            (issue_72_widths(), 900.0_f32),
+            (issue_72_widths(), 400.0),
+            (vec![1000.0, 10.0, 10.0, 10.0], 100.0),
+            (vec![50.0; 12], 200.0),
+        ] {
+            let widths = fit_column_widths(&natural, available);
+            let total: f32 = widths.iter().sum();
+            assert!(
+                total <= available + 0.5,
+                "{} columns in {}px came to {}px: {:?}",
+                natural.len(),
+                available,
+                total,
+                widths
+            );
+        }
+    }
+
+    /// A column squeezed to its padding leaves a one-pixel text area, and every
+    /// word then wraps one letter per line — the vertical `r a n k` of #72.
+    #[test]
+    fn every_column_keeps_room_for_text_when_there_is_space_for_it() {
+        let natural = issue_72_widths();
+        let available = 900.0_f32;
+        // There is room: nine columns at padding plus a few characters is far
+        // less than the pane.
+        assert!(available > natural.len() as f32 * (2.0 * CELL_PADDING_X + MIN_TEXT_WIDTH));
+
+        for (column, width) in fit_column_widths(&natural, available).iter().enumerate() {
+            let text = width - 2.0 * CELL_PADDING_X;
+            assert!(
+                text >= MIN_TEXT_WIDTH,
+                "column {column} was left {text}px of text area, below the {MIN_TEXT_WIDTH}px minimum"
+            );
+        }
+    }
+
+    /// A table that already fits must be left exactly as measured.
+    #[test]
+    fn a_table_that_fits_is_left_alone() {
+        let natural = vec![100.0, 200.0, 50.0];
+        assert_eq!(fit_column_widths(&natural, 1000.0), natural);
+    }
+
+    /// Shrinking must take from what is wide, not from what is already narrow:
+    /// the wide column gives up room so the narrow ones stay readable.
+    #[test]
+    fn a_wide_column_gives_up_more_than_a_narrow_one() {
+        let natural = vec![600.0, 60.0, 60.0];
+        let widths = fit_column_widths(&natural, 400.0);
+        let lost: Vec<f32> = natural.iter().zip(&widths).map(|(n, w)| n - w).collect();
+        assert!(
+            lost[0] > lost[1] && lost[0] > lost[2],
+            "the wide column should give up the most, lost: {lost:?}"
+        );
+    }
+
+    /// Degenerate inputs must not panic, divide by zero, or hand back widths
+    /// that would be drawn as negative space.
+    #[test]
+    fn a_table_with_no_columns_or_no_room_yields_nothing_to_draw() {
+        assert!(fit_column_widths(&[], 500.0).is_empty());
+        assert!(fit_column_widths(&[], 0.0).is_empty());
+        assert!(fit_column_widths(&[], -10.0).is_empty());
+        for available in [0.0_f32, -10.0] {
+            let widths = fit_column_widths(&[100.0, 50.0], available);
+            assert_eq!(widths, vec![0.0, 0.0], "in {available}px");
+        }
+    }
+
+    /// Below the minimum there is nothing left to be fair about but the space
+    /// itself: every column gets the same sliver, and the sum still fits.
+    #[test]
+    fn a_table_with_no_room_for_the_minimum_splits_the_space_evenly() {
+        let natural = issue_72_widths();
+        let available = 90.0_f32;
+        // Far too little: nine columns cannot even have their padding.
+        assert!(available < natural.len() as f32 * (2.0 * CELL_PADDING_X + MIN_TEXT_WIDTH));
+
+        let widths = fit_column_widths(&natural, available);
+        let share = available / natural.len() as f32;
+        for (column, width) in widths.iter().enumerate() {
+            assert!(
+                (width - share).abs() < 0.5,
+                "column {column} got {width}px, not the even {share}px"
+            );
+        }
+        let total: f32 = widths.iter().sum();
+        assert!(total <= available + 0.5, "{total}px in {available}px");
+    }
+
+    #[test]
+    fn a_single_column_wider_than_the_pane_is_cut_to_the_pane() {
+        assert_eq!(fit_column_widths(&[500.0], 120.0), vec![120.0]);
+    }
+
+    /// Nobody has room to spare, so the loss is shared equally.
+    #[test]
+    fn equal_columns_are_shrunk_equally() {
+        let widths = fit_column_widths(&[100.0; 4], 200.0);
+        assert_eq!(widths, vec![50.0; 4]);
+    }
+
+    /// An empty column asks for nothing, and what it does not take must go to
+    /// the columns that do have text in them.
+    #[test]
+    fn a_zero_width_column_takes_nothing_and_starves_nobody() {
+        let widths = fit_column_widths(&[0.0, 0.0, 300.0], 100.0);
+        assert_eq!(widths, vec![0.0, 0.0, 100.0]);
+
+        // With room to spare the zeroes stay zero rather than being padded out.
+        assert_eq!(fit_column_widths(&[0.0, 40.0], 500.0), vec![0.0, 40.0]);
     }
 
     #[test]
