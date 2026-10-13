@@ -130,8 +130,33 @@ mdr --offline README.md
 # Render in the light colour scheme
 mdr -t light README.md
 
+# Print the web backend's page instead of opening a window
+mdr --export html README.md > README.html
+
 # Show help
 mdr --help
+```
+
+### Exporting the page
+
+`--export html` writes to stdout the page the `web` backend would show:
+Mermaid diagrams as inline SVG, local images inlined, syntax highlighting,
+table of contents, search and keyboard shortcuts — a single file with no
+external resources. It reads stdin like the viewer does (`-` or a pipe), so an
+editor can render a buffer that has not been saved:
+
+```bash
+cat notes.md | mdr --export html - > notes.html
+```
+
+The page keeps the `web` backend's Content-Security-Policy, which forbids every
+connection. A tool that serves the page itself to give it live reload (an
+editor preview that pushes updates over an event stream, say) passes
+`--allow-connect`, which relaxes `connect-src` to `'self'` and nothing else: the
+page can reach the origin that served it, and still no other.
+
+```bash
+mdr --export html --allow-connect - < notes.md
 ```
 
 In `web`, clicking an `http(s)` link opens it in your system browser, and a

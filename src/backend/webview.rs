@@ -21,6 +21,22 @@ enum UserEvent {
     OpenDocument(PathBuf),
 }
 
+/// Render `file_path` to the page `run` would load, without opening a window,
+/// for `--export html`; `allow_connect` is `--allow-connect`.
+pub fn export(file_path: &Path, allow_connect: bool) -> Result<String, Box<dyn std::error::Error>> {
+    let canonical_file = std::fs::canonicalize(file_path)?;
+    // A piped document lives in a temp file; its images do not.
+    let base_dir = crate::core::document_base_dir(&canonical_file);
+    let markdown = std::fs::read_to_string(file_path)?;
+    let body = resolve_local_images(&parse_markdown(&markdown), &base_dir);
+    Ok(build_page(
+        &body,
+        &toc::extract_toc(&markdown),
+        crate::core::theme(),
+        allow_connect,
+    ))
+}
+
 pub fn run(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // Canonicalize the file path first so parent() always gives an absolute directory.
     // Without this, a bare filename like "README.md" gives parent() = "" (empty),
@@ -562,6 +578,20 @@ fn build_html_with_theme(
     toc_entries: &[toc::TocEntry],
     theme: crate::core::Theme,
 ) -> String {
+    build_page(body, toc_entries, theme, false)
+}
+
+/// The page, optionally allowed to connect back to the origin serving it.
+///
+/// `allow_connect` is only reachable through `--export html --allow-connect`:
+/// mdr's own window never serves the page from an origin, so `'self'` would
+/// mean nothing there.
+fn build_page(
+    body: &str,
+    toc_entries: &[toc::TocEntry],
+    theme: crate::core::Theme,
+    allow_connect: bool,
+) -> String {
     // Everything coming from the document is filtered here, before mdr's own
     // template is wrapped around it (#62). mdr's scripts are added afterwards
     // and are never sanitised.
@@ -619,12 +649,18 @@ fn build_html_with_theme(
     // Mermaid's nor highlight.js's runtime requirements could be checked in a
     // real WebKit window here — so the document sanitiser stays the guard that
     // keeps document scripts out of the page.
+    //
+    // `--allow-connect` relaxes `connect-src` to `'self'` and nothing else: a
+    // host serving the exported page (an editor's live preview) can then reach
+    // its own origin, for an event stream or a refetch, while the page still
+    // cannot talk to any other one.
+    let connect_src = if allow_connect { "'self'" } else { "'none'" };
     format!(
         r#"<!DOCTYPE html>
 <html{theme_attr}>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; connect-src {connect_src}; form-action 'none'; base-uri 'none';">
 <style>{css}</style>
 <style>
 .expandable {{ position: relative; }}
@@ -2549,6 +2585,20 @@ mod tests {
         ] {
             assert!(page.contains(directive), "CSP misses {directive}: {page}");
         }
+    }
+
+    #[test]
+    fn allow_connect_only_opens_connect_src_to_self() {
+        let theme = crate::core::Theme::Auto;
+        let closed = build_page("<p>hi</p>", &[], theme, false);
+        let open = build_page("<p>hi</p>", &[], theme, true);
+        assert!(closed.contains("connect-src 'none'"));
+        assert!(open.contains("connect-src 'self'"));
+        // Nothing but that one directive differs.
+        assert_eq!(
+            open.replace("connect-src 'self'", "connect-src 'none'"),
+            closed
+        );
     }
 
     #[test]
