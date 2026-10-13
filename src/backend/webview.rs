@@ -657,11 +657,13 @@ fn build_html_with_theme(
     background: rgba(0,0,0,0.85); z-index: 2147483647;
     align-items: center; justify-content: center; cursor: zoom-out;
 }}
-#expand-content {{ cursor: default; }}
 #expand-content img {{ width: 95vw; height: 95vh; object-fit: contain; }}
 #expand-content svg {{ width: 95vw; height: 95vh; }}
 .expandable img, .expandable svg {{ cursor: zoom-in; }}
 .content svg {{ width: 100% !important; height: auto !important; display: block; }}
+/* The rule above is for diagrams; without this it stretches the button's
+   14px icon across the whole button. */
+.content .expand-btn svg {{ width: 14px !important; height: 14px !important; cursor: pointer; }}
 body.toc-hidden .sidebar {{ display: none; }}
 body.toc-hidden .content {{ margin-left: 0; }}
 #shortcuts-overlay {{
@@ -920,8 +922,10 @@ document.querySelector('.sidebar').addEventListener('click', function(e) {{
         if (el) {{ e.stopPropagation(); e.preventDefault(); open(el); }}
     }});
 
+    // Any click closes it: the enlarged image is sized to 95% of the viewport
+    // whatever its aspect ratio, so most of what looks like backdrop is in
+    // fact `#expand-content`, and a click there must close it too.
     overlay.addEventListener('click', function() {{ overlay.style.display = 'none'; }});
-    content.addEventListener('click', function(e) {{ e.stopPropagation(); }});
     document.addEventListener('keydown', function(e) {{
         if (e.key === 'Escape') overlay.style.display = 'none';
     }});
