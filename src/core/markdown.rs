@@ -145,10 +145,41 @@ body {
 }
 .sidebar li a:hover { background: var(--sidebar-hover); }
 .sidebar li a.active { background: var(--sidebar-active); border-left-color: var(--link); color: var(--link); }
-.sidebar li.toc-h2 a { padding-left: 24px; }
-.sidebar li.toc-h3 a { padding-left: 36px; font-size: 13px; }
-.sidebar li.toc-h4 a { padding-left: 48px; font-size: 13px; color: var(--blockquote); }
-.sidebar li.toc-h5 a, .sidebar li.toc-h6 a { padding-left: 56px; font-size: 12px; color: var(--blockquote); }
+/* Each level indents 12px, with room left of the text for the fold twisty,
+   which sits 18px before the text it belongs to. */
+.sidebar li { position: relative; }
+.sidebar li.toc-h1 a { padding-left: 24px; }
+.sidebar li.toc-h2 a { padding-left: 36px; }
+.sidebar li.toc-h3 a { padding-left: 48px; font-size: 13px; }
+.sidebar li.toc-h4 a { padding-left: 60px; font-size: 13px; color: var(--blockquote); }
+.sidebar li.toc-h5 a, .sidebar li.toc-h6 a { padding-left: 72px; font-size: 12px; color: var(--blockquote); }
+.toc-twisty {
+    position: absolute; top: 0; bottom: 0; width: 16px;
+    padding: 0; border: none; background: none;
+    color: var(--blockquote); font-size: 10px; line-height: 1;
+    cursor: pointer; z-index: 1;
+}
+.toc-twisty:hover { color: var(--fg); }
+.toc-twisty::before { content: "\25BE"; }
+.toc-twisty[aria-expanded="false"]::before { content: "\25B8"; }
+.toc-h1 > .toc-twisty { left: 6px; }
+.toc-h2 > .toc-twisty { left: 18px; }
+.toc-h3 > .toc-twisty { left: 30px; }
+.toc-h4 > .toc-twisty { left: 42px; }
+.toc-h5 > .toc-twisty, .toc-h6 > .toc-twisty { left: 54px; }
+.sidebar-toggle {
+    position: fixed; top: 18px; left: 214px; z-index: 5;
+    width: 28px; height: 28px; padding: 0;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--sidebar-bg); color: var(--blockquote);
+    font-size: 16px; line-height: 1; cursor: pointer;
+}
+.sidebar-toggle:hover { color: var(--fg); background: var(--sidebar-hover); }
+.sidebar-toggle::before { content: "\00AB"; }
+body.toc-hidden .sidebar-toggle { left: 8px; }
+body.toc-hidden .sidebar-toggle::before { content: "\00BB"; }
+/* Clears the toggle, which stays in the corner once the sidebar is gone. */
+body.toc-hidden .content { padding-left: 48px; }
 .content {
     margin-left: 250px;
     max-width: 900px;

@@ -418,12 +418,26 @@ fn file_to_data_uri(path: &std::path::Path) -> Result<String, Box<dyn std::error
     Ok(format!("data:{mime};base64,{b64}"))
 }
 
+/// The TOC as a flat list of `<li>`, one per heading. A heading followed by a
+/// deeper one gets a twisty that folds its subheadings; the page's script
+/// does the folding from `data-level`, so the list stays flat and can still be
+/// swapped wholesale on reload.
 fn build_toc_html(entries: &[toc::TocEntry]) -> String {
     let mut toc = String::new();
-    for entry in entries {
+    for (i, entry) in entries.iter().enumerate() {
+        let has_children = entries
+            .get(i + 1)
+            .is_some_and(|next| next.level > entry.level);
+        let twisty = if has_children {
+            r#"<button type="button" class="toc-twisty" aria-expanded="true" title="Collapse"></button>"#
+        } else {
+            ""
+        };
         toc.push_str(&format!(
-            "<li class=\"toc-h{}\"><a href=\"#{}\">{}</a></li>",
-            entry.level, entry.anchor, entry.text
+            "<li class=\"toc-h{level}\" data-level=\"{level}\">{twisty}<a href=\"#{}\">{}</a></li>",
+            entry.anchor,
+            entry.text,
+            level = entry.level,
         ));
     }
     toc
@@ -686,13 +700,14 @@ body.toc-hidden .content {{ margin-left: 0; }}
     border-radius: 4px; padding: 2px 6px;
 }}
 @media print {{
-    .sidebar, #shortcuts-overlay, #searchBar {{ display: none !important; }}
+    .sidebar, .sidebar-toggle, #shortcuts-overlay, #searchBar {{ display: none !important; }}
     .content {{ margin-left: 0; max-width: none; }}
 }}
 </style>
 <style>{theme_overrides}</style>
 </head>
 <body>
+<button type="button" class="sidebar-toggle" title="Show or hide the table of contents (Ctrl/Cmd + B)"></button>
 <nav class="sidebar">
 <p class="sidebar-title">Table of Contents</p>
 <ul>{toc}</ul>
@@ -701,6 +716,65 @@ body.toc-hidden .content {{ margin-left: 0; }}
 {body}
 </div>
 <script>
+(function() {{
+    var list = document.querySelector('.sidebar ul');
+    // Folded headings by anchor, so the state survives the list being
+    // replaced on reload as long as the heading keeps its name.
+    var folded = {{}};
+    var KEY = 'mdr-toc-state';
+    // Storage can be missing or throw (opaque origins, privacy settings); the
+    // state is a convenience, so the page works without it.
+    try {{
+        var saved = JSON.parse(sessionStorage.getItem(KEY) || 'null');
+        if (saved) {{
+            (saved.folded || []).forEach(function(href) {{ folded[href] = true; }});
+            if (saved.hidden) document.body.classList.add('toc-hidden');
+        }}
+    }} catch (e) {{}}
+    function save() {{
+        try {{
+            sessionStorage.setItem(KEY, JSON.stringify({{
+                folded: Object.keys(folded),
+                hidden: document.body.classList.contains('toc-hidden')
+            }}));
+        }} catch (e) {{}}
+    }}
+
+    function apply() {{
+        // Items deeper than `hideBelow` belong to a folded heading.
+        var hideBelow = 0;
+        list.querySelectorAll('li').forEach(function(li) {{
+            var level = Number(li.getAttribute('data-level'));
+            if (hideBelow && level > hideBelow) {{ li.hidden = true; return; }}
+            hideBelow = 0;
+            li.hidden = false;
+            var twisty = li.querySelector('.toc-twisty');
+            if (!twisty) return;
+            var link = li.querySelector('a');
+            var isFolded = !!(link && folded[link.getAttribute('href')]);
+            twisty.setAttribute('aria-expanded', String(!isFolded));
+            twisty.title = isFolded ? 'Expand' : 'Collapse';
+            if (isFolded) hideBelow = level;
+        }});
+    }}
+    apply();
+    // Live reload replaces the list's children; fold it the same way again.
+    new MutationObserver(apply).observe(list, {{ childList: true }});
+    // Cmd/Ctrl + B flips the class elsewhere, so watch it rather than the button.
+    new MutationObserver(save).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
+
+    document.querySelector('.sidebar-toggle').addEventListener('click', function() {{
+        document.body.classList.toggle('toc-hidden');
+    }});
+    list.addEventListener('click', function(e) {{
+        var twisty = e.target.closest('.toc-twisty');
+        if (!twisty) return;
+        var href = twisty.parentNode.querySelector('a').getAttribute('href');
+        if (folded[href]) delete folded[href]; else folded[href] = true;
+        apply();
+        save();
+    }});
+}})();
 document.querySelector('.sidebar').addEventListener('click', function(e) {{
     if (e.target.tagName === 'A') {{
         e.preventDefault();
@@ -1487,6 +1561,27 @@ fn scope_rules_to_theme(rules: &str, theme: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toc_twisty_only_on_headings_with_subheadings() {
+        let entry = |level, text: &str| toc::TocEntry {
+            level,
+            text: text.to_string(),
+            anchor: text.to_lowercase(),
+        };
+        // A has B under it, C has D; B, D and E have nothing deeper after them.
+        let html = build_toc_html(&[
+            entry(1, "A"),
+            entry(2, "B"),
+            entry(2, "C"),
+            entry(3, "D"),
+            entry(1, "E"),
+        ]);
+        let items: Vec<&str> = html.split("</li>").filter(|s| !s.is_empty()).collect();
+        let folds: Vec<bool> = items.iter().map(|li| li.contains("toc-twisty")).collect();
+        assert_eq!(folds, [true, false, true, false, false]);
+        assert!(items[3].starts_with(r#"<li class="toc-h3" data-level="3">"#));
+    }
 
     #[test]
     fn build_html_does_not_block_clipboard_in_csp() {
