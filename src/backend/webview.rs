@@ -366,26 +366,27 @@ fn unescape_url_entities(src: &str) -> String {
         .replace("&#39;", "'")
 }
 
-/// Decode percent-encoded URL path components (e.g. %20 -> space).
+/// Decode percent-encoded URL path components as UTF-8 (e.g. %C3%A9 -> é).
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2
-                && let Ok(byte) = u8::from_str_radix(&hex, 16)
-            {
-                result.push(byte as char);
-                continue;
-            }
-            result.push('%');
-            result.push_str(&hex);
+    let bytes = s.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (
+                char::from(bytes[i + 1]).to_digit(16),
+                char::from(bytes[i + 2]).to_digit(16),
+            )
+        {
+            decoded.push((high * 16 + low) as u8);
+            i += 3;
         } else {
-            result.push(c);
+            decoded.push(bytes[i]);
+            i += 1;
         }
     }
-    result
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Convert a local file to a base64 data URI string.
@@ -2579,6 +2580,70 @@ mod tests {
         // concatenated: the quote must come out backslashed.
         let js = scroll_to_anchor_script("a\");alert(1);//");
         assert!(js.contains(r#"getElementById("a\");alert(1);//")"#), "{js}");
+    }
+
+    #[test]
+    fn percent_encoded_utf8_paths_keep_their_unicode_characters() {
+        for (encoded, expected) in [
+            ("caf%C3%A9.md", "café.md"),
+            ("%E6%97%A5%E6%9C%AC.md", "日本.md"),
+            ("%F0%9F%93%9D.md", "📝.md"),
+            ("café%20notes.md", "café notes.md"),
+            ("caf%c3%a9.md", "café.md"),
+        ] {
+            assert_eq!(percent_decode(encoded), expected, "{encoded}");
+        }
+    }
+
+    #[test]
+    fn percent_encoded_paths_handle_literal_and_invalid_escapes() {
+        for (encoded, expected) in [
+            ("", ""),
+            ("plain+name.md", "plain+name.md"),
+            ("a%20b.md", "a b.md"),
+            ("%2520.md", "%20.md"),
+            ("%", "%"),
+            ("%A", "%A"),
+            ("%ZZ.md", "%ZZ.md"),
+            ("%aé.md", "%aé.md"),
+            ("%FF.md", "�.md"),
+        ] {
+            assert_eq!(percent_decode(encoded), expected, "{encoded}");
+        }
+    }
+
+    #[test]
+    fn percent_encoded_unicode_image_names_are_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("café.png");
+        image::RgbaImage::new(1, 1).save(&image_path).unwrap();
+        let html = r#"<img src="caf%C3%A9.png" alt="coffee">"#;
+        let resolved = resolve_local_images(html, dir.path());
+        assert!(resolved.contains("data:image/png;base64,"), "{resolved}");
+        assert!(!resolved.contains("caf%C3%A9.png"), "{resolved}");
+
+        // Decoding must not bypass the existing image containment boundary.
+        let docs = dir.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        let outside = r#"<img src="%2E%2E/caf%C3%A9.png" alt="outside">"#;
+        assert_eq!(resolve_local_images(outside, &docs), outside);
+    }
+
+    #[test]
+    fn percent_encoded_unicode_markdown_links_name_the_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("index.md");
+        let linked = dir.path().join("café.md");
+        std::fs::write(&linked, "# Café").unwrap();
+        let absolute = format!("file://{}/caf%C3%A9.md", dir.path().display());
+        for url in ["caf%C3%A9.md", absolute.as_str()] {
+            let decision = navigation_decision(url, &current);
+            assert_eq!(decision, NavDecision::OpenDocument(linked.clone()));
+            let NavDecision::OpenDocument(path) = decision else {
+                unreachable!();
+            };
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "# Café");
+        }
     }
 
     // --- navigation (#55) ---
