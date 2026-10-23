@@ -105,7 +105,7 @@ winget install CleverCloud.mdr
 ### Nix
 
 ```bash
-nix run github:CleverCloud/mdr
+nix run --no-write-lock-file github:CleverCloud/mdr
 ```
 
 ### Pre-built binaries

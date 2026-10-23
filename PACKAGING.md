@@ -183,7 +183,7 @@ builtin `auto-req`.
 Users can install directly with:
 
 ```bash
-nix run github:CleverCloud/mdr
+nix run --no-write-lock-file github:CleverCloud/mdr
 ```
 
 Or add to a flake:
