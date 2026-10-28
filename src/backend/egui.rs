@@ -1055,11 +1055,6 @@ enum Segment<'a> {
     Table(MarkdownTable),
 }
 
-/// The widest the document column is drawn, in points.
-///
-/// The same 900 the stylesheet gives `web`.
-const CONTENT_WIDTH: f32 = 900.0;
-
 /// A viewer configured the same way everywhere it is used.
 ///
 /// The syntax themes are the pair the terminal backend uses, so a code block
@@ -1707,12 +1702,12 @@ impl eframe::App for MdrApp {
                     // Negative y moves the content up, i.e. scrolls down.
                     ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
                 }
-                // A column, not the whole window. The stylesheet caps `web` at
-                // 900 px for the reason every book has margins: a line that
-                // runs the width of a wide monitor is hard to come back from at
-                // the end of it. Without this a code block was stretched to the
-                // window and prose ran edge to edge.
-                ui.set_max_width(CONTENT_WIDTH.min(ui.available_width()));
+                // A column, not the whole window. Both graphical backends cap
+                // it at `content-width` for the reason every book has margins:
+                // a line that runs the width of a wide monitor is hard to come
+                // back from at the end of it. Without this a code block was
+                // stretched to the window and prose ran edge to edge.
+                ui.set_max_width(crate::core::content_width().min(ui.available_width()));
                 for (i, section) in self.sections.iter().enumerate() {
                     // Place an invisible anchor widget before the section
                     let response = ui.allocate_response(egui::vec2(0.0, 0.0), egui::Sense::hover());
