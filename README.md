@@ -293,8 +293,9 @@ there, rather than leaving a `.config/` behind in whatever directory it was
 started from. A file that is already there is treated like any other config,
 old backend name included.
 
-The file is [KDL v2](https://kdl.dev). Four keys are recognised, each mirroring
-the command line option of the same name:
+The file is [KDL v2](https://kdl.dev). Five keys are recognised. The first four
+mirror the command line option of the same name; `content-width` exists only in
+the file:
 
 `mdr -s web` writes the backend into the file for you, leaving comments and
 every other setting alone; it refuses a backend the binary was not built with.
@@ -312,6 +313,7 @@ backend auto      // auto, gui, tui or web
 verbose #true     // same as -v
 offline #true     // same as --offline
 theme "auto"      // auto, dark or light
+content-width 900 // widest the document column is drawn in gui and web
 ```
 
 ## Mermaid Support
