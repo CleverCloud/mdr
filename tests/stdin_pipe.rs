@@ -27,12 +27,10 @@ fn sandbox() -> tempfile::TempDir {
 }
 
 fn mdr_bin() -> std::path::PathBuf {
-    // cargo test builds the binary in the same target directory
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // remove test binary name
-    path.pop(); // remove "deps"
-    path.push("mdr");
-    path
+    // Cargo reports the path it built, extension included. Walking
+    // `current_exe` assumed `target/debug/deps`, and stable cargo runs this
+    // test from `target/debug/build/mdr/<hash>/out` instead.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_mdr"))
 }
 
 #[test]
