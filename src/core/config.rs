@@ -383,6 +383,30 @@ mod tests {
     }
 
     #[test]
+    fn load_parses_content_width() {
+        let path = tmp_config("width_int", "content-width 1400\n");
+        assert_eq!(load(&path).unwrap().content_width, Some(1400.0));
+        let _ = std::fs::remove_file(&path);
+        let path = tmp_config("width_float", "content-width 1200.5\n");
+        assert_eq!(load(&path).unwrap().content_width, Some(1200.5));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_content_width_that_is_not_a_positive_number_is_ignored() {
+        for (name, content) in [
+            ("width_zero", "content-width 0\n"),
+            ("width_negative", "content-width -10\n"),
+            ("width_string", "content-width \"wide\"\n"),
+            ("width_bare", "content-width\n"),
+        ] {
+            let path = tmp_config(name, content);
+            assert_eq!(load(&path).unwrap().content_width, None, "{content}");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
     fn load_returns_defaults_for_missing_file() {
         let path = PathBuf::from("/nonexistent/mdr_no_such_config.kdl");
         let cfg = load(&path).unwrap();
@@ -405,6 +429,7 @@ mod tests {
         assert!(content.contains("backend auto"));
         assert!(content.contains("offline"));
         assert!(content.contains("theme"));
+        assert!(content.contains("content-width"));
     }
 
     #[test]
@@ -595,6 +620,8 @@ pub struct Config {
     pub offline: Option<bool>,
     /// Colour scheme to assume: `auto`, `dark` or `light`.
     pub theme: Option<String>,
+    /// Widest the document column is drawn in `gui` and `web`, in points.
+    pub content_width: Option<f32>,
 }
 
 const DEFAULT_CONFIG: &str = "\
@@ -613,6 +640,10 @@ backend auto
 // environment: gui and web follow the desktop, tui reads COLORFGBG and
 // falls back to dark. In tui the setting picks the code highlighting only.
 // theme \"auto\"
+
+// Widest the document column is drawn in gui and web, in points. A value
+// wider than the window fills it.
+// content-width 900
 ";
 
 const FILE_NAME: &str = "config.kdl";
@@ -1068,6 +1099,17 @@ pub fn load(path: &PathBuf) -> Result<Config, Box<dyn std::error::Error>> {
                     } else {
                         eprintln!("mdr: unknown theme '{s}', expected 'auto', 'dark' or 'light'");
                     }
+                }
+            }
+            "content-width" => {
+                let width = match node.get(0) {
+                    Some(kdl::KdlValue::Integer(i)) => Some(*i as f64),
+                    Some(kdl::KdlValue::Float(f)) => Some(*f),
+                    _ => None,
+                };
+                match width {
+                    Some(w) if w.is_finite() && w > 0.0 => cfg.content_width = Some(w as f32),
+                    _ => eprintln!("mdr: content-width expects a positive number, ignoring it"),
                 }
             }
             "offline" => {

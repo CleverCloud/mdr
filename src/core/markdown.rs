@@ -91,12 +91,13 @@ pub fn github_css() -> String {
         "@media (prefers-color-scheme: dark) {{\n    :root {{ {dark} }}\n}}\n\
          @media (prefers-color-scheme: light) {{\n    :root {{ {light} }}\n}}\n\
          :root {{ --base-font-size: {base}px; --code-font-size: {code}%; \
-         --line-height: {line}; }}\n{headings}{rest}",
+         --line-height: {line}; --content-width: {width}px; }}\n{headings}{rest}",
         dark = variables(&style::DARK),
         light = variables(&style::LIGHT),
         base = style::BASE_FONT_SIZE,
         code = style::CODE_FONT_SCALE * 100.0,
         line = style::LINE_HEIGHT,
+        width = crate::core::content_width(),
         rest = STATIC_CSS,
     )
 }
@@ -151,7 +152,7 @@ body {
 .sidebar li.toc-h5 a, .sidebar li.toc-h6 a { padding-left: 56px; font-size: 12px; color: var(--blockquote); }
 .content {
     margin-left: 250px;
-    max-width: 900px;
+    max-width: var(--content-width);
     padding: 32px 24px 3rem;
     flex: 1;
 }

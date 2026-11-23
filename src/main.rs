@@ -380,6 +380,7 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
         vlog!("no config file at {}", cfg_path.display());
     }
     core::set_offline(cli.offline || cfg.offline.unwrap_or(false));
+    core::set_content_width(cfg.content_width.unwrap_or(core::DEFAULT_CONTENT_WIDTH));
     core::set_theme(
         cli.theme
             .as_deref()

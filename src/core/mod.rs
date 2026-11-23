@@ -29,7 +29,7 @@ pub mod svg;
 pub mod toc;
 pub mod watcher;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
@@ -55,6 +55,25 @@ pub fn set_offline(v: bool) {
 ))]
 pub fn offline() -> bool {
     OFFLINE.load(Ordering::Relaxed)
+}
+
+/// The widest the document column is drawn, in points (`gui`) or CSS pixels
+/// (`web`), when the config file does not say otherwise.
+pub const DEFAULT_CONTENT_WIDTH: f32 = 900.0;
+
+/// The column width as `f32` bits: there is no atomic float.
+static CONTENT_WIDTH: AtomicU32 = AtomicU32::new(DEFAULT_CONTENT_WIDTH.to_bits());
+
+pub fn set_content_width(width: f32) {
+    CONTENT_WIDTH.store(width.to_bits(), Ordering::Relaxed);
+}
+
+/// The width the two graphical backends cap the document column at, so a line
+/// does not run the width of a wide monitor; `content-width` in the config
+/// file moves it.
+#[cfg(any(feature = "egui-backend", feature = "webview-backend"))]
+pub fn content_width() -> f32 {
+    f32::from_bits(CONTENT_WIDTH.load(Ordering::Relaxed))
 }
 
 /// Which colour scheme the rendering should assume.
