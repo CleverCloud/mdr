@@ -24,17 +24,17 @@
 
           nativeBuildInputs = with pkgs; [
             pkg-config
-          ] ++ lib.optionals stdenv.isLinux [
-            wrapGAppsHook
+          ] ++ lib.optionals stdenv.hostPlatform.isLinux [
+            wrapGAppsHook3
           ];
 
           # On Darwin the WebKit/AppKit frameworks come from the default SDK of
           # the stdenv (darwin.apple_sdk.frameworks was removed from nixpkgs),
           # so no extra buildInputs are needed there.
-          buildInputs = with pkgs; lib.optionals stdenv.isLinux [
+          buildInputs = with pkgs; lib.optionals stdenv.hostPlatform.isLinux [
             gtk3
             webkitgtk_4_1
-            libxdo
+            xdotool
             libGL
           ];
 
