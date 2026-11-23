@@ -53,11 +53,11 @@ clap = { version = "4", features = ["derive"] }
 # `syntect-onig` rather than `syntect`: from 0.53 comrak stopped enabling a regex
 # engine for syntect on its own, and a webview-only build (where the terminal
 # backend's own syntect dependency is absent) would no longer link.
-comrak = { version = "0.55", default-features = false, features = [
+comrak = { version = "1", default-features = false, features = [
   "syntect-onig",
 ] }
-notify = "8"
-notify-debouncer-mini = "0.7"
+notify = "9"
+notify-debouncer-mini = "0.8"
 mermaid-rs-renderer = { version = "0.3", default-features = false }
 regex = "1"
 serde_json = "1"
@@ -69,7 +69,7 @@ kdl = "6"
 # has no `save` — and the feature stored the window geometry and egui's memory
 # in one file shared by every document, so a window opened at the size, the
 # place and the scroll offset the *previous* document had been left at.
-eframe = { version = "0.36", optional = true }
+eframe = { version = "0.37", optional = true }
 # No `load-images`: it is `egui_extras/image` + `egui_extras/file`, and that
 # file loader reads any path the document names, straight off disk, without
 # passing through mdr's own resolver — so an image refused for being outside the
@@ -80,23 +80,23 @@ eframe = { version = "0.36", optional = true }
 # options and so would not have the resolver that refuses an SVG's file
 # references. mdr rasterises every SVG itself, including the ones that arrive as
 # `data:` URIs, so nothing in the window needs to parse one.
-egui_commonmark = { version = "0.25", default-features = false, features = [
+egui_commonmark = { version = "0.26", default-features = false, features = [
   "better_syntax_highlighting",
   "pulldown_cmark",
   "embedded_image",
 ], optional = true }
-egui_extras = { version = "0.36", default-features = false, features = [
+egui_extras = { version = "0.37", default-features = false, features = [
   "image",
 ], optional = true }
-resvg = { version = "0.48", optional = true }
-usvg = { version = "0.48", optional = true }
+resvg = { version = "0.50", optional = true }
+usvg = { version = "0.50", optional = true }
 tiny-skia = { version = "0.12", optional = true }
 fontdb = { version = "0.24", optional = true }
 
 # web backend (wry/tao)
 wry = { version = "0.57", optional = true }
 tao = { version = "0.37", optional = true }
-muda = { version = "0.20", optional = true }
+muda = { version = "0.21", optional = true }
 
 # tui backend
 ratatui = { version = "0.30", optional = true }

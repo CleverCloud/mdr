@@ -738,8 +738,9 @@ impl MarkdownTable {
         let mut header = Vec::new();
         let mut rows = Vec::new();
         for row in node.children() {
-            let NodeValue::TableRow(is_header) = row.data.borrow().value else {
-                continue;
+            let is_header = match &row.data.borrow().value {
+                NodeValue::TableRow(meta) => meta.header,
+                _ => continue,
             };
             let cells: Vec<Cell> = row
                 .children()
@@ -802,10 +803,10 @@ fn collect_inline<'a>(
         // is in the children. The `title` is the tooltip, not the alt, and
         // pushing it here put it in front of the text it belongs to.
         NodeValue::Image(_) => {}
-        NodeValue::Strong => style.strong = true,
-        NodeValue::Emph => style.emph = true,
+        NodeValue::Strong(_) => style.strong = true,
+        NodeValue::Emph(_) => style.emph = true,
         // Dropping it changed what a sentence meant, not just how it looked.
-        NodeValue::Strikethrough => style.strikethrough = true,
+        NodeValue::Strikethrough(_) => style.strikethrough = true,
         NodeValue::Link(link) => style.link = Some(link.url.clone()),
         _ => {}
     }
@@ -1160,7 +1161,7 @@ fn underlined_heading(section: &str) -> Option<(&str, &str)> {
     let root = parse_document(&arena, section, &Options::default());
     let first = root.first_child()?;
     let data = first.data.borrow();
-    let NodeValue::Heading(heading) = data.value else {
+    let NodeValue::Heading(heading) = &data.value else {
         return None;
     };
     // Only `h1` and `h2` are underlined, matching the stylesheet.
@@ -1782,7 +1783,7 @@ impl eframe::App for MdrApp {
                     }
 
                     // Render the section
-                    let anchor_id = ui.id().with(format!("section_{i}"));
+                    let anchor_id = ui.scope_id().with(format!("section_{i}"));
                     ui.push_id(anchor_id, |ui| {
                         // `web` draws a rule under `h1` and `h2`
                         // (`border-bottom` in the stylesheet). The viewer has no

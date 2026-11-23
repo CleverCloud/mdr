@@ -1,4 +1,6 @@
-use notify_debouncer_mini::{DebouncedEventKind, Debouncer, new_debouncer};
+use notify_debouncer_mini::{
+    DebounceEventResult, DebouncedEventBatch, DebouncedEventKind, Debouncer, new_debouncer,
+};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -46,14 +48,23 @@ pub fn watch_file(path: &Path) -> Result<Watch, Box<dyn std::error::Error>> {
 
     let mut debouncer = new_debouncer(
         Duration::from_millis(300),
-        move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-            if let Ok(events) = res {
-                for event in &events {
-                    if event.kind == DebouncedEventKind::Any && event.path == path {
-                        let _ = tx.send(());
-                        return;
+        move |res: DebounceEventResult| {
+            match res {
+                Ok(DebouncedEventBatch::Events(events)) => {
+                    for event in &events {
+                        if event.kind == DebouncedEventKind::Any && event.path == path {
+                            let _ = tx.send(());
+                            return;
+                        }
                     }
                 }
+                // The watcher lost events. Re-read the document: a reload that
+                // finds nothing changed is cheaper than missing an edit.
+                Ok(DebouncedEventBatch::Rescan) => {
+                    let _ = tx.send(());
+                }
+                Ok(_) => {}
+                Err(_) => {}
             }
         },
     )?;

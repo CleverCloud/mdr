@@ -1739,7 +1739,7 @@ impl MdRenderer {
                 self.list_item(node, ctx, marker.to_string());
             }
 
-            NodeValue::ThematicBreak => {
+            NodeValue::ThematicBreak(_) => {
                 self.push(
                     ctx,
                     vec![Span::styled(
@@ -1810,8 +1810,9 @@ impl MdRenderer {
         // First pass: render every cell, and measure the columns (#59).
         let mut rows: Vec<(bool, Vec<Vec<Span<'static>>>)> = Vec::new();
         for row in node.children() {
-            let NodeValue::TableRow(is_header) = row.data.borrow().value else {
-                continue;
+            let is_header = match &row.data.borrow().value {
+                NodeValue::TableRow(meta) => meta.header,
+                _ => continue,
             };
             let cells: Vec<Vec<Span<'static>>> = row
                 .children()
@@ -2003,9 +2004,9 @@ fn inline_into<'a>(node: &'a AstNode<'a>, style: Style, out: &mut Vec<Span<'stat
             code.literal,
             style.fg(Color::Green).bg(Color::Rgb(40, 40, 40)),
         )),
-        NodeValue::Emph => descend(node, style.italic(), out),
-        NodeValue::Strong => descend(node, style.bold(), out),
-        NodeValue::Strikethrough => descend(node, style.crossed_out(), out),
+        NodeValue::Emph(_) => descend(node, style.italic(), out),
+        NodeValue::Strong(_) => descend(node, style.bold(), out),
+        NodeValue::Strikethrough(_) => descend(node, style.crossed_out(), out),
         NodeValue::Underline => descend(node, style.underlined(), out),
         NodeValue::SoftBreak | NodeValue::LineBreak => out.push(Span::styled(" ", style)),
         NodeValue::Link(_) => descend(node, style.fg(Color::Blue).underlined(), out),
