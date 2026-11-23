@@ -19,6 +19,10 @@ struct Cli {
 
     // Declared in alphabetical order, which is the order clap prints them in;
     // `--help` and `--version` are appended after these by clap itself.
+    /// With --export: let the page connect to the origin serving it, for live reload
+    #[arg(long, requires = "export")]
+    allow_connect: bool,
+
     /// Rendering backend: auto, gui, tui, web
     #[arg(short, long, value_parser = parse_backend)]
     backend: Option<String>,
@@ -26,6 +30,10 @@ struct Cli {
     /// Path to the config file (must exist; -v prints the one in use)
     #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Print the rendered page to stdout instead of opening a window
+    #[arg(long, value_name = "FORMAT", value_parser = ["html"])]
+    export: Option<String>,
 
     /// List available backends and exit
     #[arg(short, long)]
@@ -430,6 +438,38 @@ fn run(tmp_file: &mut Option<PathBuf>) -> i32 {
             }
         }
     };
+
+    // `--export` renders through the web backend's HTML pipeline but opens no
+    // window, so an editor or another tool can host the page itself. `html` is
+    // the only format, and the argument is how a later one would be asked for.
+    if cli.export.is_some() {
+        #[cfg(feature = "webview-backend")]
+        {
+            return match backend::webview::export(&file, cli.allow_connect) {
+                Ok(page) => {
+                    let mut stdout = io::stdout().lock();
+                    // A reader that hangs up early is not an error worth reporting.
+                    let _ = stdout
+                        .write_all(page.as_bytes())
+                        .and_then(|()| stdout.flush());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            };
+        }
+        #[cfg(not(feature = "webview-backend"))]
+        {
+            let _ = cli.allow_connect; // only the web backend has a page to relax
+            eprintln!(
+                "Error: --export needs the web backend. Rebuild with --features {}",
+                backend_feature("web")
+            );
+            return 1;
+        }
+    }
 
     let backend_str = cli
         .backend
